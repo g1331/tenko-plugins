@@ -1,0 +1,28 @@
+# 官方插件的工作区：每个插件在 plugins/<插件 ID>/ 下，各自是一个独立发布的 PyPI 包。
+# 这里只放共用的开发依赖，不发布。
+[tool.uv.workspace]
+members = ["plugins/*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1",
+    "ruff",
+    # 测试加载真实的宿主；升级宿主时改这里的标签。
+    "tenko @ git+https://github.com/g1331/tenko@v4.0.0-rc22",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["plugins"]
+asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

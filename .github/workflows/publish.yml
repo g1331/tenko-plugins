@@ -1,0 +1,63 @@
+name: Publish
+
+# 推送 <插件 ID>-v<版本> 标签（如 repeater-v0.1.0）时，把 plugins/<插件 ID> 发布到 PyPI。
+# 使用 PyPI Trusted Publishing，不保存任何 token。每个插件包在 PyPI 上各配一个 publisher：
+# 所有者 g1331、仓库 tenko-plugins、工作流 publish.yml、环境 pypi。
+on:
+  push:
+    tags:
+      - "*-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Resolve the plugin and check its version
+        id: plugin
+        run: |
+          plugin="${GITHUB_REF_NAME%-v*}"
+          tag_version="${GITHUB_REF_NAME##*-v}"
+          path="plugins/${plugin}"
+          if [ ! -f "${path}/pyproject.toml" ]; then
+            echo "::error::标签 ${GITHUB_REF_NAME} 对应的 ${path} 不存在"
+            exit 1
+          fi
+          version=$(python3 -c "import tomllib, sys; print(tomllib.load(open(sys.argv[1], 'rb'))['project']['version'])" "${path}/pyproject.toml")
+          if [ "$version" != "$tag_version" ]; then
+            echo "::error::标签 ${GITHUB_REF_NAME} 与 ${path} 的版本 ${version} 不一致"
+            exit 1
+          fi
+          echo "path=${path}" >> "$GITHUB_OUTPUT"
+
+      - name: Build sdist and wheel
+        run: uv build "${{ steps.plugin.outputs.path }}" --out-dir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
