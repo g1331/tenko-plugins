@@ -36,3 +36,7 @@ Tenko： 草
 | `cooldown_seconds` | `600` | 同一个群出声后的冷却时间 |
 | `max_length` | `100` | 超过这个字数的消息不参与 |
 | `interrupt_lines` | `["打断！", "不许复读！", "复读到此为止~"]` | 无法打乱字序时随机挑一句 |
+
+## 图标
+
+`icon.png` 由 [Phosphor Icons](https://phosphoricons.com) 的 `repeat`（fill）渲染而来，Phosphor Icons 以 MIT 许可证发布。
