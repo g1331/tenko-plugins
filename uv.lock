@@ -1168,7 +1168,7 @@ source = { git = "https://github.com/g1331/tenko?subdirectory=packages%2Ftenko-a
 
 [[package]]
 name = "tenko-plugin-repeater"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "plugins/repeater" }
 dependencies = [
     { name = "aiohttp" },

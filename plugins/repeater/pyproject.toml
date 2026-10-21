@@ -1,10 +1,17 @@
 [project]
 name = "tenko-plugin-repeater"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tenko 复读机：群友复读时偶尔跟一句，偶尔打断一下"
 readme = "README.md"
 license = "GPL-3.0-only"
 requires-python = ">=3.11,<3.14"
+keywords = ["tenko", "tenko-plugin", "qq", "repeater"]
+classifiers = [
+    "Framework :: AsyncIO",
+    "Natural Language :: Chinese (Simplified)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Chat",
+]
 dependencies = [
     "tenko-api>=0.2,<0.3",
     "aiohttp>=3.9",

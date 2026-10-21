@@ -43,7 +43,7 @@ class RepeaterConfig(BasicConfModel):
 plugin.metadata(
     "复读机",
     author=["13"],
-    version="0.1.0",
+    version="0.1.1",
     description="群友复读时偶尔跟一句，偶尔打断一下。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/repeater",
