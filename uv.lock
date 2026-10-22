@@ -12,7 +12,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=1" },
     { name = "ruff" },
-    { name = "tenko", git = "https://github.com/g1331/tenko?rev=371666578a7e8ccdb006f62fda55ac5388823477" },
+    { name = "tenko", git = "https://github.com/g1331/tenko?rev=v4.0.0-rc24" },
 ]
 
 [[package]]
@@ -1131,8 +1131,8 @@ wheels = [
 
 [[package]]
 name = "tenko"
-version = "4.0.0rc23"
-source = { git = "https://github.com/g1331/tenko?rev=371666578a7e8ccdb006f62fda55ac5388823477#371666578a7e8ccdb006f62fda55ac5388823477" }
+version = "4.0.0rc24"
+source = { git = "https://github.com/g1331/tenko?rev=v4.0.0-rc24#9bb85af0b0b1cbabae69ed16347367245ee8c7d6" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
@@ -1164,7 +1164,7 @@ dependencies = [
 [[package]]
 name = "tenko-api"
 version = "0.3.0"
-source = { git = "https://github.com/g1331/tenko?subdirectory=packages%2Ftenko-api&rev=371666578a7e8ccdb006f62fda55ac5388823477#371666578a7e8ccdb006f62fda55ac5388823477" }
+source = { git = "https://github.com/g1331/tenko?subdirectory=packages%2Ftenko-api&rev=v4.0.0-rc24#9bb85af0b0b1cbabae69ed16347367245ee8c7d6" }
 
 [[package]]
 name = "tenko-plugin-repeater"
