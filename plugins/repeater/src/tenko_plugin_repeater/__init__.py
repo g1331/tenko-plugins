@@ -14,7 +14,6 @@ from loguru import logger
 from satori import Emoji, Image, Text
 from satori.element import Custom, Message
 from tenko_api.accounts import online_accounts
-from tenko_api.context import context_from_session
 from tenko_api.features import declare, feature_required
 from tenko_api.perm import Permission
 
@@ -43,7 +42,7 @@ class RepeaterConfig(BasicConfModel):
 plugin.metadata(
     "复读机",
     author=["13"],
-    version="0.1.1",
+    version="0.2.0",
     description="群友复读时偶尔跟一句，偶尔打断一下。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/repeater",
@@ -139,17 +138,17 @@ def parse(elements: list, user: str, max_length: int) -> Said | None:
 @plugin.listen(MessageCreatedEvent)
 @feature_required()
 async def on_message(session: Session[MessageCreatedEvent]):
-    ctx = context_from_session(session)
-    if ctx.chat_type != "group":
+    if session.event.guild is None:  # 只在群聊复读
         return
+    user_id, group_id = session.user.id, session.event.channel.id
     # 同一个群里的其他 Tenko 账号发的消息不算群友复读。
-    if ctx.user_id in {str(account.self_id) for account in online_accounts()}:
+    if user_id in {str(account.self_id) for account in online_accounts()}:
         return
-    said = parse(list(session.event.message.message), ctx.user_id, config.max_length)
+    said = parse(list(session.event.message.message), user_id, config.max_length)
     if said is None:
-        repeater.forget(ctx.channel_id)
+        repeater.forget(group_id)
         return
-    reply = await repeater.feed(ctx.channel_id, said)
+    reply = await repeater.feed(group_id, said)
     if reply:
         # 复读不引用原消息：宿主只给“对触发消息的回复”补引用，包在独立的 <message> 里就会跳过。
         await session.send([Message(content=reply)])

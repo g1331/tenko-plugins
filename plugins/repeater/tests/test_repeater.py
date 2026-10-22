@@ -135,7 +135,8 @@ async def test_listener_sends_the_repeat_to_the_group(module, monkeypatch):
             message=MessageObject(id=f"m{user}", content="草"),
         )
         return SimpleNamespace(
-            event=SimpleNamespace(_origin=event, message=event.message),
+            event=event,
+            user=event.user,
             send=AsyncMock(side_effect=sends.append),
         )
 

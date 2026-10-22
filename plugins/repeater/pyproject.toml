@@ -1,6 +1,6 @@
 [project]
 name = "tenko-plugin-repeater"
-version = "0.1.1"
+version = "0.2.0"
 description = "Tenko 复读机：群友复读时偶尔跟一句，偶尔打断一下"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -13,7 +13,7 @@ classifiers = [
     "Topic :: Communications :: Chat",
 ]
 dependencies = [
-    "tenko-api>=0.2,<0.3",
+    "tenko-api>=0.3,<0.4",
     "aiohttp>=3.9",
 ]
 
