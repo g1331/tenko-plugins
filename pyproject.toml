@@ -9,7 +9,8 @@ dev = [
     "pytest-asyncio>=1",
     "ruff",
     # 测试加载真实的宿主；升级宿主时改这里的标签。
-    "tenko @ git+https://github.com/g1331/tenko@v4.0.0-rc22",
+    # shortcut: 暂时固定到带 tenko-api 0.3.0 的 main 提交，v4.0.0-rc24 发布后改回标签。
+    "tenko @ git+https://github.com/g1331/tenko@371666578a7e8ccdb006f62fda55ac5388823477",
 ]
 
 [tool.uv]
