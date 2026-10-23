@@ -204,7 +204,8 @@ async def test_wake_word_only_counts_in_typed_text(module, fake_llm):
     assert len(fake_llm.requests) == 1
 
 
-async def test_follow_up_every_two_messages_until_half_tired(module, fake_llm):
+async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "stamina", 6)
     fake_llm.replies.append([{"text": "我觉得海里更好玩"}])
     await feed(module, session([At("42"), Text(" 你喜欢哪")], message_id="m0"))
 
@@ -216,8 +217,8 @@ async def test_follow_up_every_two_messages_until_half_tired(module, fake_llm):
             await task
 
     hints = [messages[-1]["content"] for messages, _ in fake_llm.requests[1:]]
-    # 精力 10，说到第 5 句（1 句被叫 + 4 句跟聊）就累了，不再主动开口
-    assert hints == [module.FOLLOW_HINT] * 4
+    # 精力 6，说满 4 句（1 句被叫 + 3 句跟聊）用掉三分之二，不再主动开口
+    assert hints == [module.FOLLOW_HINT] * 3
     assert not any(force for _, force in fake_llm.requests[1:])
 
 

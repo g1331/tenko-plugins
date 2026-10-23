@@ -67,9 +67,9 @@ class PersonaChatConfig(BasicConfModel):
     """没在聊天时主动插过一次话后，这么久之内不再这样插话（被叫到、跟聊不受影响）。"""
     user_cooldown_seconds: int = 5
     """同一个人叫 bot 的最短间隔。"""
-    stamina: int = 10
-    """精力：bot 10 分钟内说过的话达到一半就不再主动开口，达到这个数后被叫到也由它决定理不理，
-    达到 1.5 倍后完全不理；不说话就慢慢恢复。0 不限。"""
+    stamina: int = 15
+    """精力：10 分钟内说这么多句、或 1 小时内说两倍这么多句就累了。用掉三分之二后不再主动开口，
+    累了以后被叫到也由它决定理不理，到 1.5 倍完全不理；不说话就慢慢恢复。0 不限。"""
     vision_images: int = 3
     """把最近这么多张群友发的图片低清晰度发给模型看，每张约数百 token；0 只告诉模型“[图片]”。"""
     max_reply_chars: int = 120
@@ -222,16 +222,15 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         quick = now - conversation.last_reply_at < _QUICK_SECONDS
         streak = _streaks.get((key, user_id), 0) + 1 if quick else 0
         _streaks[(key, user_id)] = streak
-        fatigue = conversation.fatigue(now)
-        if streak >= _STREAK_MUTE or (config.stamina and fatigue * 2 >= 3 * config.stamina):
+        load = _load(conversation, now)
+        if streak >= _STREAK_MUTE or load >= 1.5:
             return
-        tired = config.stamina and fatigue >= config.stamina
-        mood = "again" if streak >= _STREAK_LOOSE else "tired" if tired else "call"
+        mood = "again" if streak >= _STREAK_LOOSE else "tired" if load >= 1 else "call"
         await respond(session, conversation, line, force=mood == "call", mood=mood)
     elif not private and key not in _waiters:
         now = time.monotonic()
-        # 精力用掉一半后不再主动开口，只在被叫到时说话。
-        fresh = not config.stamina or conversation.fatigue(now) * 2 < config.stamina
+        # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
+        fresh = _load(conversation, now) * 3 < 2
         follow = (
             fresh
             and now - conversation.last_reply_at < config.follow_seconds
@@ -244,6 +243,21 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         )
         if follow or cold:
             _waiters[key] = asyncio.create_task(_wait_quiet(key, session, conversation, follow))
+
+
+def _load(conversation: Conversation, now: float) -> float:
+    """用掉的精力比例，1 是累了。
+
+    按日志里活跃群友的说话量定的：10 分钟里能连说十几句，一小时也就二三十句，
+    所以短窗口按 ``stamina``、1 小时按两倍算，取更累的那个。
+    """
+
+    if not config.stamina:
+        return 0.0
+    return max(
+        conversation.fatigue(now, 600) / config.stamina,
+        conversation.fatigue(now, 3600) / (2 * config.stamina),
+    )
 
 
 async def _wait_quiet(key: str, session: Session, conversation: Conversation, follow: bool) -> None:
