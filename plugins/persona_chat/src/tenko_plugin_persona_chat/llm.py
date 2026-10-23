@@ -15,7 +15,10 @@ SEND_MESSAGE = {
         "parameters": {
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "要发的话，一到两句"},
+                "text": {
+                    "type": "string",
+                    "description": "要发的话；想分几条连着发就换行，每行一条，最多三条",
+                },
                 "reply_to": {
                     "type": "integer",
                     "description": "要引用的消息编号，例如 3；不引用就省略",

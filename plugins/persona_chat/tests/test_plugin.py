@@ -26,6 +26,7 @@ def fake_llm(module, monkeypatch):
     module.conversations.clear()
     module._cooldowns.clear()
     module._streaks.clear()
+    monkeypatch.setattr(module, "_typing_delay", lambda text: 0)
     for task in module._waiters.values():
         task.cancel()
     module._waiters.clear()
@@ -238,6 +239,27 @@ async def test_tired_bot_may_ignore_calls_then_stops(module, fake_llm, monkeypat
     # 说了 4 句后累了：不再强制回复；说满 6 句后完全不理
     assert [force for _, force in fake_llm.requests] == [True] * 4 + [False] * 2
     assert "有点累了" in fake_llm.requests[4][0][-1]["content"]
+
+
+async def test_lines_are_sent_as_separate_bubbles(module, fake_llm):
+    await feed(module, session([Text("我抽到了")], user="7", message_id="m1"))
+    fake_llm.replies.append([{"text": "真的假的\n\n晒一下\n我不信\n多的", "mention": 1}])
+    s = session([At("42"), Text(" 你看他")], message_id="m2")
+    await feed(module, s)
+
+    bubbles = [call.args[0][0].children for call in s.send.call_args_list]
+    assert [[getattr(c, "text", "@") for c in b] for b in bubbles] == [
+        ["@", " 真的假的"],
+        ["晒一下"],
+        ["我不信 多的"],  # 最多三条，多出来的并进最后一条
+    ]
+    conversation = module.conversations["group:100"]
+    assert len(conversation.spoken) == 1  # 一口气连发算一句话
+
+    fake_llm.replies.append([{"text": "嗯"}])
+    await feed(module, session([At("42"), Text(" 然后呢")], user="2", message_id="m3"))
+    assistant = [m for m in fake_llm.requests[-1][0] if m["role"] == "assistant"]
+    assert assistant == [{"role": "assistant", "content": "@群友7 真的假的\n晒一下\n我不信 多的"}]
 
 
 async def test_private_reply_is_not_quoted(module, fake_llm):

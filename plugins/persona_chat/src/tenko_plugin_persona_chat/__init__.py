@@ -36,7 +36,7 @@ from .chat import (
     build_messages,
     data_url,
     estimate_cost,
-    shape,
+    split,
     summary_messages,
 )
 from .persona import FOLLOW_HINT, PERSONA, UNPROMPTED_HINT, mention_hint
@@ -245,6 +245,12 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             _waiters[key] = asyncio.create_task(_wait_quiet(key, session, conversation, follow))
 
 
+def _typing_delay(text: str) -> float:
+    """连发下一条前停一下，像在打字：每秒约 6 个字，最多 3 秒。"""
+
+    return min(0.5 + len(text) / 6, 3.0)
+
+
 def _load(conversation: Conversation, now: float) -> float:
     """用掉的精力比例，1 是累了。
 
@@ -379,31 +385,41 @@ async def respond(
             usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
 
         sent = 0
+        group = session.event.guild is not None
         for arguments in calls[:_MAX_SENDS]:
-            text = shape(arguments["text"], max(config.max_reply_chars, 1))
-            if not text:
+            pieces = split(arguments["text"], max(config.max_reply_chars, 1))
+            if not pieces:
                 continue
             quoted = conversation.by_number(arguments.get("reply_to"))
             if quoted is None and sent == 0:
                 quoted = target
-            group = session.event.guild is not None
             # 按编号找人，模型只能 @ 窗口里说过话的群友，编不出 QQ 号也 @ 不了全体。
             called = conversation.by_number(arguments.get("mention"))
-            content: list = [Text(text)]
-            if group and called and called.speaker:
-                name, _, user = called.speaker.rpartition("(")
-                content = [At(user.rstrip(")"), name=name), Text(" " + text)]
-                text = f"@{name} {text}"
-            # 只在接的那条已经被后面的消息盖住时才引用，像真人一样大多直接说。
-            if group and quoted and quoted.message_id and conversation.buried(quoted):
-                message = [Quote(quoted.message_id), *content]
-            else:
-                # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
-                message = [Message(content=content)]
-            receipts = await session.send(message)
-            conversation.add(receipts[0].id if receipts else None, None, text)
-            conversation.spoken.append(time.monotonic())
-            sent += 1
+            for index, text in enumerate(pieces):
+                content: list = [Text(text)]
+                # @ 和引用只放在连发的第一条上。
+                if index == 0 and group and called and called.speaker:
+                    name, _, user = called.speaker.rpartition("(")
+                    content = [At(user.rstrip(")"), name=name), Text(" " + text)]
+                    text = f"@{name} {text}"
+                # 只在接的那条已经被后面的消息盖住时才引用，像真人一样大多直接说。
+                if (
+                    index == 0
+                    and group
+                    and quoted
+                    and quoted.message_id
+                    and conversation.buried(quoted)
+                ):
+                    message = [Quote(quoted.message_id), *content]
+                else:
+                    # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
+                    message = [Message(content=content)]
+                if sent:
+                    await asyncio.sleep(_typing_delay(text))
+                receipts = await session.send(message)
+                conversation.add(receipts[0].id if receipts else None, None, text)
+                sent += 1
+            conversation.spoken.append(time.monotonic())  # 一口气连发的几条算一句话
         if sent:
             conversation.last_reply_at = time.monotonic()
         if target is None and sent and not follow:

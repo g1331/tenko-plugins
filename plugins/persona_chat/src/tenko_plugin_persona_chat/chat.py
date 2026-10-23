@@ -145,7 +145,11 @@ def build_messages(
         # 像 QQ 一样，隔了一阵才标一次时间：省 token，标记由记录本身决定，不影响前缀缓存。
         gap, previous = line.at - previous, line.at
         if line.speaker is None:
-            messages.append({"role": "assistant", "content": line.text})
+            # 分几条连着发的话合成一条 assistant，保持一问一答交替。
+            if messages[-1]["role"] == "assistant":
+                messages[-1]["content"] += "\n" + line.text
+            else:
+                messages.append({"role": "assistant", "content": line.text})
             continue
         if messages[-1]["role"] != "user":
             messages.append({"role": "user", "content": []})
@@ -195,6 +199,15 @@ def data_url(data: bytes) -> str | None:
     if kind is None and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         kind = "webp"
     return kind and f"data:image/{kind};base64,{base64.b64encode(data).decode()}"
+
+
+def split(text: str, limit: int, most: int = 3) -> list[str]:
+    """按换行拆成至多 ``most`` 条分开发，多出来的并进最后一条；每条各自整形。"""
+
+    pieces = [piece for part in text.splitlines() if (piece := shape(part, limit))]
+    if len(pieces) > most:
+        pieces[most - 1 :] = [shape(" ".join(pieces[most - 1 :]), limit)]
+    return pieces
 
 
 def shape(text: str, limit: int) -> str:
