@@ -16,7 +16,7 @@ def untimed(text):
 
 @pytest.fixture
 def fake_llm(module, monkeypatch):
-    fake = SimpleNamespace(replies=[], requests=[])
+    fake = SimpleNamespace(replies=[], requests=[], roles={})
 
     async def chat(client, *, model, messages, force, max_tokens):
         fake.requests.append((messages, force))
@@ -27,6 +27,11 @@ def fake_llm(module, monkeypatch):
     module._cooldowns.clear()
     module._streaks.clear()
     monkeypatch.setattr(module, "_typing_delay", lambda text: 0)
+
+    async def get_user_perm(session):
+        return fake.roles.get(session.user.id, 0)
+
+    monkeypatch.setattr(module, "get_user_perm", get_user_perm)
     for task in module._waiters.values():
         task.cancel()
     module._waiters.clear()
@@ -40,7 +45,7 @@ def session(elements, *, user="1", message_id="m", group="100"):
         user=SimpleNamespace(id=user, nick=None, name=f"群友{user}"),
         account=SimpleNamespace(self_id="42"),
         event=SimpleNamespace(
-            guild=SimpleNamespace(id=group) if group else None,
+            guild=SimpleNamespace(id=group, name="测试群") if group else None,
             channel=SimpleNamespace(id=group or user),
             member=None,
             message=SimpleNamespace(id=message_id, message=elements),
@@ -66,7 +71,7 @@ async def test_mention_replies_without_quote_and_records_usage(module, fake_llm)
     await feed(module, s)
 
     ((messages, force),) = fake_llm.requests
-    assert force and untimed(messages[2]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
+    assert force and untimed(messages[3]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
     # 叫它的就是最新一条，直接说，不引用
     (sent,) = s.send.call_args.args[0]
     assert isinstance(sent, Message) and sent.children[0].text == "行，机票钱你出"
@@ -81,7 +86,7 @@ async def test_mention_of_another_tenko_account_counts(module, fake_llm, monkeyp
     await feed(module, session([At("43"), Text(" 在吗")], message_id="m1"))
 
     ((messages, force),) = fake_llm.requests
-    assert force and untimed(messages[2]["content"]) == "#1 [群友1(1)] @你 在吗"
+    assert force and untimed(messages[3]["content"]) == "#1 [群友1(1)] @你 在吗"
 
 
 async def test_replying_to_bot_triggers_and_cooldown_holds(module, fake_llm):
@@ -103,7 +108,7 @@ async def test_batch_lets_model_stay_silent_and_commands_are_context_only(module
 
     ((messages, force),) = fake_llm.requests
     assert not force
-    assert messages[2]["content"].endswith("#4 [群友1(1)] @你 /猜词")
+    assert messages[3]["content"].endswith("#4 [群友1(1)] @你 /猜词")
     assert module.conversations["group:100"].unseen == 0
 
 
@@ -260,6 +265,18 @@ async def test_lines_are_sent_as_separate_bubbles(module, fake_llm):
     await feed(module, session([At("42"), Text(" 然后呢")], user="2", message_id="m3"))
     assistant = [m for m in fake_llm.requests[-1][0] if m["role"] == "assistant"]
     assert assistant == [{"role": "assistant", "content": "@群友7 真的假的\n晒一下\n我不信 多的"}]
+
+
+async def test_lines_carry_the_real_role_not_the_nickname(module, fake_llm):
+    fake_llm.roles["9"] = module.Permission.GroupOwner
+    await feed(module, session([Text("我是群主")], user="2", message_id="m1"))
+    await feed(module, session([At("42"), Text(" 他骗你")], user="9", message_id="m2"))
+
+    ((messages, _),) = fake_llm.requests
+    assert messages[2] == {"role": "system", "content": "你现在在 QQ 群「测试群」里。"}
+    assert (
+        untimed(messages[3]["content"]) == "#1 [群友2(2)] 我是群主\n#2 [群友9(9) 群主] @你 他骗你"
+    )
 
 
 async def test_private_reply_is_not_quoted(module, fake_llm):

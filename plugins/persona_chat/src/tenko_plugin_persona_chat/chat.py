@@ -27,6 +27,13 @@ class Line:
     images: tuple[str, ...] = ()  # 图片原地址
     pictures: list[str] | None = None  # 下载好的 data URL；None 表示还没下载
     at: float = 0.0  # 收到的时刻（Unix 时间）
+    role: str = ""  # 群身份，例如“群主”；普通成员为空
+
+    @property
+    def who(self) -> str:
+        """给模型看的发言人：昵称(QQ号)，有身份时跟在后面。"""
+
+        return f"{self.speaker} {self.role}" if self.role else f"{self.speaker}"
 
 
 @dataclass
@@ -39,6 +46,7 @@ class Conversation:
 
     size: int = 1000
     summary: str = ""
+    place: str = ""  # 在哪儿聊，例如“你现在在 QQ 群「车万」里。”
     lines: deque[Line] = field(init=False)
     next_number: int = 1
     unseen: int = 0  # 上次请求之后新进来的群友消息数
@@ -52,9 +60,14 @@ class Conversation:
         self.lines = deque(maxlen=self.size)
 
     def add(
-        self, message_id: str | None, speaker: str | None, text: str, images: tuple[str, ...] = ()
+        self,
+        message_id: str | None,
+        speaker: str | None,
+        text: str,
+        images: tuple[str, ...] = (),
+        role: str = "",
     ) -> Line:
-        line = Line(self.next_number, message_id, speaker, text, images, at=time.time())
+        line = Line(self.next_number, message_id, speaker, text, images, at=time.time(), role=role)
         self.next_number += 1
         self.lines.append(line)
         if speaker is not None:
@@ -119,7 +132,9 @@ class Conversation:
     def copy(self) -> Conversation:
         """沙盒用的副本：读得到当前窗口，写入不影响真实会话。"""
 
-        clone = Conversation(self.size, next_number=self.next_number, summary=self.summary)
+        clone = Conversation(
+            self.size, next_number=self.next_number, summary=self.summary, place=self.place
+        )
         clone.lines.extend(self.lines)
         return clone
 
@@ -138,6 +153,8 @@ def build_messages(
         {"role": "system", "content": persona},
         {"role": "system", "content": RULES},
     ]
+    if conversation.place:
+        messages.append({"role": "system", "content": conversation.place})
     if conversation.summary:
         memo = f"更早的聊天备忘（这些消息已经没有编号，不能 reply_to）：\n{conversation.summary}"
         messages.append({"role": "system", "content": memo})
@@ -154,7 +171,7 @@ def build_messages(
         if messages[-1]["role"] != "user":
             messages.append({"role": "user", "content": []})
         blocks = messages[-1]["content"]
-        text = f"#{line.number} [{line.speaker}] {line.text}"
+        text = f"#{line.number} [{line.who}] {line.text}"
         if gap >= _TIME_GAP:
             text = f"—— {datetime.fromtimestamp(line.at):%m-%d %H:%M} ——\n{text}"
         if blocks and blocks[-1]["type"] == "text":
@@ -181,7 +198,9 @@ def estimate_tokens(text: str) -> float:
 def summary_messages(summary: str, lines: list[Line]) -> list[dict[str, str]]:
     """把旧摘要和要并进去的记录交给模型，写一份新的备忘。"""
 
-    log = "\n".join(f"#{line.number} [{line.speaker or '你'}] {line.text}" for line in lines)
+    log = "\n".join(
+        f"#{line.number} [{line.who if line.speaker else '你'}] {line.text}" for line in lines
+    )
     old = f"之前的备忘：\n{summary}\n\n" if summary else ""
     return [
         {"role": "system", "content": SUMMARY_PROMPT},

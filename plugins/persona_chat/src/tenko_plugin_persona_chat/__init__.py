@@ -23,7 +23,7 @@ from satori.element import Message
 from tenko_api.accounts import online_accounts
 from tenko_api.features import declare, feature_required
 from tenko_api.messages import report_error
-from tenko_api.perm import Permission, require_perm
+from tenko_api.perm import Permission, get_user_perm, require_perm
 from tenko_api.sandbox import in_sandbox
 from tenko_api.storage import Store
 
@@ -102,6 +102,13 @@ _streaks: dict[tuple[str, str], int] = {}
 _waiters: dict[str, asyncio.Task[None]] = {}
 _reported: set[int] = set()
 _MAX_SENDS = 2
+# 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
+_ROLES = {
+    Permission.GroupAdmin: "群管理",
+    Permission.GroupOwner: "群主",
+    Permission.BotAdmin: "bot管理员",
+    Permission.Master: "bot主人",
+}
 _MAX_TOKENS = 300
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 _SUMMARY_TOKENS = 1000
@@ -202,6 +209,12 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         return
     key = _key(session)
     conversation = conversations.setdefault(key, Conversation())
+    guild = session.event.guild
+    # 群名放在规则后面，改名时才变，不影响前缀缓存。
+    if guild is None:
+        conversation.place = "你现在在和对方私聊。"
+    else:
+        conversation.place = f"你现在在 QQ 群「{guild.name or guild.id}」里。"
     if in_sandbox():
         conversation = conversation.copy()
     elements = list(session.event.message.message)
@@ -210,7 +223,8 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     spoken = "".join(e.text for e in elements if isinstance(e, Text))
     if not text:
         return
-    line = conversation.add(session.event.message.id, _speaker(session), text, images)
+    role = _ROLES.get(await get_user_perm(session), "")
+    line = conversation.add(session.event.message.id, _speaker(session), text, images, role)
     conversation.last_message_at = time.monotonic()
     # 命令也记进上下文（群里别的 bot 的游戏、群友的示范都靠它看懂），但不算在叫 bot。
     if text.lstrip("@你 ").startswith(_command_prefixes()):
