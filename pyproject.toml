@@ -9,7 +9,7 @@ dev = [
     "pytest-asyncio>=1",
     "ruff",
     # 测试加载真实的宿主；升级宿主时改这里的标签。
-    "tenko @ git+https://github.com/g1331/tenko@v4.0.0-rc24",
+    "tenko @ git+https://github.com/g1331/tenko@53e0a55bc83687661d1f5ed627caf11ffb6dd4aa",
 ]
 
 [tool.uv]

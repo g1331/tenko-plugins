@@ -15,7 +15,6 @@ from satori import Emoji, Image, Text
 from satori.element import Custom, Message
 from tenko_api.accounts import online_accounts
 from tenko_api.features import declare, feature_required
-from tenko_api.perm import Permission
 
 from .chain import Repeater, Said, Settings
 
@@ -42,7 +41,7 @@ class RepeaterConfig(BasicConfModel):
 plugin.metadata(
     "复读机",
     author=["13"],
-    version="0.2.0",
+    version="0.3.0",
     description="群友复读时偶尔跟一句，偶尔打断一下。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/repeater",
@@ -50,7 +49,7 @@ plugin.metadata(
     },
     config=RepeaterConfig,
 )
-declare(scope="group", default_enabled=True, level=Permission.ActiveGroup)
+declare(scope="group", default_enabled=True)
 
 config = plugin.get_config(RepeaterConfig)
 
