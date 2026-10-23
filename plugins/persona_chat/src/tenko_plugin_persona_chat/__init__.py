@@ -208,10 +208,13 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     text, at_me, reply_me, images = render(elements, conversation, self_ids)
     # 唤醒词只认群友亲手打的字：@ 一个叫“大肥鱼”的群友、引用它的消息都不算叫 bot。
     spoken = "".join(e.text for e in elements if isinstance(e, Text))
-    if not text or text.lstrip("@你 ").startswith(_command_prefixes()):
+    if not text:
         return
     line = conversation.add(session.event.message.id, _speaker(session), text, images)
     conversation.last_message_at = time.monotonic()
+    # 命令也记进上下文（群里别的 bot 的游戏、群友的示范都靠它看懂），但不算在叫 bot。
+    if text.lstrip("@你 ").startswith(_command_prefixes()):
+        return
 
     private = session.event.guild is None
     if private or at_me or reply_me or is_reply_me or any(w in spoken for w in config.wake_words):

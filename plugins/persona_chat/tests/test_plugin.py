@@ -95,15 +95,15 @@ async def test_replying_to_bot_triggers_and_cooldown_holds(module, fake_llm):
     assert fake_llm.requests[1][0][-2]["content"].endswith("[群友2(2)] 回复#2 没吃")
 
 
-async def test_batch_lets_model_stay_silent_and_skips_commands(module, fake_llm):
+async def test_batch_lets_model_stay_silent_and_commands_are_context_only(module, fake_llm):
     for i in range(3):
         await feed(module, session([Text(f"闲聊{i}")], user=str(i), message_id=f"m{i}"))
-    await feed(module, session([Text("/帮助")], message_id="cmd"))
+    await feed(module, session([At("42"), Text(" /猜词")], message_id="cmd"))  # @ 了也不触发
     await module._waiters["group:100"]
 
     ((messages, force),) = fake_llm.requests
     assert not force
-    assert "/帮助" not in messages[2]["content"]
+    assert messages[2]["content"].endswith("#4 [群友1(1)] @你 /猜词")
     assert module.conversations["group:100"].unseen == 0
 
 
