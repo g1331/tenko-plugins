@@ -1,5 +1,6 @@
 """纯逻辑；插件包只能在宿主加载后导入，所以经 module fixture 取子模块。"""
 
+import re
 from datetime import UTC, date, datetime
 
 import pytest
@@ -8,6 +9,12 @@ import pytest
 @pytest.fixture
 def chat(module):
     return module.chat
+
+
+def untimed(text):
+    """去掉开头的“—— 月-日 时:分 ——”时间标记。"""
+
+    return re.sub(r"^—— .+? ——\n", "", text)
 
 
 class MemoryStore:
@@ -39,7 +46,7 @@ def test_messages_keep_fixed_prefix_and_merge_consecutive_lines(chat):
         "system",
     ]
     assert messages[0]["content"] == "人设"
-    assert messages[2]["content"] == "#2 [乙(2)] 大肥鱼在吗"
+    assert untimed(messages[2]["content"]) == "#2 [乙(2)] 大肥鱼在吗"
     assert messages[4]["content"] == "#4 [甲(1)] 没饭"
     assert messages[-1]["content"] == "提示"
     assert conversation.unseen == 3  # bot 自己的话不计数
@@ -89,7 +96,9 @@ def test_recent_pictures_follow_their_line_within_budget(chat):
 
     # 预算 2 张：#2 的两张跟在它后面，更早的 #1 只剩文字
     assert [b["type"] for b in user["content"]] == ["text", "image_url", "image_url", "text"]
-    assert user["content"][0]["text"] == "#1 [甲(1)] [图片]\n#2 [乙(2)] 看这个 [图片] [图片]"
+    assert (
+        untimed(user["content"][0]["text"]) == "#1 [甲(1)] [图片]\n#2 [乙(2)] 看这个 [图片] [图片]"
+    )
     assert user["content"][1]["image_url"] == {"url": "data:u2", "detail": "low"}
     assert old not in conversation.with_images(2)
     assert isinstance(chat.build_messages("人设", conversation, "提示")[2]["content"], str)
@@ -115,4 +124,15 @@ def test_compress_keeps_recent_lines_and_puts_memo_after_rules(chat):
     assert conversation.lines[0].number == 20
     assert messages[2] == {"role": "system", "content": messages[2]["content"]}
     assert messages[2]["content"].endswith("甲很能说")
-    assert messages[3]["content"].startswith("#20 ")
+    assert untimed(messages[3]["content"]).startswith("#20 ")
+
+
+def test_time_is_marked_only_after_a_pause(chat):
+    conversation = chat.Conversation()
+    for at in (0, 100, 1000):
+        conversation.add(f"m{at}", "甲(1)", "嗯").at = datetime(2026, 10, 24, 1, 0).timestamp() + at
+
+    text = chat.build_messages("人设", conversation, "提示")[2]["content"]
+    assert text == (
+        "—— 10-24 01:00 ——\n#1 [甲(1)] 嗯\n#2 [甲(1)] 嗯\n—— 10-24 01:16 ——\n#3 [甲(1)] 嗯"
+    )

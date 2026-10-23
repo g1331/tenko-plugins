@@ -1,3 +1,4 @@
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -5,6 +6,12 @@ import httpx
 import pytest
 from satori import At, Author, Image, Quote, Text
 from satori.element import Message
+
+
+def untimed(text):
+    """去掉开头的“—— 月-日 时:分 ——”时间标记。"""
+
+    return re.sub(r"^—— .+? ——\n", "", text)
 
 
 @pytest.fixture
@@ -58,7 +65,7 @@ async def test_mention_replies_without_quote_and_records_usage(module, fake_llm)
     await feed(module, s)
 
     ((messages, force),) = fake_llm.requests
-    assert force and messages[2]["content"] == "#1 [群友1(1)] @你 去吃火锅"
+    assert force and untimed(messages[2]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
     # 叫它的就是最新一条，直接说，不引用
     (sent,) = s.send.call_args.args[0]
     assert isinstance(sent, Message) and sent.children[0].text == "行，机票钱你出"
@@ -73,7 +80,7 @@ async def test_mention_of_another_tenko_account_counts(module, fake_llm, monkeyp
     await feed(module, session([At("43"), Text(" 在吗")], message_id="m1"))
 
     ((messages, force),) = fake_llm.requests
-    assert force and messages[2]["content"] == "#1 [群友1(1)] @你 在吗"
+    assert force and untimed(messages[2]["content"]) == "#1 [群友1(1)] @你 在吗"
 
 
 async def test_replying_to_bot_triggers_and_cooldown_holds(module, fake_llm):
@@ -218,7 +225,7 @@ async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm,
 
     hints = [messages[-1]["content"] for messages, _ in fake_llm.requests[1:]]
     # 精力 6，说满 4 句（1 句被叫 + 3 句跟聊）用掉三分之二，不再主动开口
-    assert hints == [module.FOLLOW_HINT] * 3
+    assert len(hints) == 3 and all(h.endswith(module.FOLLOW_HINT) for h in hints)
     assert not any(force for _, force in fake_llm.requests[1:])
 
 

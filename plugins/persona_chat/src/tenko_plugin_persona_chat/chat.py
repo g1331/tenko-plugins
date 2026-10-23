@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -13,6 +14,7 @@ from typing import Any
 from .persona import RULES, SUMMARY_PROMPT
 
 GLOBAL = "*"
+_TIME_GAP = 300
 _SENTENCE_ENDS = "。！？!?…~～"
 
 
@@ -24,6 +26,7 @@ class Line:
     text: str
     images: tuple[str, ...] = ()  # 图片原地址
     pictures: list[str] | None = None  # 下载好的 data URL；None 表示还没下载
+    at: float = 0.0  # 收到的时刻（Unix 时间）
 
 
 @dataclass
@@ -51,7 +54,7 @@ class Conversation:
     def add(
         self, message_id: str | None, speaker: str | None, text: str, images: tuple[str, ...] = ()
     ) -> Line:
-        line = Line(self.next_number, message_id, speaker, text, images)
+        line = Line(self.next_number, message_id, speaker, text, images, at=time.time())
         self.next_number += 1
         self.lines.append(line)
         if speaker is not None:
@@ -130,6 +133,7 @@ def build_messages(
     """
 
     shown = {line.number for line in conversation.with_images(images)}
+    previous = 0.0
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": persona},
         {"role": "system", "content": RULES},
@@ -138,6 +142,8 @@ def build_messages(
         memo = f"更早的聊天备忘（这些消息已经没有编号，不能 reply_to）：\n{conversation.summary}"
         messages.append({"role": "system", "content": memo})
     for line in conversation.lines:
+        # 像 QQ 一样，隔了一阵才标一次时间：省 token，标记由记录本身决定，不影响前缀缓存。
+        gap, previous = line.at - previous, line.at
         if line.speaker is None:
             messages.append({"role": "assistant", "content": line.text})
             continue
@@ -145,6 +151,8 @@ def build_messages(
             messages.append({"role": "user", "content": []})
         blocks = messages[-1]["content"]
         text = f"#{line.number} [{line.speaker}] {line.text}"
+        if gap >= _TIME_GAP:
+            text = f"—— {datetime.fromtimestamp(line.at):%m-%d %H:%M} ——\n{text}"
         if blocks and blocks[-1]["type"] == "text":
             blocks[-1]["text"] += "\n" + text
         else:

@@ -357,6 +357,9 @@ async def respond(
             hint = mention_hint(target.number, mood)
         else:
             hint = FOLLOW_HINT if follow else UNPROMPTED_HINT
+        now = datetime.now()
+        weekday = "一二三四五六日"[now.weekday()]
+        hint = f"现在是 {now:%m-%d %H:%M}（周{weekday}）。{hint}"
         conversation.unseen = 0
         try:
             calls, usage = await _ask(conversation, hint, force=force)
