@@ -6,6 +6,7 @@ PyPI 的包，并收录在 [Tenko 插件目录](https://github.com/g1331/tenko-r
 | 插件 | 包名 | 说明 |
 | --- | --- | --- |
 | [复读机](plugins/repeater) | `tenko-plugin-repeater` | 群友复读时偶尔跟一句，偶尔打断一下 |
+| [AI群友](plugins/persona_chat) | `tenko-plugin-persona-chat` | 接入 DeepSeek，用人设口吻陪群友聊天，内置“大肥鱼” |
 
 ## 安装
 
