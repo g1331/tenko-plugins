@@ -532,7 +532,7 @@ async def respond(
             hint = FOLLOW_HINT if follow else UNPROMPTED_HINT
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
-        hint = f"现在是 {now:%m-%d %H:%M}（周{weekday}）。{hint}"
+        hint = f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{hint}"
         conversation.unseen = 0
         usages: list[dict] = []
 
