@@ -426,6 +426,17 @@ async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(
     assert s.send.called
 
 
+async def test_typed_sticker_words_become_the_sticker(module, fake_llm):
+    module.stickers.add("得加钱", "被使唤时发", GIF, "abc.gif")
+    fake_llm.replies.append([{"text": "周报？\n得加钱哦~\n得加钱也不干"}])
+    s = session([At("42"), Text(" 写周报")], message_id="m1")
+    await feed(module, s)
+
+    first, second, third = (call.args[0][0] for call in s.send.call_args_list)
+    assert [type(c) for c in second.children] == [Image]  # 整条就是图上的字
+    assert str(third.children[0]) == "得加钱也不干"  # 还有别的话就照常发字
+
+
 async def test_sticker_falls_back_when_onebot_hands_back_an_error(module, fake_llm):
     module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
 

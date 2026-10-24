@@ -59,7 +59,11 @@ SAVE_STICKER = {
                 "name": {"type": "string", "description": "给它起的名字，2~8 个字，例如“猫猫震惊”"},
                 "mood": {
                     "type": "string",
-                    "description": "适合在什么心情或场合发，例如“吃惊、无语”",
+                    "description": (
+                        "60 字以内的备注：图上写的字、画的是什么、背后的梗"
+                        "（只写聊天里看得出或你确实知道的），"
+                        "以及什么时候发，例如“猫瞪大眼「啊？」；听到离谱的事、被吓到时发”"
+                    ),
                 },
             },
             "required": ["number", "name", "mood"],

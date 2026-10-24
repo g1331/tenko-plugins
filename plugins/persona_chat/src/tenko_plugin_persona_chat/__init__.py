@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import time
 from contextvars import ContextVar
 from datetime import datetime
@@ -600,9 +601,19 @@ def _pick_sticker(
 
     名字不在收藏里（模型编的）、最近在这儿发过，或这次已经发过一张，都不发。“最近”按收藏多少定：
     每张算 1 分钟，最长半小时，收藏少时才不至于发过一两张就没得挑。
+    一整条正好是某张收藏的名字（模型把图上的字打了出来，如“得加钱！”）时，改发那张图。
     """
 
     window = min(1800, 60 * len(stickers.index()))
+    if allowed and not TOKEN.search(text):
+        bare = _bare(text)
+        for name in stickers.index():
+            if (
+                _bare(name) == bare
+                and stickers.path(name)
+                and not conversation.sent_recently(f"[表情:{name}]", window)
+            ):
+                return "", name, ""
     chosen: str | None = None
     head = text
     for match in TOKEN.finditer(text):
@@ -619,6 +630,12 @@ def _pick_sticker(
     if chosen is None:
         return TOKEN.sub("", text).strip(), None, ""
     return TOKEN.sub("", head).strip(), chosen, TOKEN.sub("", tail).strip()
+
+
+def _bare(text: str) -> str:
+    """去掉标点、空白和句尾语气词，只比字面。"""
+
+    return re.sub(r"[\W_]+", "", text).rstrip("哦啊呀啦嘛").lower()
 
 
 def _sticker_url(name: str) -> str:

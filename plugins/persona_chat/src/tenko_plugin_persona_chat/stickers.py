@@ -47,7 +47,7 @@ class Stickers:
     def add(self, name: str, mood: str, data: bytes, qq_file: str) -> str | None:
         """收进一张，返回最终的名字；名字不合法、格式不认识或已经收过就返回 ``None``。"""
 
-        name, mood = _clean(name, 12), _clean(mood, 20, r"[\s\[\]]+")
+        name, mood = _clean(name, 12), _clean(mood, 60, r"[\s\[\]]+")
         kind = next((k for magic, k in _KINDS.items() if data.startswith(magic)), None)
         if kind is None and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
             kind = "webp"
@@ -103,4 +103,4 @@ class Stickers:
         if not index:
             return "你的表情包收藏还是空的。"
         items = "\n".join(f"{name}：{s['mood']}" for name, s in index.items())
-        return f"你收藏的表情包（名字：适合的场合）：\n{items}"
+        return f"你收藏的表情包（名字：图上的字、梗和什么时候发）：\n{items}"
