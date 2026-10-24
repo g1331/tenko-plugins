@@ -56,6 +56,7 @@ from .persona import (
     PICK_STICKER_PROMPT,
     SHORT_HINT,
     UNPROMPTED_HINT,
+    answer_hint,
     mention_hint,
     search_hint,
 )
@@ -433,15 +434,24 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     if not text:
         return
     private = session.event.guild is None
+    speaker = _speaker(session)
+    # 名字和她像的别人的号多半是另一个 AI：引用她、提到名字都是它在自说自话，只有 @ 她才算叫她，
+    # 它的话也不催她接话，免得两个 AI 你一句我一句刷屏。
+    lookalike = _lookalike(speaker)
     calling = (
-        private or at_me or reply_me or is_reply_me or any(w in spoken for w in config.wake_words)
+        private
+        or at_me
+        or (
+            not lookalike
+            and (reply_me or is_reply_me or any(w in spoken for w in config.wake_words))
+        )
     )
     # 叫她时带的收藏表情包也给她看图：多半是要她看这张，光凭备注会认错。
     if calling:
         images += known
     role = _ROLES.get(await get_user_perm(session), "")
     line = conversation.add(
-        session.event.message.id, _speaker(session), text, images, role, sticker
+        session.event.message.id, speaker, text, images, role, sticker, counted=not lookalike
     )
     conversation.last_message_at = time.monotonic()
     _changed(key)
@@ -462,16 +472,18 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             return
         mood = "again" if streak >= _STREAK_LOOSE else "tired" if load >= 1 else "call"
         await respond(session, conversation, line, force=mood == "call", mood=mood)
-    elif not private and key not in _waiters:
+    elif not private and not lookalike and key not in _waiters:
         now = time.monotonic()
         # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
         fresh = _load(conversation, now) * 3 < 2
         # 紧跟在她后面打的字多半是在回她，一条就问；不然一对一聊着聊着就断了。
         # 只发一张图、一个表情多半是群友自己的反应，不当成在回她。
+        # 引用、@ 了别人的是在跟别人说话，哪怕正好排在她后面。
         answered = (
             len(conversation.lines) > 1
             and conversation.lines[-2].speaker is None
             and bool(spoken.strip())
+            and not any(isinstance(e, (At, Quote)) for e in elements)
         )
         # 最近的话里她开口的次数已经比最活跃的群友还多时，别人没在回她就不插嘴。
         recent = list(
@@ -491,7 +503,10 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             and now - conversation.last_unprompted_at >= config.unprompted_interval_seconds
         )
         if follow or cold:
-            _waiters[key] = asyncio.create_task(_wait_quiet(key, session, conversation, follow))
+            answer = line if follow and answered else None
+            _waiters[key] = asyncio.create_task(
+                _wait_quiet(key, session, conversation, follow, answer)
+            )
 
 
 def _place(session: Session, conversation: Conversation) -> str:
@@ -517,10 +532,7 @@ def _place(session: Session, conversation: Conversation) -> str:
         f"这些只是号的昵称，可能会改，你自己始终是大肥鱼。这里的帮助命令是 {help_command}。"
     )
     lookalikes = dict.fromkeys(
-        line.speaker
-        for line in conversation.lines
-        if line.speaker
-        and any(w and w in line.speaker.rpartition("(")[0] for w in config.wake_words)
+        line.speaker for line in conversation.lines if _lookalike(line.speaker)
     )
     for speaker in lookalikes:
         place += (
@@ -529,10 +541,23 @@ def _place(session: Session, conversation: Conversation) -> str:
     return place
 
 
+def _lookalike(speaker: str | None) -> bool:
+    """昵称里带唤醒词的别人的号，比如另一个叫“大肥鱼bot”的 AI。"""
+
+    return bool(speaker) and any(w and w in speaker.rpartition("(")[0] for w in config.wake_words)
+
+
 def _account_label(account) -> str:
     user = getattr(getattr(account, "self_info", None), "user", None)
     name = getattr(user, "name", None)
     return f"{name}({account.self_id})" if name else str(account.self_id)
+
+
+def _reply_delay(text: str) -> float:
+    """被叫到后第一条多久发出去：群友接话中位数约 8 秒，
+    按看消息 2 秒、每秒打 3 个字算，最多 12 秒。"""
+
+    return min(2 + len(text) / 3, 12.0)
 
 
 def _typing_delay(text: str) -> float:
@@ -556,11 +581,13 @@ def _load(conversation: Conversation, now: float) -> float:
     )
 
 
-async def _wait_quiet(key: str, session: Session, conversation: Conversation, follow: bool) -> None:
+async def _wait_quiet(
+    key: str, session: Session, conversation: Conversation, follow: bool, answer: Line | None
+) -> None:
     try:
         while (left := conversation.last_message_at + config.quiet_seconds - time.monotonic()) > 0:
             await asyncio.sleep(left)
-        await respond(session, conversation, None, follow=follow)
+        await respond(session, conversation, None, follow=follow, answer=answer)
     finally:
         _waiters.pop(key, None)
 
@@ -649,9 +676,10 @@ async def respond(
     force: bool = False,
     follow: bool = False,
     mood: str = "call",
+    answer: Line | None = None,
 ) -> None:
     """``target`` 是叫 bot 的那条消息；为 ``None`` 时是主动说话：``follow`` 为真是跟聊
-    （bot 刚说过话），否则是累计够数后的插话。
+    （bot 刚说过话，``answer`` 是紧跟在她后面接话的那条），否则是累计够数后的插话。
 
     ``force`` 时模型必须回复，否则由它决定说不说。
     """
@@ -665,7 +693,13 @@ async def respond(
         if target is not None:
             hint = mention_hint(target.number, mood, target.text)
         else:
-            hint = FOLLOW_HINT if follow else UNPROMPTED_HINT
+            hint = (
+                answer_hint(answer.number, answer.text)
+                if answer
+                else FOLLOW_HINT
+                if follow
+                else UNPROMPTED_HINT
+            )
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
         hint = f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{hint}{SHORT_HINT}"
@@ -719,6 +753,11 @@ async def respond(
         edits = [c for c in calls if c.get("tool") == "edit_sticker"]
         calls = [c for c in calls if "tool" not in c]
         await _add_sticker(conversation, calls[:_MAX_SENDS], key)
+        first = next((c["text"] for c in calls[:_MAX_SENDS] if c["text"].strip()), "")
+        if target is not None and first:
+            # 被叫到也别秒回：从那条消息到发出去，留出看消息、打字的时间。
+            # 等完再判断要不要引用，期间有人插话就会引用。
+            await asyncio.sleep(max(0.0, _reply_delay(first) - (time.time() - target.at)))
         sent = 0
         picked = False  # 一次最多发一张表情包
         group = session.event.guild is not None

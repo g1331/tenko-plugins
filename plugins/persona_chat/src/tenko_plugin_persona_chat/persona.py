@@ -174,6 +174,16 @@ def mention_hint(number: int, mood: str = "call", said: str = "") -> str:
     return f"{called}，要回复，默认接这条。"
 
 
+def answer_hint(number: int, said: str) -> str:
+    """紧跟在她后面、没 @ 也没点名的一句：群友接话很少 @，点明是哪句她才知道有人在回她。"""
+
+    return (
+        f"#{number} 紧跟在你后面说：“{said.strip()[:80]}”，多半是在接你的话。"
+        "是在回你、问你、怼你或者对你说的有反应，就像被人当面接了话一样回一句；"
+        "看得出是在跟别人说话、或者只是自己感叹，就调用 stay_silent。"
+    )
+
+
 def search_hint(query: str, results: str) -> str:
     """搜索结果只放在这一次请求的提示里，不进聊天记录。"""
 

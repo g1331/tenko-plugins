@@ -36,6 +36,7 @@ def fake_llm(module, monkeypatch):
     module._cooldowns.clear()
     module._streaks.clear()
     monkeypatch.setattr(module, "_typing_delay", lambda text: 0)
+    monkeypatch.setattr(module, "_reply_delay", lambda text: 0)
     monkeypatch.setattr(module.config, "search_daily", 0)  # 搜索有单独的测试
 
     async def get_user_perm(session):
@@ -201,6 +202,37 @@ async def test_lookalike_names_are_pointed_out(module, fake_llm):
     assert "群里的 大肥鱼bot(9) 名字和你像，但不是你" in module.conversations["group:100"].place
 
 
+async def test_lookalike_bot_only_calls_her_with_an_at(module, fake_llm):
+    fake_llm.replies.append([{"text": "在呢"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="m1"))
+
+    # 另一个叫“大肥鱼”的 AI 紧跟着她说话、提到名字：不算叫她，也不催她接话
+    other = session([Text("我才是大肥鱼")], user="9", message_id="m2")
+    other.user.name = "大肥鱼bot"
+    await feed(module, other)
+    assert len(fake_llm.requests) == 1 and "group:100" not in module._waiters
+    assert module.conversations["group:100"].unseen == 0
+
+    fake_llm.replies.append([{"text": "干嘛"}])
+    other = session([At("42"), Text(" 你好")], user="9", message_id="m3")
+    other.user.name = "大肥鱼bot"
+    await feed(module, other)
+    assert len(fake_llm.requests) == 2  # @ 她照样回
+
+
+async def test_called_reply_waits_like_typing(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module, "_reply_delay", lambda text: 5.0)
+    waited = []
+
+    async def sleep(seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)
+    fake_llm.replies.append([{"text": "在呢"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="m1"))
+    assert len(waited) == 1 and 4 < waited[0] <= 5  # 扣掉已经过去的时间
+
+
 async def test_quote_of_her_line_counts_even_when_the_id_differs(module, fake_llm):
     fake_llm.replies.append([{"text": "/海洋"}])
     await feed(module, session([At("42"), Text(" 猜一个")], message_id="m1"))
@@ -345,9 +377,8 @@ async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm,
 
     hints = [messages[-1]["content"] for messages, _ in fake_llm.requests[1:]]
     # 精力 6，说满 4 句（1 句被叫 + 3 句跟聊）用掉三分之二，不再主动开口
-    assert len(hints) == 3 and all(
-        h.endswith(module.FOLLOW_HINT + module.SHORT_HINT) for h in hints
-    )
+    # 每次都是紧跟在她后面的接话，提示点明是哪句
+    assert len(hints) == 3 and all("紧跟在你后面说" in h for h in hints)
     assert not any(force for _, force in fake_llm.requests[1:])
 
 
@@ -360,10 +391,19 @@ async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm)
     await feed(module, session([Text("第一千话")], message_id="m1"))
     await module._waiters["group:100"]
     assert len(fake_llm.requests) == 2
+    assert "#3 紧跟在你后面说：“第一千话”" in fake_llm.requests[1][0][-1]["content"]
 
     # 再来一条不是紧跟着她的，照旧攒够两条才问
     await feed(module, session([Text("你呢")], user="2", message_id="m2"))
     assert "group:100" not in module._waiters and len(fake_llm.requests) == 2
+
+
+async def test_talking_to_someone_else_right_after_her_is_not_answering(module, fake_llm):
+    fake_llm.replies.append([{"text": "你追到哪了"}])
+    await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
+
+    await feed(module, session([At("7"), Text(" 你看完没")], message_id="m1"))
+    assert "group:100" not in module._waiters and len(fake_llm.requests) == 1
 
 
 async def test_she_stops_chiming_in_once_she_talks_too_much(module, fake_llm, monkeypatch):
