@@ -24,6 +24,14 @@ def fake_llm(module, monkeypatch):
         return fake.replies.pop(0) if fake.replies else [], {"completion_tokens": 7}
 
     monkeypatch.setattr(module.llm, "chat", chat)
+    fake.picks, fake.picked = [], []  # 单独挑表情包：要返回的 (名字, 分数)、问过的话
+
+    async def pick_sticker(client, *, model, prompt, catalog, recent, text):
+        fake.picked.append(text)
+        name, score = fake.picks.pop(0) if fake.picks else ("", 0)
+        return name, score, {}
+
+    monkeypatch.setattr(module.llm, "pick_sticker", pick_sticker)
     module.conversations.clear()
     module._cooldowns.clear()
     module._streaks.clear()
@@ -535,6 +543,33 @@ async def test_model_can_correct_a_sticker_note(module, fake_llm):
 
     index = module.sticker_book.index()
     assert list(index) == ["猫猫无语"] and index["猫猫无语"]["mood"] == "猫翻白眼；无语时发"
+
+
+async def test_a_fitting_sticker_is_picked_after_she_speaks(module, fake_llm):
+    module.sticker_book.add("用户赶都赶不走", "被缠着时发", GIF, "a.gif")
+    onebot = OneBot()
+    fake_llm.replies.append([{"text": "不退 我赖这儿了"}])
+    fake_llm.picks.append(("用户赶都赶不走", 5))
+    await feed(
+        module, session([At("42"), Text(" 你能自己退群吗")], message_id="m1", internal=onebot)
+    )
+    lines = module.conversations["group:100"].lines
+    assert fake_llm.picked == ["不退 我赖这儿了"]
+    assert [x.text for x in lines][-2:] == ["不退 我赖这儿了", "[表情:用户赶都赶不走]"]
+    assert len(onebot.sent) == 1  # 表情包单独一条，按表情包发
+
+    # 不够贴切就只说话
+    fake_llm.replies.append([{"text": "凭什么"}])
+    fake_llm.picks.append(("用户赶都赶不走", 3))
+    await feed(module, session([At("42"), Text(" 退吧")], user="2", message_id="m2"))
+    assert lines[-1].text == "凭什么" and len(onebot.sent) == 1
+
+    # 自己已经配了图、或者在用别的 bot 的指令时不再另挑
+    fake_llm.replies.append([{"text": "[表情:用户赶都赶不走]"}])
+    await feed(module, session([At("42"), Text(" 再来")], user="3", message_id="m3"))
+    fake_llm.replies.append([{"text": "/猜 鲸鱼"}])
+    await feed(module, session([At("42"), Text(" 猜一个")], user="4", message_id="m4"))
+    assert len(fake_llm.picked) == 2
 
 
 async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):

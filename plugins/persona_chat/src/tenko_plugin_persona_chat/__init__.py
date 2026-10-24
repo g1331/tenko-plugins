@@ -53,6 +53,7 @@ from .chat import (
 from .persona import (
     FOLLOW_HINT,
     PERSONA,
+    PICK_STICKER_PROMPT,
     SHORT_HINT,
     UNPROMPTED_HINT,
     mention_hint,
@@ -140,6 +141,8 @@ _speaking: ContextVar[bool] = ContextVar("persona_chat_speaking", default=False)
 _TENKO = "Tenko 功能"
 _TENKO_CHARS = 100
 _MAX_SENDS = 2
+# 单独挑的表情包贴切到这个分（1-5）才跟着发：实测约三成回复会配上，和群友发图的频率相当。
+_STICKER_SCORE = 4
 _STICKERS_DONE = "表情包已经处理好了，这次只说话。"
 _JUST_TALK = "这次不能搜，也别调用别的工具，直接说话。"
 # 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
@@ -713,6 +716,7 @@ async def respond(
         saves = [c for c in calls if c.get("tool") == "save_sticker"]
         edits = [c for c in calls if c.get("tool") == "edit_sticker"]
         calls = [c for c in calls if "tool" not in c]
+        await _add_sticker(conversation, calls[:_MAX_SENDS], key)
         sent = 0
         picked = False  # 一次最多发一张表情包
         group = session.event.guild is not None
@@ -790,6 +794,42 @@ async def respond(
             await _compress(key, conversation)
         _changed(key)
         _save()
+
+
+async def _add_sticker(conversation: Conversation, calls: list[dict], key: str) -> None:
+    """说的话里没配表情包时，单独挑一张贴切的跟在后面发；最近发过的由 ``_pick_sticker`` 拦下。"""
+
+    said = "\n".join(c["text"] for c in calls).strip()
+    if (
+        not said
+        or not config.sticker_limit
+        or not sticker_book.index()
+        or TOKEN.search(said)
+        or said.startswith(("@", *_command_prefixes()))  # 在用别的 bot 的功能
+    ):
+        return
+    lines = islice(conversation.lines, max(len(conversation.lines) - 6, 0), None)
+    recent = "\n".join(
+        f"{(x.speaker.rpartition('(')[0] or x.speaker) if x.speaker else '你'}：{x.text}"
+        for x in lines
+    )
+    try:
+        name, score, usage = await llm.pick_sticker(
+            client,
+            model=config.model,
+            prompt=PICK_STICKER_PROMPT,
+            catalog=sticker_book.catalog(),
+            recent=recent,
+            text=said,
+        )
+    except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
+        logger.debug("AI群友挑表情包失败：{!r}", error)  # 挑不出来就只说话
+        return
+    if not in_sandbox():
+        now = datetime.now()
+        usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+    if score >= _STICKER_SCORE and sticker_book.path(name):
+        calls[-1]["text"] += f"\n[表情:{name}]"
 
 
 def _pick_sticker(

@@ -177,6 +177,42 @@ async def chat(
     return calls, data.get("usage") or {}
 
 
+async def pick_sticker(
+    client: httpx.AsyncClient, *, model: str, prompt: str, catalog: str, recent: str, text: str
+) -> tuple[str, int, dict[str, Any]]:
+    """给要发的话挑一张收藏的表情包：返回 (名字, 贴切程度 1-5, usage)；没挑出来名字为空。"""
+
+    response = await client.post(
+        "/chat/completions",
+        json={
+            "model": model,
+            # 提示和收藏目录放前面，命中前缀缓存。
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "system", "content": catalog},
+                {"role": "user", "content": f"最近几条：\n{recent}\n\n你要发的话：\n{text}"},
+            ],
+            "thinking": {"type": "disabled"},
+            "response_format": {"type": "json_object"},
+            "max_tokens": 100,
+        },
+    )
+    response.raise_for_status()
+    data = response.json()
+    try:
+        pick = json.loads(data["choices"][0]["message"].get("content") or "{}")
+    except ValueError:
+        pick = {}
+    if not isinstance(pick, dict):
+        pick = {}
+    name, score = pick.get("sticker"), pick.get("score")
+    return (
+        name if isinstance(name, str) else "",
+        int(score) if isinstance(score, int | float) else 0,
+        data.get("usage") or {},
+    )
+
+
 async def search(client: httpx.AsyncClient, query: str, count: int = 4) -> list[dict[str, Any]]:
     """DeepSeek 的网页搜索：和对话共用 API key，按次计费，搜不到不收费。"""
 
