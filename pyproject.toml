@@ -8,7 +8,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=1",
     "ruff",
-    # 测试加载真实的宿主；升级宿主时改这里的标签。
+    # 测试加载真实的宿主；升级宿主时改这里的提交。
     "tenko @ git+https://github.com/g1331/tenko@f16d5dbfa63e8d3230a7f83b2a0bf28fbb39f9d1",
 ]
 

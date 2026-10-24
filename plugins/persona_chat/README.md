@@ -36,7 +36,7 @@
 
 ## 安装
 
-在 WebUI 的插件市场安装，或由 Master 在聊天里 `/安装插件 persona_chat`，启用后重启生效。
+在 WebUI 的插件市场安装，或由 Master 在聊天里 `/安装插件 persona_chat`。装好后默认不启用，`/启用插件 persona_chat` 即可加载。
 
 ## 配置
 

@@ -10,15 +10,16 @@ PyPI 的包，并收录在 [Tenko 插件目录](https://github.com/g1331/tenko-r
 
 ## 安装
 
-在 Tenko WebUI 的插件市场安装，或由 Master 在聊天里 `/安装插件 <插件 ID>`。第三方插件默认不启用，启用后重启生效。
+在 Tenko WebUI 的插件市场安装，或由 Master 在聊天里 `/安装插件 <插件 ID>`。装好后默认不启用，`/启用插件 <插件 ID>` 即可加载（个别插件需要 `/重启`）。
 
 ## 开发
 
-本仓库是一个 uv 工作区，开发依赖里包含固定标签的 Tenko 宿主，测试会加载真实的宿主：
+本仓库是一个 uv 工作区，开发依赖里包含钉在某个提交上的 Tenko 宿主（当前是 `tenko-api-v0.4.2` 那次提交），测试会加载真实的宿主：
 
 ```text
 uv sync
 uv run ruff check .
+uv run ruff format --check .
 uv run pytest -q
 ```
 
@@ -28,7 +29,7 @@ uv run pytest -q
 ## 发布
 
 1. 在 PyPI 上为新包添加 pending publisher：所有者 `g1331`、仓库 `tenko-plugins`、工作流 `publish.yml`、环境 `pypi`。
-2. 修改插件 `pyproject.toml` 和 `plugin.metadata` 里的版本，提交后推送标签 `<插件 ID>-v<版本>`，例如：
+2. 修改插件 `pyproject.toml` 和 `plugin.metadata` 里的版本，提交后推送标签 `<插件 ID>-v<版本>`（标签版本和 `pyproject.toml` 不一致时发布会失败），例如：
 
    ```text
    git tag repeater-v0.1.0 && git push origin repeater-v0.1.0
