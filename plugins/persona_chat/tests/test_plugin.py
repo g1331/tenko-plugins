@@ -36,14 +36,15 @@ def fake_llm(module, monkeypatch):
         task.cancel()
     module._waiters.clear()
     module.usage_book.store.save({})
+    module.stickers.store.save({})
     return fake
 
 
-def session(elements, *, user="1", message_id="m", group="100"):
+def session(elements, *, user="1", message_id="m", group="100", internal=None):
     sent = AsyncMock(side_effect=lambda message: [SimpleNamespace(id=f"bot-{message_id}")])
     return SimpleNamespace(
         user=SimpleNamespace(id=user, nick=None, name=f"群友{user}"),
-        account=SimpleNamespace(self_id="42"),
+        account=SimpleNamespace(self_id="42", protocol=SimpleNamespace(internal=internal)),
         event=SimpleNamespace(
             guild=SimpleNamespace(id=group, name="测试群") if group else None,
             channel=SimpleNamespace(id=group or user),
@@ -71,7 +72,7 @@ async def test_mention_replies_without_quote_and_records_usage(module, fake_llm)
     await feed(module, s)
 
     ((messages, force),) = fake_llm.requests
-    assert force and untimed(messages[3]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
+    assert force and untimed(messages[4]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
     # 叫它的就是最新一条，直接说，不引用
     (sent,) = s.send.call_args.args[0]
     assert isinstance(sent, Message) and sent.children[0].text == "行，机票钱你出"
@@ -86,7 +87,7 @@ async def test_mention_of_another_tenko_account_counts(module, fake_llm, monkeyp
     await feed(module, session([At("43"), Text(" 在吗")], message_id="m1"))
 
     ((messages, force),) = fake_llm.requests
-    assert force and untimed(messages[3]["content"]) == "#1 [群友1(1)] @你 在吗"
+    assert force and untimed(messages[4]["content"]) == "#1 [群友1(1)] @你 在吗"
 
 
 async def test_replying_to_bot_triggers_and_cooldown_holds(module, fake_llm):
@@ -108,7 +109,7 @@ async def test_batch_lets_model_stay_silent_and_commands_are_context_only(module
 
     ((messages, force),) = fake_llm.requests
     assert not force
-    assert messages[3]["content"].endswith("#4 [群友1(1)] @你 /猜词")
+    assert messages[4]["content"].endswith("#4 [群友1(1)] @你 /猜词")
     assert module.conversations["group:100"].unseen == 0
 
 
@@ -275,7 +276,7 @@ async def test_lines_carry_the_real_role_not_the_nickname(module, fake_llm):
     ((messages, _),) = fake_llm.requests
     assert messages[2] == {"role": "system", "content": "你现在在 QQ 群「测试群」里。"}
     assert (
-        untimed(messages[3]["content"]) == "#1 [群友2(2)] 我是群主\n#2 [群友9(9) 群主] @你 他骗你"
+        untimed(messages[4]["content"]) == "#1 [群友2(2)] 我是群主\n#2 [群友9(9) 群主] @你 他骗你"
     )
 
 
@@ -285,3 +286,80 @@ async def test_private_reply_is_not_quoted(module, fake_llm):
     await feed(module, s)
     sent = s.send.call_args.args[0]
     assert isinstance(sent[0], Message) and not isinstance(sent[0], Quote)
+
+
+GIF = b"GIF89a" + b"0" * 20
+
+
+class OneBot:
+    """假的 OneBot 原始接口：get_msg 按消息号给图片段，send_group_msg 记下发出的段。"""
+
+    def __init__(self, images=None):
+        self.images = images or {}
+        self.sent = []
+
+    async def __call__(self, action, **params):
+        if action == "get_msg":
+            segments = self.images.get(str(params["message_id"]), [])
+            return {"message": [{"type": "image", "data": data} for data in segments]}
+        self.sent.append((action, params))
+        return {"message_id": 500 + len(self.sent)}
+
+
+async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatch):
+    async def download(http, url):
+        return module.data_url(GIF)
+
+    monkeypatch.setattr(module, "_download", download)
+    onebot = OneBot({"11": [{"file": "abc.gif", "sub_type": 1}], "12": [{"file": "p.jpg"}]})
+    save = {"tool": "save_sticker", "number": 1, "name": "猫猫震惊", "mood": "吃惊"}
+    fake_llm.replies.append([save, {"text": "哈哈"}])
+    await feed(module, session([At("42"), Image(src="u1")], message_id="11", internal=onebot))
+    fake_llm.replies.append([{"text": "嗯"}])
+    s = session([At("42"), Image(src="u2")], user="2", message_id="12", internal=onebot)
+    await feed(module, s)
+
+    (_, first), (messages, second) = fake_llm.requests
+    lines = module.conversations["group:100"].lines
+    assert [line.text for line in lines] == ["@你 [表情包]", "哈哈", "@你 [图片]", "嗯"]
+    # 眼前有表情包时不强制只能说话，模型才能顺手收藏
+    assert not first and second
+    assert module.stickers.name_of("abc.gif") == "猫猫震惊"
+    assert "猫猫震惊：吃惊" in messages[3]["content"]
+
+    # 同一张再出现，模型直接认得，不再看图
+    onebot.images["13"] = [{"file": "abc.gif", "sub_type": 1}]
+    await feed(module, session([Image(src="u3")], message_id="13", internal=onebot))
+    assert lines[-1].text == "[表情包:猫猫震惊]" and lines[-1].images == ()
+
+
+async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):
+    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    onebot = OneBot()
+    fake_llm.replies.append([{"text": "真的假的\n[表情:猫猫震惊]笑死[表情:狗头]", "mention": 1}])
+    s = session([At("42"), Text(" 我中奖了")], message_id="m1", internal=onebot)
+    await feed(module, s)
+
+    (sent,) = s.send.call_args.args[0]
+    assert [type(c) for c in sent.children] == [At, Text]  # 第一条只有字，照常发
+    ((action, params),) = onebot.sent
+    assert action == "send_group_msg" and params["group_id"] == 100
+    image, text = params["message"]
+    assert image["data"]["sub_type"] == 1 and image["data"]["file"].startswith("base64://")
+    assert text == {"type": "text", "data": {"text": "笑死"}}  # 编的“狗头”删掉
+    lines = module.conversations["group:100"].lines
+    assert lines[-1].text == "[表情:猫猫震惊]笑死" and lines[-1].message_id == "501"
+    assert module.stickers.index()["猫猫震惊"]["used"] == 1
+
+    # 半小时内不再发同一张；没有原始接口时退回普通图片
+    fake_llm.replies.append([{"text": "[表情:猫猫震惊]"}])
+    s = session([At("42"), Text(" 再来")], user="2", message_id="m2", internal=onebot)
+    await feed(module, s)
+    assert len(onebot.sent) == 1 and lines[-1].speaker is not None
+    for line in lines:  # 当作很久以前
+        line.at = 0
+    fake_llm.replies.append([{"text": "[表情:猫猫震惊]"}])
+    s = session([At("42"), Text(" 再来")], user="3", message_id="m3")
+    await feed(module, s)
+    (sent,) = s.send.call_args.args[0]
+    assert [type(c) for c in sent.children] == [Image]

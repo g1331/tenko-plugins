@@ -1,4 +1,5 @@
-"""调用 OpenAI 兼容的 /chat/completions；模型只能说话（send_message）或不说（stay_silent）。"""
+"""调用 OpenAI 兼容的 /chat/completions；模型只能说话（send_message）或不说（stay_silent），
+顺手可以收藏表情包（save_sticker）。"""
 
 from __future__ import annotations
 
@@ -17,7 +18,10 @@ SEND_MESSAGE = {
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "要发的话；想分几条连着发就换行，每行一条，最多三条",
+                    "description": (
+                        "要发的话；想分几条连着发就换行，每行一条，最多三条；"
+                        "发收藏的表情包就写“[表情:名字]”"
+                    ),
                 },
                 "reply_to": {
                     "type": "integer",
@@ -40,6 +44,26 @@ STAY_SILENT = {
         "name": "stay_silent",
         "description": "这次不说话。",
         "parameters": {"type": "object", "properties": {}},
+    },
+}
+# 和 send_message/stay_silent 一起调用；工具列表固定不变，前缀缓存才不受影响。
+SAVE_STICKER = {
+    "type": "function",
+    "function": {
+        "name": "save_sticker",
+        "description": "把群友发的某个表情包悄悄收进自己的收藏，以后可以发。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer", "description": "带这个表情包的消息编号"},
+                "name": {"type": "string", "description": "给它起的名字，2~8 个字，例如“猫猫震惊”"},
+                "mood": {
+                    "type": "string",
+                    "description": "适合在什么心情或场合发，例如“吃惊、无语”",
+                },
+            },
+            "required": ["number", "name", "mood"],
+        },
     },
 }
 FORCE_SEND = {"type": "function", "function": {"name": "send_message"}}
@@ -72,7 +96,10 @@ async def chat(
     force: bool,
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """返回 send_message 的参数列表和 usage。assistant 的 content 一律丢弃。"""
+    """返回 send_message 和 save_sticker 的参数列表（收藏的带 ``"tool": "save_sticker"``）和 usage。
+
+    assistant 的 content 一律丢弃。
+    """
 
     response = await client.post(
         "/chat/completions",
@@ -81,7 +108,7 @@ async def chat(
             "messages": messages,
             # 群聊闲聊不需要推理；关掉思考才能用强制工具调用。
             "thinking": {"type": "disabled"},
-            "tools": [SEND_MESSAGE, STAY_SILENT],
+            "tools": [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER],
             "tool_choice": FORCE_SEND if force else "required",
             "max_tokens": max_tokens,
         },
@@ -91,12 +118,17 @@ async def chat(
     calls = []
     for call in data["choices"][0]["message"].get("tool_calls") or []:
         function = call.get("function") or {}
-        if function.get("name") != "send_message":
+        name = function.get("name")
+        if name not in ("send_message", "save_sticker"):
             continue
         try:
             arguments = json.loads(function.get("arguments") or "")
         except ValueError:
             continue
-        if isinstance(arguments, dict) and isinstance(arguments.get("text"), str):
+        if not isinstance(arguments, dict):
+            continue
+        if name == "save_sticker":
+            calls.append({**arguments, "tool": name})
+        elif isinstance(arguments.get("text"), str):
             calls.append(arguments)
     return calls, data.get("usage") or {}

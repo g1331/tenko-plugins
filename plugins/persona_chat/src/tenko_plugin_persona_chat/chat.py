@@ -28,6 +28,7 @@ class Line:
     pictures: list[str] | None = None  # 下载好的 data URL；None 表示还没下载
     at: float = 0.0  # 收到的时刻（Unix 时间）
     role: str = ""  # 群身份，例如“群主”；普通成员为空
+    sticker: tuple[str, str] | None = None  # 还没收藏的表情包：(QQ 文件名, 原地址)
 
     @property
     def who(self) -> str:
@@ -66,8 +67,18 @@ class Conversation:
         text: str,
         images: tuple[str, ...] = (),
         role: str = "",
+        sticker: tuple[str, str] | None = None,
     ) -> Line:
-        line = Line(self.next_number, message_id, speaker, text, images, at=time.time(), role=role)
+        line = Line(
+            self.next_number,
+            message_id,
+            speaker,
+            text,
+            images,
+            at=time.time(),
+            role=role,
+            sticker=sticker,
+        )
         self.next_number += 1
         self.lines.append(line)
         if speaker is not None:
@@ -124,6 +135,15 @@ class Conversation:
 
         return sum(1 for at in self.spoken if now - at < window)
 
+    def sent_recently(self, text: str, window: float = 1800) -> bool:
+        """bot 最近 ``window`` 秒里说过的话里有没有 ``text``，例如同一张表情包。"""
+
+        now = time.time()
+        return any(
+            line.speaker is None and text in line.text and now - line.at < window
+            for line in self.lines
+        )
+
     def buried(self, line: Line) -> bool:
         """``line`` 之后有没有别人说过话；没有的话回它不用引用，一看就知道在接谁。"""
 
@@ -140,9 +160,11 @@ class Conversation:
 
 
 def build_messages(
-    persona: str, conversation: Conversation, hint: str, images: int = 0
+    persona: str, conversation: Conversation, hint: str, images: int = 0, stickers: str = ""
 ) -> list[dict[str, Any]]:
     """固定的两段 system 在前（命中前缀缓存），连续的群友消息合成一条 user。
+
+    ``stickers`` 是表情包收藏目录，只在收藏增删时变，放在群名后面。
 
     最近 ``images`` 张已下载的图片紧跟在所属消息后面，以低清晰度发给模型看。
     """
@@ -155,6 +177,8 @@ def build_messages(
     ]
     if conversation.place:
         messages.append({"role": "system", "content": conversation.place})
+    if stickers:
+        messages.append({"role": "system", "content": stickers})
     if conversation.summary:
         memo = f"更早的聊天备忘（这些消息已经没有编号，不能 reply_to）：\n{conversation.summary}"
         messages.append({"role": "system", "content": memo})

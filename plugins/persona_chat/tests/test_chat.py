@@ -18,8 +18,9 @@ def untimed(text):
 
 
 class MemoryStore:
-    def __init__(self):
+    def __init__(self, path=None):
         self.data = None
+        self.path = path
 
     def load(self, default):
         return self.data if self.data is not None else default
@@ -136,3 +137,26 @@ def test_time_is_marked_only_after_a_pause(chat):
     assert text == (
         "—— 10-24 01:00 ——\n#1 [甲(1)] 嗯\n#2 [甲(1)] 嗯\n—— 10-24 01:16 ——\n#3 [甲(1)] 嗯"
     )
+
+
+PNG = b"\x89PNG" + b"0" * 20
+
+
+def test_stickers_dedupe_rename_evict_and_list(module, tmp_path):
+    # 包里的 stickers 是收藏实例，盖住了同名子模块
+    stickers = type(module.stickers)(MemoryStore(tmp_path / "stickers.json"), limit=2)
+    assert stickers.catalog() == "你的表情包收藏还是空的。"
+    assert stickers.add(" 猫猫[震惊] ", "吃惊、无语", PNG, "a.png") == "猫猫震惊"
+    assert stickers.add("别的名字", "x", PNG, "b.png") is None  # 同一张图
+    assert stickers.add("狗头", "x", b"GIF8" + b"1" * 20, "a.png") is None  # 同一个 QQ 文件
+    assert stickers.add("猫猫震惊", "嘲讽", b"GIF8" + b"2" * 20, "c.gif") == "猫猫震惊2"
+    assert stickers.add("坏图", "x", b"not an image", "d") is None
+    assert stickers.name_of("a.png") == "猫猫震惊" and stickers.name_of("") is None
+    assert stickers.catalog().endswith("猫猫震惊：吃惊、无语\n猫猫震惊2：嘲讽")
+
+    stickers.use("猫猫震惊")
+    assert stickers.add("新来的", "开心", b"GIF8" + b"3" * 20, "e.gif") == "新来的"
+    assert list(stickers.index()) == ["猫猫震惊", "新来的"]  # 满了丢没用过的
+    assert len(list((tmp_path / "stickers").iterdir())) == 2
+    assert stickers.remove("新来的") and not stickers.remove("新来的")
+    assert stickers.path("新来的") is None and stickers.path("猫猫震惊").is_file()

@@ -1,13 +1,14 @@
 """AI 群友：接入 DeepSeek（OpenAI 兼容接口），用人设口吻陪群友聊天。
 
 被 @、被回复、听到唤醒词或在私聊里，一定回复；群里累计若干条消息后，让模型自己判断要不要
-插一句。模型只能调用 send_message 往当前会话发文字，不能做别的事。请求组装和记账在
-:mod:`.chat`，接口调用在 :mod:`.llm`。
+插一句。模型只能往当前会话发文字和收藏的表情包，以及收藏群友发的表情包，不能做别的事。
+请求组装和记账在 :mod:`.chat`，接口调用在 :mod:`.llm`，表情包收藏在 :mod:`.stickers`。
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from datetime import datetime
 
@@ -40,6 +41,7 @@ from .chat import (
     summary_messages,
 )
 from .persona import FOLLOW_HINT, PERSONA, UNPROMPTED_HINT, mention_hint
+from .stickers import TOKEN, Stickers
 
 
 class PersonaChatConfig(BasicConfModel):
@@ -72,6 +74,8 @@ class PersonaChatConfig(BasicConfModel):
     累了以后被叫到也由它决定理不理，到 1.5 倍完全不理；不说话就慢慢恢复。0 不限。"""
     vision_images: int = 3
     """把最近这么多张群友发的图片低清晰度发给模型看，每张约数百 token；0 只告诉模型“[图片]”。"""
+    sticker_limit: int = 100
+    """表情包收藏上限，所有群共用一份；满了丢掉用得最少的。0 关闭表情包。"""
     max_reply_chars: int = 120
     """单条回复的字数上限，超出时在句末截断。"""
     group_daily_tokens: int = 200000
@@ -96,6 +100,7 @@ declare(scope="group", controlled=True)
 
 config = plugin.get_config(PersonaChatConfig)
 usage_book = UsageBook(Store("usage", version=1))
+stickers = Stickers(Store("stickers", version=1), config.sticker_limit)
 conversations: dict[str, Conversation] = {}
 _cooldowns: dict[tuple[str, str], float] = {}
 _streaks: dict[tuple[str, str], int] = {}
@@ -158,12 +163,18 @@ def _speaker(session: Session) -> str:
 
 
 def render(
-    elements: list, conversation: Conversation, self_ids: set[str]
-) -> tuple[str, bool, bool, tuple[str, ...]]:
-    """转成给模型看的文字，并返回 (文字, 是否 @ 了 bot, 是否回复了 bot, 图片地址)。"""
+    elements: list, conversation: Conversation, self_ids: set[str], raw: list[dict] | None = None
+) -> tuple[str, bool, bool, tuple[str, ...], tuple[str, str] | None]:
+    """转成给模型看的文字，并返回 (文字, 是否 @ 了 bot, 是否回复了 bot, 图片地址, 表情包)。
+
+    ``raw`` 是 OneBot 原始的图片段，按顺序对应消息里的图片，用来分出表情包和照片；
+    表情包是第一张还没收藏的 (QQ 文件名, 地址)。
+    """
 
     parts: list[str] = []
     images: list[str] = []
+    raw = raw or []
+    sticker: tuple[str, str] | None = None
     at_me = reply_me = False
     for element in elements:
         if isinstance(element, Quote):
@@ -186,14 +197,44 @@ def render(
         elif isinstance(element, Text):
             parts.append(element.text)
         elif isinstance(element, Image):
-            parts.append("[图片]")
+            info = raw.pop(0) if raw else {}
+            qq_file = str(info.get("file") or "")
+            if str(info.get("sub_type")) == "1" or "emoji_id" in info:
+                if name := stickers.name_of(qq_file):
+                    parts.append(f"[表情包:{name}]")  # 收藏里有，模型认得，不用再看图
+                    continue
+                parts.append("[表情包]")
+                if sticker is None and element.src:
+                    sticker = (qq_file, element.src)
+            else:
+                parts.append("[图片]")
             if element.src:
                 images.append(element.src)
         elif isinstance(element, Emoji):
             parts.append(f"[{element.name or '表情'}]")
         else:
             parts.append("[表情]" if getattr(element, "tag", "") == "onebot:mface" else "")
-    return " ".join("".join(parts).split()), at_me, reply_me, tuple(images)
+    return " ".join("".join(parts).split()), at_me, reply_me, tuple(images), sticker
+
+
+def _internal(session: Session):
+    """OneBot 原始接口；拿不到（别的适配器、测试）时返回 ``None``。"""
+
+    return getattr(getattr(session.account, "protocol", None), "internal", None)
+
+
+async def _raw_images(session: Session) -> list[dict]:
+    """satori 适配器转图片时丢了 sub_type 等字段，只好向 OneBot 实现要原始消息段。"""
+
+    internal = _internal(session)
+    if not callable(internal):
+        return []
+    try:
+        data = await internal("get_msg", message_id=int(session.event.message.id))
+        return [seg.get("data") or {} for seg in data["message"] if seg.get("type") == "image"]
+    except Exception as error:  # 拿不到就当普通图片，不影响聊天
+        logger.debug("AI群友读取原始消息失败：{!r}", error)
+        return []
 
 
 @plugin.listen(MessageCreatedEvent)
@@ -218,13 +259,16 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     if in_sandbox():
         conversation = conversation.copy()
     elements = list(session.event.message.message)
-    text, at_me, reply_me, images = render(elements, conversation, self_ids)
+    raw = await _raw_images(session) if any(isinstance(e, Image) for e in elements) else []
+    text, at_me, reply_me, images, sticker = render(elements, conversation, self_ids, raw)
     # 唤醒词只认群友亲手打的字：@ 一个叫“大肥鱼”的群友、引用它的消息都不算叫 bot。
     spoken = "".join(e.text for e in elements if isinstance(e, Text))
     if not text:
         return
     role = _ROLES.get(await get_user_perm(session), "")
-    line = conversation.add(session.event.message.id, _speaker(session), text, images, role)
+    line = conversation.add(
+        session.event.message.id, _speaker(session), text, images, role, sticker
+    )
     conversation.last_message_at = time.monotonic()
     # 命令也记进上下文（群里别的 bot 的游戏、群友的示范都靠它看懂），但不算在叫 bot。
     if text.lstrip("@你 ").startswith(_command_prefixes()):
@@ -337,8 +381,12 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool):
     await _fetch_pictures(shown)
     persona = config.persona or PERSONA
 
+    catalog = stickers.catalog() if config.sticker_limit else ""
+    # 眼前有表情包时不强制只能 send_message，模型才能顺手收藏；提示里仍要求它回复。
+    force = force and not any(line.sticker and line.pictures for line in shown)
+
     async def ask(images: int):
-        messages = build_messages(persona, conversation, hint, images)
+        messages = build_messages(persona, conversation, hint, images, catalog)
         return await llm.chat(
             client, model=config.model, messages=messages, force=force, max_tokens=_MAX_TOKENS
         )
@@ -401,7 +449,10 @@ async def respond(
             now = datetime.now()
             usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
 
+        saves = [c for c in calls if c.get("tool") == "save_sticker"]
+        calls = [c for c in calls if "tool" not in c]
         sent = 0
+        picked = False  # 一次最多发一张表情包
         group = session.event.guild is not None
         for arguments in calls[:_MAX_SENDS]:
             pieces = split(arguments["text"], max(config.max_reply_chars, 1))
@@ -412,37 +463,139 @@ async def respond(
                 quoted = target
             # 按编号找人，模型只能 @ 窗口里说过话的群友，编不出 QQ 号也 @ 不了全体。
             called = conversation.by_number(arguments.get("mention"))
-            for index, text in enumerate(pieces):
-                content: list = [Text(text)]
+            for index, piece in enumerate(pieces):
+                before, sticker, after = _pick_sticker(conversation, piece, allowed=not picked)
+                picked = picked or sticker is not None
+                text = before + (f"[表情:{sticker}]" if sticker else "") + after
+                if not text:
+                    continue
+                mention: list = []
                 # @ 和引用只放在连发的第一条上。
                 if index == 0 and group and called and called.speaker:
                     name, _, user = called.speaker.rpartition("(")
-                    content = [At(user.rstrip(")"), name=name), Text(" " + text)]
-                    text = f"@{name} {text}"
+                    mention = [At(user.rstrip(")"), name=name)]
+                    before, text = " " + before, f"@{name} {text}"
+                content: list = [*mention, *(Text(part) for part in (before, after) if part)]
+                if sticker:
+                    content.insert(len(mention) + bool(before), Image(src=_sticker_url(sticker)))
                 # 只在接的那条已经被后面的消息盖住时才引用，像真人一样大多直接说。
-                if (
+                quote = (
                     index == 0
                     and group
                     and quoted
                     and quoted.message_id
                     and conversation.buried(quoted)
-                ):
-                    message = [Quote(quoted.message_id), *content]
-                else:
-                    # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
-                    message = [Message(content=content)]
+                )
+                if quote:
+                    content = [Quote(quoted.message_id), *content]
                 if sent:
                     await asyncio.sleep(_typing_delay(text))
-                receipts = await session.send(message)
-                conversation.add(receipts[0].id if receipts else None, None, text)
+                message_id = await _send_sticker(session, content) if sticker else None
+                if message_id is None:
+                    # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
+                    receipts = await session.send(content if quote else [Message(content=content)])
+                    message_id = receipts[0].id if receipts else None
+                conversation.add(message_id, None, text)
+                if sticker:
+                    stickers.use(sticker)
                 sent += 1
             conversation.spoken.append(time.monotonic())  # 一口气连发的几条算一句话
+        for arguments in saves:
+            await _save_sticker(arguments, conversation)
         if sent:
             conversation.last_reply_at = time.monotonic()
         if target is None and sent and not follow:
             conversation.last_unprompted_at = time.monotonic()
         if not in_sandbox() and usage.get("prompt_tokens", 0) > config.context_tokens:
             await _compress(key, conversation)
+
+
+def _pick_sticker(
+    conversation: Conversation, text: str, *, allowed: bool
+) -> tuple[str, str | None, str]:
+    """拆出第一个能发的“[表情:名字]”：返回 (前面的话, 名字, 后面的话)，其余标记删掉。
+
+    名字不在收藏里（模型编的）、半小时内在这儿发过，或这次已经发过一张，都不发。
+    """
+
+    chosen: str | None = None
+    head = text
+    for match in TOKEN.finditer(text):
+        name = match[1]
+        if (
+            allowed
+            and chosen is None
+            and stickers.path(name)
+            and not conversation.sent_recently(f"[表情:{name}]")
+        ):
+            chosen = name
+            head, tail = text[: match.start()], text[match.end() :]
+            break
+    if chosen is None:
+        return TOKEN.sub("", text).strip(), None, ""
+    return TOKEN.sub("", head).strip(), chosen, TOKEN.sub("", tail).strip()
+
+
+def _sticker_url(name: str) -> str:
+    path = stickers.path(name)
+    return (path and data_url(path.read_bytes())) or ""
+
+
+async def _send_sticker(session: Session, content: list) -> str | None:
+    """走 OneBot 原始接口发：带上 sub_type=1 才显示成表情包，satori 发出去是一张照片。
+
+    接口不可用或失败时返回 ``None``，由调用方改用 ``session.send``。
+    """
+
+    internal = _internal(session)
+    if in_sandbox() or not callable(internal):
+        return None
+    message = []
+    for element in content:
+        if isinstance(element, Quote):
+            message.append({"type": "reply", "data": {"id": element.id}})
+        elif isinstance(element, At):
+            message.append({"type": "at", "data": {"qq": element.id}})
+        elif isinstance(element, Image):
+            data = {"file": "base64://" + element.src.partition(",")[2]}
+            message.append(
+                {"type": "image", "data": {**data, "sub_type": 1, "summary": "[动画表情]"}}
+            )
+        else:
+            message.append({"type": "text", "data": {"text": element.text}})
+    try:
+        if session.event.guild is not None:
+            result = await internal(
+                "send_group_msg", group_id=int(session.event.channel.id), message=message
+            )
+        else:
+            result = await internal(
+                "send_private_msg", user_id=int(session.user.id), message=message
+            )
+    except Exception as error:
+        logger.warning("AI群友按表情包发送失败，改发普通图片：{!r}", error)
+        return None
+    return str((result or {}).get("message_id") or "") or None
+
+
+async def _save_sticker(arguments: dict, conversation: Conversation) -> None:
+    """收藏模型挑中的表情包：只收这次真给它看过的表情包，照片和截图不收。"""
+
+    line = conversation.by_number(arguments.get("number"))
+    if not config.sticker_limit or line is None or not line.sticker or not line.pictures:
+        return
+    qq_file, src = line.sticker
+    line.sticker = None
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http:
+        picture = await _download(http, src)
+    if picture is None:
+        return
+    data = base64.b64decode(picture.partition(",")[2])
+    name = stickers.add(
+        str(arguments.get("name", "")), str(arguments.get("mood", "")), data, qq_file
+    )
+    if name:
+        logger.info("AI群友收藏了表情包「{}」", name)
 
 
 async def _compress(key: str, conversation: Conversation) -> None:
@@ -470,17 +623,22 @@ async def _compress(key: str, conversation: Conversation) -> None:
 
 persona_command = Alconna(
     "AI群友",
-    Args["action", "重置|用量"],
+    Args["action", "重置|用量|表情"]["op;?", "看|删"]["name;?", str],
     meta=CommandMeta(
-        "清空 AI 群友在本群/本私聊记住的聊天，或查看 token 用量",
-        usage="AI群友 重置 | 用量",
-        example="/AI群友 重置\n/AI群友 用量",
+        "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量，或管理它收藏的表情包",
+        usage="AI群友 重置 | 用量 | 表情 [看|删 名字]",
+        example="/AI群友 重置\n/AI群友 用量\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊",
     ),
 )
 
 
 @command.on(persona_command)
-async def manage(session: Session, action: Query[str] = Query("action")):  # noqa: B008
+async def manage(
+    session: Session,
+    action: Query[str] = Query("action"),  # noqa: B008
+    op: Query[str] = Query("op"),  # noqa: B008
+    name: Query[str] = Query("name"),  # noqa: B008
+):
     if action.result == "重置":
         if session.event.guild is not None and not await require_perm(
             session, Permission.GroupAdmin
@@ -488,9 +646,33 @@ async def manage(session: Session, action: Query[str] = Query("action")):  # noq
             return "只有群管理员及以上能重置"
         conversations.pop(_key(session), None)
         return "已经忘掉刚才聊的了"
+    if action.result == "表情":
+        return await manage_stickers(session, op.result if op.available else None, name.result)
     if not await require_perm(session, Permission.BotAdmin):
         return "只有 BOT 管理员及以上能查看用量"
     return format_usage(usage_book.summary(datetime.now().date()))
+
+
+async def manage_stickers(session: Session, op: str | None, name: str | None) -> str | None:
+    # 收藏所有群共用：看归群管理，删会影响别的群，只给 BOT 管理员。
+    if op == "删":
+        if not await require_perm(session, Permission.BotAdmin):
+            return "收藏是所有群共用的，只有 BOT 管理员及以上能删"
+        return f"删掉了「{name}」" if name and stickers.remove(name) else f"收藏里没有「{name}」"
+    if session.event.guild is not None and not await require_perm(session, Permission.GroupAdmin):
+        return "只有群管理员及以上能查看表情包收藏"
+    if op == "看":
+        url = _sticker_url(name or "")
+        if not url:
+            return f"收藏里没有「{name}」"
+        await session.send([Image(src=url)])
+        return None
+    index = stickers.index()
+    if not index:
+        return "还没有收藏表情包"
+    lines = [f"表情包收藏 {len(index)}/{config.sticker_limit}："]
+    lines += [f"{n}（{s['mood']}）用过 {s['used']} 次" for n, s in index.items()]
+    return "\n".join(lines)
 
 
 def format_usage(periods: list[tuple[str, dict[str, list[float]]]]) -> str:
