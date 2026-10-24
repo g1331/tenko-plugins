@@ -223,19 +223,34 @@ def render(
 
 
 def _internal(session: Session):
-    """OneBot 原始接口；拿不到（别的适配器、测试）时返回 ``None``。"""
+    """OneBot 原始接口：``await call(动作, 参数=...)``；拿不到（别的适配器）时返回 ``None``。
 
-    return getattr(getattr(session.account, "protocol", None), "internal", None)
+    直接走 ``call_api``：Entari 包装 ``protocol.internal`` 时会把关键字参数整个包成一项
+    ``kwargs``，NapCat 收不到参数，报“Expected required property”。Entari 的包装还会把
+    异常当返回值交回来，这里改成抛出；超时由调用方给，免得卡住整个会话。
+    """
+
+    call_api = getattr(getattr(session.account, "protocol", None), "call_api", None)
+    if not callable(call_api):
+        return None
+
+    async def call(action: str, timeout: float, **params):
+        result = await asyncio.wait_for(call_api(f"internal/{action}", params), timeout)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    return call
 
 
 async def _raw_images(session: Session) -> list[dict]:
     """satori 适配器转图片时丢了 sub_type 等字段，只好向 OneBot 实现要原始消息段。"""
 
     internal = _internal(session)
-    if not callable(internal):
+    if internal is None:
         return []
     try:
-        data = await internal("get_msg", message_id=int(session.event.message.id))
+        data = await internal("get_msg", 5, message_id=int(session.event.message.id))
         return [seg.get("data") or {} for seg in data["message"] if seg.get("type") == "image"]
     except Exception as error:  # 拿不到就当普通图片，不影响聊天
         logger.debug("AI群友读取原始消息失败：{!r}", error)
@@ -519,7 +534,7 @@ async def respond(
                     # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
                     receipts = await session.send(content if quote else [Message(content=content)])
                     message_id = receipts[0].id if receipts else None
-                conversation.add(message_id, None, text)
+                conversation.add(message_id or None, None, text)
                 if sticker:
                     stickers.use(sticker)
                 sent += 1
@@ -568,11 +583,12 @@ def _sticker_url(name: str) -> str:
 async def _send_sticker(session: Session, content: list) -> str | None:
     """走 OneBot 原始接口发：带上 sub_type=1 才显示成表情包，satori 发出去是一张照片。
 
-    接口不可用或失败时返回 ``None``，由调用方改用 ``session.send``。
+    接口不可用或失败时返回 ``None``，由调用方改用 ``session.send``；超时返回空串，
+    NapCat 可能已经发出去了，不再补发。
     """
 
     internal = _internal(session)
-    if in_sandbox() or not callable(internal):
+    if in_sandbox() or internal is None:
         return None
     message = []
     for element in content:
@@ -590,16 +606,19 @@ async def _send_sticker(session: Session, content: list) -> str | None:
     try:
         if session.event.guild is not None:
             result = await internal(
-                "send_group_msg", group_id=int(session.event.channel.id), message=message
+                "send_group_msg", 15, group_id=int(session.event.channel.id), message=message
             )
         else:
             result = await internal(
-                "send_private_msg", user_id=int(session.user.id), message=message
+                "send_private_msg", 15, user_id=int(session.user.id), message=message
             )
+    except TimeoutError:
+        logger.warning("AI群友发表情包超时，可能已经发出，不再补发")
+        return ""
     except Exception as error:
         logger.warning("AI群友按表情包发送失败，改发普通图片：{!r}", error)
         return None
-    return str((result or {}).get("message_id") or "") or None
+    return str((result or {}).get("message_id") or "")
 
 
 async def _save_sticker(arguments: dict, conversation: Conversation) -> None:

@@ -45,7 +45,7 @@ def session(elements, *, user="1", message_id="m", group="100", internal=None):
     sent = AsyncMock(side_effect=lambda message: [SimpleNamespace(id=f"bot-{message_id}")])
     return SimpleNamespace(
         user=SimpleNamespace(id=user, nick=None, name=f"群友{user}"),
-        account=SimpleNamespace(self_id="42", protocol=SimpleNamespace(internal=internal)),
+        account=SimpleNamespace(self_id="42", protocol=protocol(internal)),
         event=SimpleNamespace(
             guild=SimpleNamespace(id=group, name="测试群") if group else None,
             channel=SimpleNamespace(id=group or user),
@@ -54,6 +54,18 @@ def session(elements, *, user="1", message_id="m", group="100", internal=None):
         ),
         send=sent,
     )
+
+
+def protocol(internal):
+    """像真的 satori 协议一样只认 ``call_api("internal/动作", 参数)``。"""
+
+    if internal is None:
+        return SimpleNamespace()
+
+    async def call_api(action, params=None):
+        return await internal(action.removeprefix("internal/"), **(params or {}))
+
+    return SimpleNamespace(call_api=call_api)
 
 
 async def feed(module, s):
@@ -411,3 +423,16 @@ async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(
 
     assert [force for _, force in fake_llm.requests] == [False, True]
     assert s.send.called
+
+
+async def test_sticker_falls_back_when_onebot_hands_back_an_error(module, fake_llm):
+    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+
+    async def failing(action, **params):
+        return RuntimeError("Request timeout")  # Entari 把异常当返回值交回来
+
+    fake_llm.replies.append([{"text": "[表情:猫猫震惊]"}])
+    s = session([At("42"), Text(" 你看")], message_id="m1", internal=failing)
+    await feed(module, s)
+    (sent,) = s.send.call_args.args[0]
+    assert [type(c) for c in sent.children] == [Image]
