@@ -230,6 +230,7 @@ def _internal(session: Session):
     异常当返回值交回来，这里改成抛出；超时由调用方给，免得卡住整个会话。
     """
 
+    # shortcut: 绕开 Entari 的包装缺陷，ArcletProject/Entari#32 修复后改回 protocol.internal。
     call_api = getattr(getattr(session.account, "protocol", None), "call_api", None)
     if not callable(call_api):
         return None
@@ -245,6 +246,8 @@ def _internal(session: Session):
 
 async def _raw_images(session: Session) -> list[dict]:
     """satori 适配器转图片时丢了 sub_type 等字段，只好向 OneBot 实现要原始消息段。"""
+
+    # shortcut: 每条带图消息多一次 get_msg；satori-python#43 修复后直接读 Image 的属性。
 
     internal = _internal(session)
     if internal is None:
@@ -582,6 +585,8 @@ def _sticker_url(name: str) -> str:
 
 async def _send_sticker(session: Session, content: list) -> str | None:
     """走 OneBot 原始接口发：带上 sub_type=1 才显示成表情包，satori 发出去是一张照片。
+
+    shortcut: 自己拼 OneBot 消息段；RF-Tar-Railt/satori-python#43 修复后改用 session.send。
 
     接口不可用或失败时返回 ``None``，由调用方改用 ``session.send``；超时返回空串，
     NapCat 可能已经发出去了，不再补发。
