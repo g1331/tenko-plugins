@@ -401,6 +401,7 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     onebot.images["13"] = [{"file": "abc.gif", "sub_type": 1}]
     await feed(module, session([Image(src="u3")], message_id="13", internal=onebot))
     assert lines[-1].text == "[表情包:猫猫震惊]" and lines[-1].images == ()
+    module._waiters.pop("group:100").cancel()  # 它紧跟在她后面，触发的跟聊这里不管
     # 叫她时带着它，多半是要她看这张，照样给她看图
     onebot.images["14"] = [{"file": "abc.gif", "sub_type": 1}]
     fake_llm.replies.append([{"text": "这张我有"}])
