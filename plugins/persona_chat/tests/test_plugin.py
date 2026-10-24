@@ -290,6 +290,21 @@ async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm,
     assert not any(force for _, force in fake_llm.requests[1:])
 
 
+async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm):
+    fake_llm.replies.append([{"text": "你追到哪了"}])
+    await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
+
+    # 紧跟在她后面的一条（多半在回她）就问一次模型
+    fake_llm.replies.append([])  # 这次她没说话
+    await feed(module, session([Text("第一千话")], message_id="m1"))
+    await module._waiters["group:100"]
+    assert len(fake_llm.requests) == 2
+
+    # 再来一条不是紧跟着她的，照旧攒够两条才问
+    await feed(module, session([Text("你呢")], user="2", message_id="m2"))
+    assert "group:100" not in module._waiters and len(fake_llm.requests) == 2
+
+
 async def test_tired_bot_may_ignore_calls_then_stops(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "stamina", 4)
     for i in range(8):

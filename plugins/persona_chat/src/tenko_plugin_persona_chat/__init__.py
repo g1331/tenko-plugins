@@ -380,10 +380,12 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         now = time.monotonic()
         # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
         fresh = _load(conversation, now) * 3 < 2
+        # 紧跟在她后面的那条多半是在回她，一条就问；不然一对一聊着聊着就断了。
+        answered = len(conversation.lines) > 1 and conversation.lines[-2].speaker is None
         follow = (
             fresh
             and now - conversation.last_reply_at < config.follow_seconds
-            and conversation.unseen >= _FOLLOW_MIN_NEW
+            and (answered or conversation.unseen >= _FOLLOW_MIN_NEW)
         )
         cold = (
             fresh
