@@ -224,6 +224,42 @@ def _speaker(session: Session) -> str:
     return f"{name}({session.user.id})"
 
 
+_FORWARD_CHARS = 300
+_FORWARD_IMAGES = 4
+
+
+def _forward(element) -> tuple[str, list[str]] | None:
+    """合并转发的聊天记录转成 ``[聊天记录：昵称：话 / …]`` 和里面的图片地址；不是转发返回 ``None``。
+
+    节点在 ``content`` 里（引用转发时适配器带上，直接发的由 ``_fill_forwards`` 补）。
+    """
+
+    if getattr(element, "tag", "") != "onebot:forward":
+        return None
+    said: list[str] = []
+    urls: list[str] = []
+    for node in element._attrs.get("content") or []:
+        words = []
+        for seg in node.get("message") or []:
+            kind, data = seg.get("type"), seg.get("data") or {}
+            if kind == "text":
+                words.append(data.get("text", ""))
+            elif kind == "image":
+                words.append("[图片]")
+                if data.get("url"):
+                    urls.append(data["url"])
+            elif kind == "forward":
+                words.append("[聊天记录]")  # 套娃的不再展开
+            elif kind in ("face", "mface"):
+                words.append("[表情]")
+        name = (node.get("sender") or {}).get("nickname") or "某人"
+        said.append(f"{name}：{''.join(words)}")
+    text = " / ".join(said)
+    if len(text) > _FORWARD_CHARS:
+        text = text[:_FORWARD_CHARS] + "…"
+    return f"[聊天记录：{text}]", urls[:_FORWARD_IMAGES]
+
+
 def render(
     elements: list, conversation: Conversation, self_ids: set[str], raw: list[dict] | None = None
 ) -> tuple[str, bool, bool, tuple[str, ...], tuple[str, str] | None, tuple[str, ...]]:
@@ -247,6 +283,11 @@ def render(
             reply_me = quoted is not None and quoted.speaker is None
             if quoted:
                 parts.append(f"回复#{quoted.number} ")
+            elif forward := next(filter(None, map(_forward, element.children)), None):
+                # 引用转发多半是要她看这段记录，整段给她，不截成开头 40 字。
+                author = next((c for c in element.children if isinstance(c, Author)), None)
+                parts.append(f"回复[{(author and author.name) or '某人'}：{forward[0]}] ")
+                images.extend(forward[1])
             else:
                 # 引用的消息不在窗口里：把作者和开头带上，模型才知道在接什么。
                 author = next((c for c in element.children if isinstance(c, Author)), None)
@@ -279,6 +320,9 @@ def render(
                 images.append(element.src)
         elif isinstance(element, Emoji):
             parts.append(f"[{element.name or '表情'}]")
+        elif forward := _forward(element):
+            parts.append(forward[0])
+            images.extend(forward[1])
         else:
             parts.append("[表情]" if getattr(element, "tag", "") == "onebot:mface" else "")
     text = " ".join("".join(parts).split())
@@ -323,6 +367,22 @@ async def _raw_images(session: Session) -> list[dict]:
         return []
 
 
+async def _fill_forwards(session: Session, elements: list) -> None:
+    """直接发的转发只带 id，向 OneBot 实现要节点填进 ``content``，交给 ``render`` 展开。"""
+
+    internal = _internal(session)
+    for element in elements:
+        if getattr(element, "tag", "") != "onebot:forward" or element._attrs.get("content"):
+            continue
+        if internal is None:
+            return
+        try:
+            data = await internal("get_forward_msg", 5, id=str(element._attrs.get("id", "")))
+            element._attrs["content"] = data.get("messages") or []
+        except Exception as error:  # 拿不到就当没看到这段记录
+            logger.debug("AI群友读取转发消息失败：{!r}", error)
+
+
 @plugin.listen(MessageCreatedEvent)
 @feature_required()
 async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = False):
@@ -341,6 +401,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         conversation = conversation.copy()
     elements = list(session.event.message.message)
     raw = await _raw_images(session) if any(isinstance(e, Image) for e in elements) else []
+    await _fill_forwards(session, elements)
     text, at_me, reply_me, images, sticker, known = render(elements, conversation, self_ids, raw)
     # 唤醒词只认群友亲手打的字：@ 一个叫“大肥鱼”的群友、引用它的消息都不算叫 bot。
     spoken = "".join(e.text for e in elements if isinstance(e, Text))

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from satori import At, Author, Image, Quote, Text
-from satori.element import Message
+from satori.element import Custom, Message
 
 
 def untimed(text):
@@ -199,6 +199,43 @@ async def test_unknown_quote_and_at_are_spelled_out(module, fake_llm):
 
     assert module.conversations["group:100"].lines[-1].text == (
         "回复[豹喵：而且是bot自己判断回不回] @群友7 其实有"
+    )
+
+
+def _node(name, *segments):
+    return {"sender": {"nickname": name}, "message": list(segments)}
+
+
+async def test_forwarded_chat_is_read_out(module, fake_llm):
+    nodes = [
+        _node("杜拉罕", {"type": "image", "data": {"url": "https://q/1.jpg"}}),
+        _node("杜拉罕", {"type": "text", "data": {"text": "爱猫区，你赢了"}}),
+    ]
+    asked = []
+
+    async def internal(action, **params):
+        asked.append((action, params))
+        return {"messages": nodes}
+
+    await feed(
+        module,
+        session([Custom("onebot:forward", {"id": "f1"})], internal=internal, message_id="m1"),
+    )
+    line = module.conversations["group:100"].lines[-1]
+    assert asked == [("get_forward_msg", {"id": "f1"})]
+    assert line.text == "[聊天记录：杜拉罕：[图片] / 杜拉罕：爱猫区，你赢了]"
+    assert line.images == ("https://q/1.jpg",)
+
+    # 引用别处的转发时节点已经带在 content 里，不用再要。
+    quote = Quote("old")(
+        Author("9", name="愚视"), Custom("onebot:forward", {"id": "f2", "content": nodes})
+    )
+    await feed(module, session([quote, Text("这是啥")], internal=internal, message_id="m2"))
+    assert len(asked) == 1
+    assert (
+        module.conversations["group:100"]
+        .lines[-1]
+        .text.startswith("回复[愚视：[聊天记录：杜拉罕：")
     )
 
 
