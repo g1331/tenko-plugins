@@ -122,6 +122,18 @@ def test_recent_pictures_follow_their_line_within_budget(chat):
     assert isinstance(chat.build_messages("人设", conversation, "提示")[2]["content"], str)
 
 
+def test_pictures_already_shown_stay_so_the_prefix_does_not_change(chat):
+    conversation = chat.Conversation(10)
+    first = conversation.add("m1", "甲(1)", "[图片]", ("u1",))
+    first.pictures, first.shown = ["data:u1"], True  # 上次请求已经看过
+    second = conversation.add("m2", "乙(2)", "[图片]", ("u2",))
+    second.pictures = ["data:u2"]
+
+    # 新图预算只有 1 张：#2 占了它，#1 看过了照样带着
+    assert conversation.with_images(1) == [second, first]
+    assert conversation.with_images(0) == []  # 带图被拒、重试时一张都不带
+
+
 def test_animated_gif_becomes_a_contact_sheet(chat):
     from PIL import Image
 

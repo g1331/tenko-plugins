@@ -32,6 +32,7 @@ class Line:
     at: float = 0.0  # 收到的时刻（Unix 时间）
     role: str = ""  # 群身份，例如“群主”；普通成员为空
     sticker: tuple[str, str] | None = None  # 还没收藏的表情包：(QQ 文件名, 原地址)
+    shown: bool = False  # 图已经给模型看过：之后一直带着，不存盘
 
     @property
     def who(self) -> str:
@@ -120,11 +121,19 @@ class Conversation:
         return None
 
     def with_images(self, budget: int) -> list[Line]:
-        """最近几条带图的消息，图片总数不超过 ``budget``；更早的图只留“[图片]”字样。"""
+        """要给模型看图的消息：看过的一直带着，再加上最近还没看过的，新图总数不超过 ``budget``。
 
+        看过的图要是因为来了新图又变回“[图片]”，从那条起的前缀缓存就全断了；
+        它们随旧记录压进备忘时才离开。``budget`` 为 0 时一张都不带。
+        """
+
+        if budget <= 0:
+            return []
         chosen: list[Line] = []
         for line in reversed(self.lines):
-            if line.images and len(line.images) <= budget:
+            if line.shown:
+                chosen.append(line)
+            elif line.images and len(line.images) <= budget:
                 chosen.append(line)
                 budget -= len(line.images)
         return chosen
@@ -208,7 +217,7 @@ def build_messages(
 
     ``stickers`` 是表情包收藏目录，只在收藏增删时变，放在群名后面。
 
-    最近 ``images`` 张已下载的图片紧跟在所属消息后面，以低清晰度发给模型看。
+    看过的图和最近 ``images`` 张新图紧跟在所属消息后面，以低清晰度发给模型看。
     """
 
     shown = {line.number for line in conversation.with_images(images)}

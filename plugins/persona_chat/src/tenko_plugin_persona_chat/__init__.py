@@ -615,6 +615,8 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
     budget = max(config.vision_images, 0)
     shown = conversation.with_images(budget)
     await _fetch_pictures(shown)
+    for line in shown:
+        line.shown = True
     persona = config.persona or PERSONA
 
     catalog = sticker_book.catalog() if config.sticker_limit else ""
