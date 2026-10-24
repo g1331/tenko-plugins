@@ -70,6 +70,27 @@ SAVE_STICKER = {
         },
     },
 }
+EDIT_STICKER = {
+    "type": "function",
+    "function": {
+        "name": "edit_sticker",
+        "description": (
+            "改一张已收藏表情包的备注或名字。只在你确认原来写错了时用，不要别人一说就改。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "收藏目录里现在的名字"},
+                "mood": {"type": "string", "description": "改好的完整备注，要求同 save_sticker"},
+                "new_name": {
+                    "type": "string",
+                    "description": "要改名时填新名字，2~8 个字；不改就不填",
+                },
+            },
+            "required": ["name", "mood"],
+        },
+    },
+}
 SEARCH = {
     "type": "function",
     "function": {
@@ -114,7 +135,7 @@ async def chat(
     force: bool,
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """返回 send_message、save_sticker 和 search 的参数列表（后两种带 ``"tool"``）和 usage。
+    """返回 send_message 和其他工具的参数列表（其他工具的带 ``"tool"``）和 usage。
 
     assistant 的 content 一律丢弃。
     """
@@ -126,7 +147,7 @@ async def chat(
             "messages": messages,
             # 群聊闲聊不需要推理；关掉思考才能用强制工具调用。
             "thinking": {"type": "disabled"},
-            "tools": [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, SEARCH],
+            "tools": [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, EDIT_STICKER, SEARCH],
             "tool_choice": FORCE_SEND if force else "required",
             "max_tokens": max_tokens,
         },
@@ -137,7 +158,7 @@ async def chat(
     for call in data["choices"][0]["message"].get("tool_calls") or []:
         function = call.get("function") or {}
         name = function.get("name")
-        if name not in ("send_message", "save_sticker", "search"):
+        if name not in ("send_message", "save_sticker", "edit_sticker", "search"):
             continue
         try:
             arguments = json.loads(function.get("arguments") or "")

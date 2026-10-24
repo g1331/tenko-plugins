@@ -347,6 +347,21 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     assert lines[-1].text == "[表情包:猫猫震惊]" and lines[-1].images == ()
 
 
+async def test_model_can_correct_a_sticker_note(module, fake_llm):
+    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    edit = {
+        "tool": "edit_sticker",
+        "name": "猫猫震惊",
+        "mood": "猫翻白眼；无语时发",
+        "new_name": "猫猫无语",
+    }
+    fake_llm.replies.append([edit, {"text": "哦 原来是无语啊"}])
+    await feed(module, session([At("42"), Text(" 那张猫是无语不是震惊")], message_id="m1"))
+
+    index = module.stickers.index()
+    assert list(index) == ["猫猫无语"] and index["猫猫无语"]["mood"] == "猫翻白眼；无语时发"
+
+
 async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):
     module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
     onebot = OneBot()
@@ -398,20 +413,22 @@ async def test_called_bot_may_search_first_then_reply(module, fake_llm, monkeypa
     monkeypatch.setattr(module.llm, "search", search)
     fake_llm.replies += [
         [{"tool": "search", "query": "战地6 新赛季"}],
+        [{"tool": "edit_sticker", "name": "没有这张", "mood": None}],
         [{"text": "我搜了下，有新地图"}],
     ]
     s = session([At("42"), Text(" 新赛季更新了啥")], message_id="m1")
     await feed(module, s)
 
-    (first, first_force), (second, second_force) = fake_llm.requests
-    assert queries == ["战地6 新赛季"] and not first_force and second_force
+    (first, first_force), (second, second_force), (_, third_force) = fake_llm.requests
+    # 搜完那轮不强制（能顺手改表情包备注），没说话就再强制一次
+    assert queries == ["战地6 新赛季"] and not first_force and not second_force and third_force
     assert "新赛季（EA，2026-10-20）：加了新地图" in second[-1]["content"]
     assert s.send.call_args.args[0][0].children[0].text == "我搜了下，有新地图"
 
     # 今天的次数用完：照旧强制只能说话
     fake_llm.replies.append([{"text": "不知道诶"}])
     await feed(module, session([At("42"), Text(" 那平衡呢")], user="2", message_id="m2"))
-    assert len(fake_llm.requests) == 3 and fake_llm.requests[-1][1]
+    assert len(fake_llm.requests) == 4 and fake_llm.requests[-1][1]
 
 
 async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(
@@ -424,6 +441,14 @@ async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(
 
     assert [force for _, force in fake_llm.requests] == [False, True]
     assert s.send.called
+
+    # 第一轮只改了表情包备注：改动保留，再强制说话时告诉它已经改好
+    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    edit = {"tool": "edit_sticker", "name": "猫猫震惊", "mood": "无语时发"}
+    fake_llm.replies += [[edit], [{"text": "改好啦"}]]
+    await feed(module, session([At("42"), Text(" 那张是无语")], user="2", message_id="m2"))
+    assert fake_llm.requests[-1][1] and "已经处理好了" in fake_llm.requests[-1][0][-1]["content"]
+    assert module.stickers.index()["猫猫震惊"]["mood"] == "无语时发"
 
 
 async def test_typed_sticker_words_become_the_sticker(module, fake_llm):

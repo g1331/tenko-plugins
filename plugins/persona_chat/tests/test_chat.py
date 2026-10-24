@@ -160,3 +160,11 @@ def test_stickers_dedupe_rename_evict_and_list(module, tmp_path):
     assert len(list((tmp_path / "stickers").iterdir())) == 2
     assert stickers.remove("新来的") and not stickers.remove("新来的")
     assert stickers.path("新来的") is None and stickers.path("猫猫震惊").is_file()
+
+    # 改备注；新名字被占用就只改备注，空备注和不存在的名字不改
+    assert stickers.add("狗头", "嘲讽", b"GIF8" + b"4" * 20, "f.gif") == "狗头"
+    assert stickers.edit("猫猫震惊", "猫瞪眼「啊？」；吃惊时发", "狗头") == "猫猫震惊"
+    assert stickers.edit("猫猫震惊", "猫瞪眼「啊？」；吃惊时发", "猫猫啊") == "猫猫啊"
+    assert stickers.index()["猫猫啊"]["mood"] == "猫瞪眼「啊？」；吃惊时发"
+    assert stickers.path("猫猫啊").is_file() and "猫猫震惊" not in stickers.index()
+    assert stickers.edit("猫猫啊", " ") is None and stickers.edit("没有", "x") is None

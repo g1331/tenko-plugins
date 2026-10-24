@@ -78,6 +78,23 @@ class Stickers:
         self.store.save(index)
         return final
 
+    def edit(self, name: str, mood: str, new_name: str = "") -> str | None:
+        """改备注，``new_name`` 合法且没被占用时顺带改名。
+
+        返回最终名字；收藏里没有或备注为空返回 ``None``。
+        """
+
+        index = self.index()
+        mood, new_name = _clean(mood, 60, r"[\s\[\]]+"), _clean(new_name, 12)
+        if name not in index or not mood:
+            return None
+        index[name]["mood"] = mood
+        if new_name and new_name not in index:
+            index = {(new_name if k == name else k): v for k, v in index.items()}
+            name = new_name
+        self.store.save(index)
+        return name
+
     def remove(self, name: str) -> bool:
         index = self.index()
         if name not in index:

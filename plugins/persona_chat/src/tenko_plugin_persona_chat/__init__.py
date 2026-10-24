@@ -125,6 +125,7 @@ _speaking: ContextVar[bool] = ContextVar("persona_chat_speaking", default=False)
 _TENKO = "Tenko 功能"
 _TENKO_CHARS = 100
 _MAX_SENDS = 2
+_STICKERS_DONE = "表情包已经处理好了，这次只说话。"
 # 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
 _ROLES = {
     Permission.GroupAdmin: "群管理",
@@ -502,6 +503,7 @@ async def respond(
             return calls
 
         # 被叫到时可以先搜再回：第一轮不强制只能说话，没搜也没说话再强制一次。
+        # 搜完那轮也不强制，她才能照结果改表情包备注；没说话再强制补一句。
         searching = target is not None and _search_left(key)
         try:
             calls = await ask(hint, force and not searching)
@@ -512,8 +514,13 @@ async def respond(
             elif searching and force and all("tool" in c for c in calls):
                 again = hint
             if again is not None:
-                kept = [c for c in calls if c.get("tool") == "save_sticker"]
-                calls = kept + await ask(again, force)
+                kept = [c for c in calls if c.get("tool") in ("save_sticker", "edit_sticker")]
+                if kept and not query.strip():
+                    again = f"{again}\n{_STICKERS_DONE}"
+                calls = kept + await ask(again, force and not query.strip())
+                if force and query.strip() and all("tool" in c for c in calls):
+                    # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
+                    calls += await ask(f"{again}\n{_STICKERS_DONE}", True)
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             logger.warning("AI群友请求失败：HTTP {} {}", status, error.response.text[:200])
@@ -528,6 +535,7 @@ async def respond(
         usage = usages[-1]
 
         saves = [c for c in calls if c.get("tool") == "save_sticker"]
+        edits = [c for c in calls if c.get("tool") == "edit_sticker"]
         calls = [c for c in calls if "tool" not in c]
         sent = 0
         picked = False  # 一次最多发一张表情包
@@ -586,6 +594,8 @@ async def respond(
             conversation.spoken.append(time.monotonic())  # 一口气连发的几条算一句话
         for arguments in saves:
             await _save_sticker(arguments, conversation)
+        for arguments in edits:
+            _edit_sticker(arguments, key)
         if sent:
             conversation.last_reply_at = time.monotonic()
         if target is None and sent and not follow:
@@ -704,6 +714,20 @@ async def _save_sticker(arguments: dict, conversation: Conversation) -> None:
     )
     if name:
         logger.info("AI群友收藏了表情包「{}」", name)
+
+
+def _edit_sticker(arguments: dict, key: str) -> None:
+    """收藏所有群共用，改动都记日志，被带偏了能查到是哪个会话改的、原来写的什么。"""
+
+    if not config.sticker_limit:
+        return
+    # 模型偶尔给出空参数，None 不能写成“None”。
+    name, mood, new_name = (str(arguments.get(k) or "") for k in ("name", "mood", "new_name"))
+    old = stickers.index().get(name, {}).get("mood")
+    final = stickers.edit(name, mood, new_name)
+    if final:
+        new = stickers.index()[final]["mood"]
+        logger.info("AI群友在 {} 改了表情包「{}」→「{}」：{} → {}", key, name, final, old, new)
 
 
 def _search_left(key: str) -> bool:
