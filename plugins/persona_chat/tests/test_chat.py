@@ -53,6 +53,21 @@ def test_messages_keep_fixed_prefix_and_merge_consecutive_lines(chat):
     assert conversation.unseen == 3  # bot 自己的话不计数
 
 
+def test_dump_and_restore_keep_the_same_request(chat):
+    conversation = chat.Conversation(summary="甲爱吃火锅")
+    conversation.add("m1", "甲(1)", "[图片] 看", ("https://过期的图",), role="群主")
+    conversation.add("b1", None, "好看")
+    conversation.add(None, "Tenko 功能", "猜谜开始", counted=False)
+
+    restored = chat.Conversation.restore(conversation.dump())
+
+    assert restored.next_number == 4 and restored.summary == "甲爱吃火锅"
+    assert restored.lines[0].images == () and restored.lines[0].role == "群主"
+    assert chat.build_messages("人设", restored, "提示") == chat.build_messages(
+        "人设", conversation, "提示"
+    )
+
+
 def test_shape_flattens_and_cuts_at_sentence_end(chat):
     assert chat.shape(" 行，\n机票钱你出 @全体成员 ", 50) == "行， 机票钱你出"
     assert chat.shape("一二三四五。六七八九十", 8) == "一二三四五。"

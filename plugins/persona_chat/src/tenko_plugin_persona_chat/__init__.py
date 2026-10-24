@@ -113,6 +113,12 @@ config = plugin.get_config(PersonaChatConfig)
 usage_book = UsageBook(Store("usage", version=1))
 stickers = Stickers(Store("stickers", version=1), config.sticker_limit)
 conversations: dict[str, Conversation] = {}
+# 聊天记录存盘：{会话: Conversation.dump()}。有新消息的会话记进 _unsaved，
+# 她每说完一次就存，其余时候最多每分钟存一次，插件卸载或退出时再存一次。
+chat_store = Store("conversations", version=1)
+_unsaved: set[str] = set()
+_saved_at = 0.0
+_SAVE_SECONDS = 60
 _cooldowns: dict[tuple[str, str], float] = {}
 _streaks: dict[tuple[str, str], int] = {}
 _waiters: dict[str, asyncio.Task[None]] = {}
@@ -155,10 +161,44 @@ if not config.api_key:
 async def _dispose() -> None:
     for task in _waiters.values():
         task.cancel()
+    _save()
     await client.aclose()
 
 
 collect_disposes(_dispose)
+
+
+def _conversation(key: str) -> Conversation:
+    """重启后某个会话第一次来消息时，从存盘恢复它的聊天记录和备忘。"""
+
+    if key not in conversations:
+        saved = chat_store.load(default={}).get(key)
+        conversations[key] = Conversation.restore(saved) if saved else Conversation()
+    return conversations[key]
+
+
+def _save(*, forget: str | None = None) -> None:
+    """把有新消息的会话写进存盘；``forget`` 的会话从存盘里删掉。沙盒里不写。"""
+
+    global _saved_at
+    if in_sandbox() or not (_unsaved or forget):
+        return
+    data = chat_store.load(default={})
+    for key in _unsaved:
+        if key in conversations:
+            data[key] = conversations[key].dump()
+    data.pop(forget, None)
+    chat_store.save(data)
+    _unsaved.clear()
+    _saved_at = time.monotonic()
+
+
+def _changed(key: str) -> None:
+    if in_sandbox():
+        return
+    _unsaved.add(key)
+    if time.monotonic() - _saved_at >= _SAVE_SECONDS:
+        _save()
 
 
 def _command_prefixes() -> tuple[str, ...]:
@@ -286,7 +326,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     if user_id in self_ids:
         return
     key = _key(session)
-    conversation = conversations.setdefault(key, Conversation())
+    conversation = _conversation(key)
     conversation.place = _place(session)
     if in_sandbox():
         conversation = conversation.copy()
@@ -302,6 +342,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         session.event.message.id, _speaker(session), text, images, role, sticker
     )
     conversation.last_message_at = time.monotonic()
+    _changed(key)
     # 命令也记进上下文（群里别的 bot 的游戏、群友的示范都靠它看懂），但不算在叫 bot。
     if text.lstrip("@你 ").startswith(_command_prefixes()):
         return
@@ -602,6 +643,8 @@ async def respond(
             conversation.last_unprompted_at = time.monotonic()
         if not in_sandbox() and usage.get("prompt_tokens", 0) > config.context_tokens:
             await _compress(key, conversation)
+        _changed(key)
+        _save()
 
 
 def _pick_sticker(
@@ -798,6 +841,7 @@ async def on_sent(event: SendResponse) -> None:
         text = text[:_TENKO_CHARS] + "…"
     message_id = event.result[0].id if event.result else None
     conversation.add(message_id, _TENKO, text, counted=False)
+    _changed(f"group:{event.channel}")
 
 
 def _plain(elements) -> str:
@@ -839,7 +883,10 @@ async def manage(
             session, Permission.GroupAdmin
         ):
             return "只有群管理员及以上能重置"
-        conversations.pop(_key(session), None)
+        key = _key(session)
+        conversations.pop(key, None)
+        _unsaved.discard(key)
+        _save(forget=key)
         return "已经忘掉刚才聊的了"
     if action.result == "表情":
         return await manage_stickers(session, op.result if op.available else None, name.result)

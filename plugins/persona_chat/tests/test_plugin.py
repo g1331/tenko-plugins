@@ -38,6 +38,8 @@ def fake_llm(module, monkeypatch):
     module._waiters.clear()
     module.usage_book.store.save({})
     module.stickers.store.save({})
+    module.chat_store.save({})
+    module._unsaved.clear()
     return fake
 
 
@@ -91,6 +93,22 @@ async def test_mention_replies_without_quote_and_records_usage(module, fake_llm)
     assert isinstance(sent, Message) and sent.children[0].text == "行，机票钱你出"
     assert module.conversations["group:100"].lines[-1].speaker is None
     assert module.usage_book.tokens(module.datetime.now().date(), "group:100") == 7
+
+
+async def test_chat_survives_a_restart_until_reset(module, fake_llm):
+    fake_llm.replies.append([{"text": "行，机票钱你出"}])
+    await feed(module, session([At("42"), Text(" 去吃火锅")], message_id="m1"))
+    module.conversations.clear()  # 重启：内存清空，存盘还在
+
+    fake_llm.replies.append([{"text": "还在想火锅"}])
+    await feed(module, session([At("42"), Text(" 刚才说啥来着")], user="2", message_id="m2"))
+    messages, _ = fake_llm.requests[-1]
+    assert untimed(messages[4]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
+    assert messages[5] == {"role": "assistant", "content": "行，机票钱你出"}
+    assert untimed(messages[6]["content"]) == "#3 [群友2(2)] @你 刚才说啥来着"
+
+    module._save(forget="group:100")
+    assert "group:100" not in module.chat_store.load(default={})
 
 
 async def test_mention_of_another_tenko_account_counts(module, fake_llm, monkeypatch):

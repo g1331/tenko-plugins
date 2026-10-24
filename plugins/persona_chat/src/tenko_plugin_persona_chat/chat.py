@@ -39,7 +39,7 @@ class Line:
 
 @dataclass
 class Conversation:
-    """一个群或一个私聊的聊天记录；只存在内存里，重启即丢。
+    """一个群或一个私聊的聊天记录；用 :meth:`dump` / :meth:`restore` 存盘，重启后接着聊。
 
     记录一直往后追加，请求的前缀因此保持不变、能命中缓存；超过 token 阈值后
     较早的部分由 ``compress`` 压成 ``summary``。``size`` 只是防止一直没有请求时无限增长的保险。
@@ -151,6 +151,31 @@ class Conversation:
         """``line`` 之后有没有别人说过话；没有的话回它不用引用，一看就知道在接谁。"""
 
         return any(other.number > line.number and other.speaker for other in self.lines)
+
+    def dump(self) -> dict[str, Any]:
+        """存盘的内容：图片地址会过期、计时用的是进程内的时钟，都不存。"""
+
+        return {
+            "summary": self.summary,
+            "next_number": self.next_number,
+            "lines": [
+                {
+                    "number": line.number,
+                    "message_id": line.message_id,
+                    "speaker": line.speaker,
+                    "text": line.text,
+                    "at": line.at,
+                    "role": line.role,
+                }
+                for line in self.lines
+            ],
+        }
+
+    @classmethod
+    def restore(cls, data: dict[str, Any]) -> Conversation:
+        conversation = cls(summary=data["summary"], next_number=data["next_number"])
+        conversation.lines.extend(Line(images=(), **line) for line in data["lines"])
+        return conversation
 
     def copy(self) -> Conversation:
         """沙盒用的副本：读得到当前窗口，写入不影响真实会话。"""
