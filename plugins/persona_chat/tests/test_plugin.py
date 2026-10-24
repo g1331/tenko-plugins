@@ -193,6 +193,19 @@ async def test_lookalike_names_are_pointed_out(module, fake_llm):
     assert "群里的 大肥鱼bot(9) 名字和你像，但不是你" in module.conversations["group:100"].place
 
 
+async def test_quote_of_her_line_counts_even_when_the_id_differs(module, fake_llm):
+    fake_llm.replies.append([{"text": "/海洋"}])
+    await feed(module, session([At("42"), Text(" 猜一个")], message_id="m1"))
+    # 游戏 bot 引用她的猜测回结果；事件由她另一个号收到，引用的消息号和她发出时拿到的不一样
+    fake_llm.replies.append([{"text": "/水"}])
+    quote = Quote("other-id")(Author("42", name="十七"), Text("/海洋"))
+    await feed(module, session([quote, Text("0.78%")], user="5", message_id="m2"))
+
+    lines = module.conversations["group:100"].lines
+    assert lines[-2].text == f"回复#{lines[-3].number} 0.78%"
+    assert lines[-1].text == "/水"  # 算在回她，被叫到照样回
+
+
 async def test_unknown_quote_and_at_are_spelled_out(module, fake_llm):
     await feed(module, session([Text("我在")], user="7", message_id="m1"))
     quote = Quote("old")(Author("9", name="豹喵"), Text("而且是bot自己判断回不回"))

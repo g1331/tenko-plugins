@@ -291,17 +291,28 @@ def render(
     for element in elements:
         if isinstance(element, Quote):
             quoted = conversation.by_message_id(element.id)
+            author = next((c for c in element.children if isinstance(c, Author)), None)
+            if quoted is None and author is not None and author.id in self_ids:
+                # 每个 NapCat 各编各的消息号：她用一个号发、事件由另一个号收到时，引用里的号对不上，
+                # 只好按原话找她最近说的那条。
+                said = "".join(c.text for c in element.children if isinstance(c, Text)).strip()
+                quoted = next(
+                    (
+                        x
+                        for x in reversed(conversation.lines)
+                        if x.speaker is None and x.text == said
+                    ),
+                    None,
+                )
             reply_me = quoted is not None and quoted.speaker is None
             if quoted:
                 parts.append(f"回复#{quoted.number} ")
             elif forward := next(filter(None, map(_forward, element.children)), None):
                 # 引用转发多半是要她看这段记录，整段给她，不截成开头 40 字。
-                author = next((c for c in element.children if isinstance(c, Author)), None)
                 parts.append(f"回复[{(author and author.name) or '某人'}：{forward[0]}] ")
                 images.extend(forward[1])
             else:
                 # 引用的消息不在窗口里：把作者和开头带上，模型才知道在接什么。
-                author = next((c for c in element.children if isinstance(c, Author)), None)
                 said = "".join(
                     c.text if isinstance(c, Text) else "[图片]" if isinstance(c, Image) else ""
                     for c in element.children
