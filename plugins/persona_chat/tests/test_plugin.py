@@ -358,20 +358,35 @@ async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm)
     assert "group:100" not in module._waiters and len(fake_llm.requests) == 2
 
 
-async def test_she_stops_chiming_in_once_she_talks_too_much(module, fake_llm):
-    conversation = module.conversations.setdefault("group:100", module.Conversation())
-    for n in range(14):
-        conversation.add(f"h{n}", "群友7(7)", "嗯", (), "", None)
-    for n in range(4):
-        conversation.add(f"b{n}", None, "我说", (), "", None)
-    conversation.last_reply_at = time.monotonic()
-    await feed(module, session([Text("是吗")], user="7", message_id="m1"))
-    module._waiters.pop("group:100").cancel()  # 最近 20 条她占 4 条，还会接话
+async def test_she_stops_chiming_in_once_she_talks_too_much(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "stamina", 0)  # 只看占比，不看精力
 
-    conversation.add("b4", None, "对", (), "", None)
-    conversation.add("b5", None, "就是", (), "", None)
+    def chatter(group, turns):
+        conversation = module.conversations.setdefault(f"group:{group}", module.Conversation())
+        for n in range(20 - 2 * turns):
+            conversation.add(f"h{n}", "群友7(7)", "嗯", (), "", None)
+        for n in range(turns):  # 每次开口连说两条，只算一次
+            conversation.add(f"q{n}", "群友7(7)", "嗯", (), "", None)
+            conversation.add(f"b{n}a", None, "我说", (), "", None)
+            conversation.add(f"b{n}b", None, "对吧", (), "", None)
+        conversation.add("x", "群友8(8)", "嗯", (), "", None)
+        conversation.last_reply_at = time.monotonic()
+        conversation.unseen = 1  # 她最后一次开口后进来的那条
+        return conversation
+
+    # 最近 20 条里开口 4 次：攒两条新消息还会接话
+    chatter(200, 4)
+    await feed(module, session([Text("是吗")], user="7", message_id="m1", group="200"))
+    module._waiters.pop("group:200").cancel()
+
+    # 开口 5 次：攒两条也不插嘴
+    conversation = chatter(100, 5)
     await feed(module, session([Text("是吗")], user="7", message_id="m2"))
-    assert "group:100" not in module._waiters  # 占到 6 条，只在被叫到时说话
+    assert "group:100" not in module._waiters
+    # 但有人紧接着她打字回她时照样接，不然聊两句就断
+    conversation.add("b9", None, "我说", (), "", None)
+    await feed(module, session([Text("你说的是啥")], user="7", message_id="m3"))
+    module._waiters.pop("group:100").cancel()
 
 
 async def test_tired_bot_may_ignore_calls_then_stops(module, fake_llm, monkeypatch):

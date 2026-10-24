@@ -12,7 +12,7 @@ import re
 import time
 from contextvars import ContextVar
 from datetime import datetime
-from itertools import islice
+from itertools import islice, pairwise
 
 import httpx
 from arclet.alconna import Alconna, Args, CommandMeta
@@ -159,9 +159,9 @@ _STREAK_LOOSE = 3
 _STREAK_MUTE = 6
 # 跟聊时攒够这么多条新消息才问一次模型，不是每句都接。
 _FOLLOW_MIN_NEW = 2
-# 日志里最活跃的群友大约说两成的话；她最近 20 条里超过这个比例就不主动开口。
+# 日志里最活跃的群友大约说两成的话；最近 20 条里她开口（连着几条算一次）超过这个比例就不插嘴。
 _SHARE_WINDOW = 20
-_MAX_SHARE = 0.25
+_MAX_SHARE = 0.2
 
 client = httpx.AsyncClient(
     base_url=config.base_url,
@@ -461,13 +461,8 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         await respond(session, conversation, line, force=mood == "call", mood=mood)
     elif not private and key not in _waiters:
         now = time.monotonic()
-        # 精力用掉三分之二、或者最近的话里她已经占得比最活跃的群友还多时，只在被叫到时说话。
-        lines = conversation.lines
-        recent = islice(lines, max(len(lines) - _SHARE_WINDOW, 0), None)
-        fresh = (
-            _load(conversation, now) * 3 < 2
-            and sum(line.speaker is None for line in recent) <= _SHARE_WINDOW * _MAX_SHARE
-        )
+        # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
+        fresh = _load(conversation, now) * 3 < 2
         # 紧跟在她后面打的字多半是在回她，一条就问；不然一对一聊着聊着就断了。
         # 只发一张图、一个表情多半是群友自己的反应，不当成在回她。
         answered = (
@@ -475,13 +470,20 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             and conversation.lines[-2].speaker is None
             and bool(spoken.strip())
         )
+        # 最近的话里她开口的次数已经比最活跃的群友还多时，别人没在回她就不插嘴。
+        recent = list(
+            islice(conversation.lines, max(len(conversation.lines) - _SHARE_WINDOW - 1, 0), None)
+        )
+        turns = sum(b.speaker is None and a.speaker is not None for a, b in pairwise(recent))
+        quiet = turns > _SHARE_WINDOW * _MAX_SHARE
         follow = (
             fresh
             and now - conversation.last_reply_at < config.follow_seconds
-            and (answered or conversation.unseen >= _FOLLOW_MIN_NEW)
+            and (answered or (conversation.unseen >= _FOLLOW_MIN_NEW and not quiet))
         )
         cold = (
             fresh
+            and not quiet
             and 0 < config.batch_size <= conversation.unseen
             and now - conversation.last_unprompted_at >= config.unprompted_interval_seconds
         )
