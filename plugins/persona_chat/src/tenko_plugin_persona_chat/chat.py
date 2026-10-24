@@ -91,6 +91,17 @@ class Conversation:
     def by_number(self, number: object) -> Line | None:
         return next((line for line in self.lines if line.number == number), None)
 
+    def called_in(self, text: str) -> tuple[Line | None, str]:
+        """text 开头的“@昵称 ”对上窗口里说过话的人时，返回那人最近的一条和去掉前缀的 text。"""
+
+        if text.startswith("@"):
+            for line in reversed(self.lines):
+                name = line.speaker.rpartition("(")[0] if line.speaker else ""
+                rest = text.removeprefix(f"@{name}")
+                if name and rest[:1].isspace() and rest.strip():
+                    return line, rest.lstrip()
+        return None, text
+
     def by_message_id(self, message_id: str | None) -> Line | None:
         if not message_id:
             return None

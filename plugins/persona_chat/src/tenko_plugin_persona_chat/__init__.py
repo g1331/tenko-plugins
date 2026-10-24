@@ -590,6 +590,10 @@ async def respond(
                 quoted = target
             # 按编号找人，模型只能 @ 窗口里说过话的群友，编不出 QQ 号也 @ 不了全体。
             called = conversation.by_number(arguments.get("mention"))
+            # 叫别的 bot 时模型照群友的写法打“@昵称 指令”，要换成真的 @ 对方才会响应。
+            named, rest = conversation.called_in(pieces[0])
+            if group and named and (called is None or called.speaker == named.speaker):
+                called, pieces[0] = named, rest
             for index, piece in enumerate(pieces):
                 before, sticker, after = _pick_sticker(conversation, piece, allowed=not picked)
                 picked = picked or sticker is not None

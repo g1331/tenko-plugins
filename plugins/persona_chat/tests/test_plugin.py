@@ -169,6 +169,20 @@ async def test_mention_ats_the_speaker_of_that_line(module, fake_llm):
     assert module.conversations["group:100"].lines[-2].text == "@群友7 欧皇"
 
 
+async def test_typed_at_of_a_window_speaker_becomes_a_real_at(module, fake_llm):
+    await feed(module, session([Text("在")], user="99", message_id="m1"))
+    await feed(module, session([Text("我也在")], user="9", message_id="m2"))  # 昵称是前者的前缀
+    fake_llm.replies.append([{"text": "@群友99 生图 一只鲸鱼"}, {"text": "@路人 你好"}])
+    s = session([At("42"), Text(" 你叫它画")], message_id="m3")
+    await feed(module, s)
+
+    first, second = (call.args[0][0] for call in s.send.call_args_list)
+    at, text = first.children
+    assert isinstance(at, At) and at.id == "99" and text.text == " 生图 一只鲸鱼"
+    assert [c.text for c in second.children] == ["@路人 你好"]  # 窗口里没这个人就照原样发
+    assert module.conversations["group:100"].lines[-2].text == "@群友99 生图 一只鲸鱼"
+
+
 async def test_unknown_quote_and_at_are_spelled_out(module, fake_llm):
     await feed(module, session([Text("我在")], user="7", message_id="m1"))
     quote = Quote("old")(Author("9", name="豹喵"), Text("而且是bot自己判断回不回"))
