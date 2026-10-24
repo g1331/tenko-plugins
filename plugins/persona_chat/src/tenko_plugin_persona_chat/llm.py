@@ -1,5 +1,5 @@
 """调用 OpenAI 兼容的 /chat/completions；模型只能说话（send_message）或不说（stay_silent），
-顺手可以收藏表情包（save_sticker）。"""
+顺手可以收藏表情包（save_sticker），不确定的事实可以先搜（search）。"""
 
 from __future__ import annotations
 
@@ -66,6 +66,20 @@ SAVE_STICKER = {
         },
     },
 }
+SEARCH = {
+    "type": "function",
+    "function": {
+        "name": "search",
+        "description": "上网搜一下，结果出来后再回复。只在被问到不确定的具体事实时用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索词，简短，例如“战地6 新赛季”"}
+            },
+            "required": ["query"],
+        },
+    },
+}
 FORCE_SEND = {"type": "function", "function": {"name": "send_message"}}
 
 
@@ -96,7 +110,7 @@ async def chat(
     force: bool,
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """返回 send_message 和 save_sticker 的参数列表（收藏的带 ``"tool": "save_sticker"``）和 usage。
+    """返回 send_message、save_sticker 和 search 的参数列表（后两种带 ``"tool"``）和 usage。
 
     assistant 的 content 一律丢弃。
     """
@@ -108,7 +122,7 @@ async def chat(
             "messages": messages,
             # 群聊闲聊不需要推理；关掉思考才能用强制工具调用。
             "thinking": {"type": "disabled"},
-            "tools": [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER],
+            "tools": [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, SEARCH],
             "tool_choice": FORCE_SEND if force else "required",
             "max_tokens": max_tokens,
         },
@@ -119,7 +133,7 @@ async def chat(
     for call in data["choices"][0]["message"].get("tool_calls") or []:
         function = call.get("function") or {}
         name = function.get("name")
-        if name not in ("send_message", "save_sticker"):
+        if name not in ("send_message", "save_sticker", "search"):
             continue
         try:
             arguments = json.loads(function.get("arguments") or "")
@@ -127,8 +141,16 @@ async def chat(
             continue
         if not isinstance(arguments, dict):
             continue
-        if name == "save_sticker":
+        if name != "send_message":
             calls.append({**arguments, "tool": name})
         elif isinstance(arguments.get("text"), str):
             calls.append(arguments)
     return calls, data.get("usage") or {}
+
+
+async def search(client: httpx.AsyncClient, query: str, count: int = 4) -> list[dict[str, Any]]:
+    """DeepSeek 的网页搜索：和对话共用 API key，按次计费，搜不到不收费。"""
+
+    response = await client.post("/v1/tools/search", json={"query": query[:128], "count": count})
+    response.raise_for_status()
+    return response.json().get("results") or []

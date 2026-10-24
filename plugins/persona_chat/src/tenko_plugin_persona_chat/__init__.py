@@ -40,7 +40,7 @@ from .chat import (
     split,
     summary_messages,
 )
-from .persona import FOLLOW_HINT, PERSONA, UNPROMPTED_HINT, mention_hint
+from .persona import FOLLOW_HINT, PERSONA, UNPROMPTED_HINT, mention_hint, search_hint
 from .stickers import TOKEN, Stickers
 
 
@@ -74,6 +74,8 @@ class PersonaChatConfig(BasicConfModel):
     累了以后被叫到也由它决定理不理，到 1.5 倍完全不理；不说话就慢慢恢复。0 不限。"""
     vision_images: int = 3
     """把最近这么多张群友发的图片低清晰度发给模型看，每张约数百 token；0 只告诉模型“[图片]”。"""
+    search_daily: int = 20
+    """每个群或私聊每天最多上网搜几次，只在被叫到时能搜，每次约 0.005 元；0 关闭搜索。"""
     sticker_limit: int = 100
     """表情包收藏上限，所有群共用一份；满了丢掉用得最少的。0 关闭表情包。"""
     max_reply_chars: int = 120
@@ -106,6 +108,9 @@ _cooldowns: dict[tuple[str, str], float] = {}
 _streaks: dict[tuple[str, str], int] = {}
 _waiters: dict[str, asyncio.Task[None]] = {}
 _reported: set[int] = set()
+# shortcut: 搜索次数只记在内存里，重启清零；要严格限额时改存 Store。
+_searches: dict[tuple[str, str], int] = {}
+_SEARCH_COST = 0.0007  # 每次 0.005 元，折成美元和用量记账一致
 _MAX_SENDS = 2
 # 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
 _ROLES = {
@@ -432,8 +437,29 @@ async def respond(
         weekday = "一二三四五六日"[now.weekday()]
         hint = f"现在是 {now:%m-%d %H:%M}（周{weekday}）。{hint}"
         conversation.unseen = 0
-        try:
+        usages: list[dict] = []
+
+        async def ask(hint: str, force: bool) -> list[dict]:
             calls, usage = await _ask(conversation, hint, force=force)
+            usages.append(usage)
+            if not in_sandbox():
+                now = datetime.now()
+                usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+            return calls
+
+        # 被叫到时可以先搜再回：第一轮不强制只能说话，没搜也没说话再强制一次。
+        searching = target is not None and _search_left(key)
+        try:
+            calls = await ask(hint, force and not searching)
+            query = next((str(c.get("query", "")) for c in calls if c.get("tool") == "search"), "")
+            again = None
+            if searching and query.strip():
+                again = f"{hint}\n{search_hint(query, await _search(key, query))}"
+            elif searching and force and all("tool" in c for c in calls):
+                again = hint
+            if again is not None:
+                kept = [c for c in calls if c.get("tool") == "save_sticker"]
+                calls = kept + await ask(again, force)
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             logger.warning("AI群友请求失败：HTTP {} {}", status, error.response.text[:200])
@@ -445,9 +471,7 @@ async def respond(
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
             logger.warning("AI群友请求失败：{!r}", error)
             return
-        if not in_sandbox():
-            now = datetime.now()
-            usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+        usage = usages[-1]
 
         saves = [c for c in calls if c.get("tool") == "save_sticker"]
         calls = [c for c in calls if "tool" not in c]
@@ -596,6 +620,32 @@ async def _save_sticker(arguments: dict, conversation: Conversation) -> None:
     )
     if name:
         logger.info("AI群友收藏了表情包「{}」", name)
+
+
+def _search_left(key: str) -> bool:
+    today = datetime.now().date().isoformat()
+    return 0 < config.search_daily and _searches.get((today, key), 0) < config.search_daily
+
+
+async def _search(key: str, query: str) -> str:
+    """搜一次，整理成给模型看的几行；失败当作没搜到。"""
+
+    today = datetime.now().date()
+    _searches[(today.isoformat(), key)] = _searches.get((today.isoformat(), key), 0) + 1
+    try:
+        results = await llm.search(client, query)
+    except (httpx.HTTPError, ValueError, KeyError) as error:
+        logger.warning("AI群友搜索失败：{!r}", error)
+        return ""
+    logger.info("AI群友搜索“{}”：{} 条结果", query, len(results))
+    if results and not in_sandbox():
+        usage_book.add(today, key, {}, _SEARCH_COST)  # 只有搜到结果才计费
+    lines = []
+    for r in results:
+        source = f"{r.get('site_name') or '未知站点'}，{(r.get('date') or '')[:10]}"
+        text = (r.get("summary") or r.get("snippet") or "")[:300]
+        lines.append(f"- {r.get('title', '')}（{source}）：{text}")
+    return "\n".join(lines)
 
 
 async def _compress(key: str, conversation: Conversation) -> None:

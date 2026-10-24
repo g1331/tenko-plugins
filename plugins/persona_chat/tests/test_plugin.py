@@ -27,6 +27,7 @@ def fake_llm(module, monkeypatch):
     module._cooldowns.clear()
     module._streaks.clear()
     monkeypatch.setattr(module, "_typing_delay", lambda text: 0)
+    monkeypatch.setattr(module.config, "search_daily", 0)  # 搜索有单独的测试
 
     async def get_user_perm(session):
         return fake.roles.get(session.user.id, 0)
@@ -363,3 +364,50 @@ async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):
     await feed(module, s)
     (sent,) = s.send.call_args.args[0]
     assert [type(c) for c in sent.children] == [Image]
+
+
+async def test_called_bot_may_search_first_then_reply(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "search_daily", 1)
+    module._searches.clear()
+    queries = []
+
+    async def search(client, query, count=4):
+        queries.append(query)
+        return [
+            {
+                "title": "新赛季",
+                "site_name": "EA",
+                "date": "2026-10-20T16:00:00+00:00",
+                "summary": "加了新地图",
+            }
+        ]
+
+    monkeypatch.setattr(module.llm, "search", search)
+    fake_llm.replies += [
+        [{"tool": "search", "query": "战地6 新赛季"}],
+        [{"text": "我搜了下，有新地图"}],
+    ]
+    s = session([At("42"), Text(" 新赛季更新了啥")], message_id="m1")
+    await feed(module, s)
+
+    (first, first_force), (second, second_force) = fake_llm.requests
+    assert queries == ["战地6 新赛季"] and not first_force and second_force
+    assert "新赛季（EA，2026-10-20）：加了新地图" in second[-1]["content"]
+    assert s.send.call_args.args[0][0].children[0].text == "我搜了下，有新地图"
+
+    # 今天的次数用完：照旧强制只能说话
+    fake_llm.replies.append([{"text": "不知道诶"}])
+    await feed(module, session([At("42"), Text(" 那平衡呢")], user="2", message_id="m2"))
+    assert len(fake_llm.requests) == 3 and fake_llm.requests[-1][1]
+
+
+async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(
+    module, fake_llm, monkeypatch
+):
+    monkeypatch.setattr(module.config, "search_daily", 5)
+    fake_llm.replies += [[], [{"text": "在呢"}]]
+    s = session([At("42"), Text(" 在吗")], message_id="m1")
+    await feed(module, s)
+
+    assert [force for _, force in fake_llm.requests] == [False, True]
+    assert s.send.called
