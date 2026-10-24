@@ -598,9 +598,11 @@ def _pick_sticker(
 ) -> tuple[str, str | None, str]:
     """拆出第一个能发的“[表情:名字]”：返回 (前面的话, 名字, 后面的话)，其余标记删掉。
 
-    名字不在收藏里（模型编的）、半小时内在这儿发过，或这次已经发过一张，都不发。
+    名字不在收藏里（模型编的）、最近在这儿发过，或这次已经发过一张，都不发。“最近”按收藏多少定：
+    每张算 1 分钟，最长半小时，收藏少时才不至于发过一两张就没得挑。
     """
 
+    window = min(1800, 60 * len(stickers.index()))
     chosen: str | None = None
     head = text
     for match in TOKEN.finditer(text):
@@ -609,7 +611,7 @@ def _pick_sticker(
             allowed
             and chosen is None
             and stickers.path(name)
-            and not conversation.sent_recently(f"[表情:{name}]")
+            and not conversation.sent_recently(f"[表情:{name}]", window)
         ):
             chosen = name
             head, tail = text[: match.start()], text[match.end() :]

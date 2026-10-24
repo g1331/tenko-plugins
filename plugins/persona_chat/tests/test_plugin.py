@@ -365,7 +365,7 @@ async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):
     assert lines[-1].text == "[表情:猫猫震惊]笑死" and lines[-1].message_id == "501"
     assert module.stickers.index()["猫猫震惊"]["used"] == 1
 
-    # 半小时内不再发同一张；没有原始接口时退回普通图片
+    # 最近发过的不再发（收藏 1 张时是 1 分钟内）；没有原始接口时退回普通图片
     fake_llm.replies.append([{"text": "[表情:猫猫震惊]"}])
     s = session([At("42"), Text(" 再来")], user="2", message_id="m2", internal=onebot)
     await feed(module, s)
