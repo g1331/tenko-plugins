@@ -183,6 +183,14 @@ async def test_typed_at_of_a_window_speaker_becomes_a_real_at(module, fake_llm):
     assert module.conversations["group:100"].lines[-2].text == "@群友99 生图 一只鲸鱼"
 
 
+async def test_lookalike_names_are_pointed_out(module, fake_llm):
+    await feed(module, session([Text("在")], user="9", message_id="m1"))
+    assert "不是你" not in module.conversations["group:100"].place
+    module.conversations["group:100"].lines[-1].speaker = "大肥鱼bot(9)"
+    await feed(module, session([Text("嗯")], user="7", message_id="m2"))
+    assert "群里的 大肥鱼bot(9) 名字和你像，但不是你" in module.conversations["group:100"].place
+
+
 async def test_unknown_quote_and_at_are_spelled_out(module, fake_llm):
     await feed(module, session([Text("我在")], user="7", message_id="m1"))
     quote = Quote("old")(Author("9", name="豹喵"), Text("而且是bot自己判断回不回"))

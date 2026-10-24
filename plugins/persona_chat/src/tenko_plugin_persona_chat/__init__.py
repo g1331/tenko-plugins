@@ -328,7 +328,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         return
     key = _key(session)
     conversation = _conversation(key)
-    conversation.place = _place(session)
+    conversation.place = _place(session, conversation)
     if in_sandbox():
         conversation = conversation.copy()
     elements = list(session.event.message.message)
@@ -380,10 +380,12 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             _waiters[key] = asyncio.create_task(_wait_quiet(key, session, conversation, follow))
 
 
-def _place(session: Session) -> str:
-    """在哪儿聊、用的是哪些号：放在规则后面，群名或账号变了才变，不影响前缀缓存。
+def _place(session: Session, conversation: Conversation) -> str:
+    """在哪儿聊、用的是哪些号：放在规则后面，群名、账号或撞名的人变了才变，不影响前缀缓存。
 
     号的昵称随时可能改，所以每次现取，不写进人设；她的名字始终是人设里的大肥鱼。
+    记录里有别人的昵称含唤醒词（比如另一个叫“大肥鱼bot”的号）时点名说明那不是她，
+    否则模型会把它的话和状态当成自己的。
     """
 
     guild = session.event.guild
@@ -396,10 +398,21 @@ def _place(session: Session) -> str:
         place = f"你现在在 QQ 群「{guild.name or guild.id}」里。"
     names = "、".join(_account_label(a) for a in accounts)
     help_command = f"{_command_prefixes()[0]}帮助"
-    return (
+    place = (
         f"{place}你用的 QQ 号是 {names}，群友叫这些名字或 @ 它们都是在叫你；"
         f"这些只是号的昵称，可能会改，你自己始终是大肥鱼。这里的帮助命令是 {help_command}。"
     )
+    lookalikes = dict.fromkeys(
+        line.speaker
+        for line in conversation.lines
+        if line.speaker
+        and any(w and w in line.speaker.rpartition("(")[0] for w in config.wake_words)
+    )
+    for speaker in lookalikes:
+        place += (
+            f"群里的 {speaker} 名字和你像，但不是你，是别人的号：它说的话、它的状态都和你无关。"
+        )
+    return place
 
 
 def _account_label(account) -> str:
