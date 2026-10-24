@@ -111,7 +111,8 @@ declare(scope="group", controlled=True)
 
 config = plugin.get_config(PersonaChatConfig)
 usage_book = UsageBook(Store("usage", version=1))
-stickers = Stickers(Store("stickers", version=1), config.sticker_limit)
+# 别叫 stickers：热重载时导入子模块会把同名的包属性覆盖成 .stickers 模块。
+sticker_book = Stickers(Store("stickers", version=1), config.sticker_limit)
 conversations: dict[str, Conversation] = {}
 # 聊天记录存盘：{会话: Conversation.dump()}。有新消息的会话记进 _unsaved，
 # 她每说完一次就存，其余时候最多每分钟存一次，插件卸载或退出时再存一次。
@@ -259,7 +260,7 @@ def render(
             info = raw.pop(0) if raw else {}
             qq_file = str(info.get("file") or "")
             if str(info.get("sub_type")) == "1" or "emoji_id" in info:
-                if name := stickers.name_of(qq_file):
+                if name := sticker_book.name_of(qq_file):
                     parts.append(f"[表情包:{name}]")  # 收藏里有，模型认得，不用再看图
                     continue
                 parts.append("[表情包]")
@@ -482,7 +483,7 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool):
     await _fetch_pictures(shown)
     persona = config.persona or PERSONA
 
-    catalog = stickers.catalog() if config.sticker_limit else ""
+    catalog = sticker_book.catalog() if config.sticker_limit else ""
     # 眼前有表情包时不强制只能 send_message，模型才能顺手收藏；提示里仍要求它回复。
     force = force and not any(line.sticker and line.pictures for line in shown)
 
@@ -581,6 +582,8 @@ async def respond(
         sent = 0
         picked = False  # 一次最多发一张表情包
         group = session.event.guild is not None
+        # 整个回复只有表情包时，最近发过的也照发，不然被叫到却一声不吭。
+        repeat = not any(TOKEN.sub("", c["text"]).strip() for c in calls[:_MAX_SENDS])
         for arguments in calls[:_MAX_SENDS]:
             pieces = split(arguments["text"], max(config.max_reply_chars, 1))
             if not pieces:
@@ -595,7 +598,9 @@ async def respond(
             if group and named and (called is None or called.speaker == named.speaker):
                 called, pieces[0] = named, rest
             for index, piece in enumerate(pieces):
-                before, sticker, after = _pick_sticker(conversation, piece, allowed=not picked)
+                before, sticker, after = _pick_sticker(
+                    conversation, piece, allowed=not picked, repeat=repeat
+                )
                 picked = picked or sticker is not None
                 text = before + (f"[表情:{sticker}]" if sticker else "") + after
                 if not text:
@@ -634,13 +639,15 @@ async def respond(
                     message_id = receipts[0].id if receipts else None
                 conversation.add(message_id or None, None, text)
                 if sticker:
-                    stickers.use(sticker)
+                    sticker_book.use(sticker)
                 sent += 1
             conversation.spoken.append(time.monotonic())  # 一口气连发的几条算一句话
         for arguments in saves:
             await _save_sticker(arguments, conversation)
         for arguments in edits:
             _edit_sticker(arguments, key)
+        if calls and not sent:
+            logger.info("AI群友在 {} 想说的话全被丢掉了：{}", key, [c["text"] for c in calls])
         if sent:
             conversation.last_reply_at = time.monotonic()
         if target is None and sent and not follow:
@@ -652,23 +659,23 @@ async def respond(
 
 
 def _pick_sticker(
-    conversation: Conversation, text: str, *, allowed: bool
+    conversation: Conversation, text: str, *, allowed: bool, repeat: bool = False
 ) -> tuple[str, str | None, str]:
     """拆出第一个能发的“[表情:名字]”：返回 (前面的话, 名字, 后面的话)，其余标记删掉。
 
     名字不在收藏里（模型编的）、最近在这儿发过，或这次已经发过一张，都不发。“最近”按收藏多少定：
-    每张算 1 分钟，最长半小时，收藏少时才不至于发过一两张就没得挑。
+    每张算 1 分钟，最长半小时，收藏少时才不至于发过一两张就没得挑；``repeat`` 时不看最近发没发过。
     一整条正好是某张收藏的名字（模型把图上的字打了出来，如“得加钱！”）时，改发那张图。
     """
 
-    window = min(1800, 60 * len(stickers.index()))
+    window = min(1800, 60 * len(sticker_book.index()))
     if allowed and not TOKEN.search(text):
         bare = _bare(text)
-        for name in stickers.index():
+        for name in sticker_book.index():
             if (
                 _bare(name) == bare
-                and stickers.path(name)
-                and not conversation.sent_recently(f"[表情:{name}]", window)
+                and sticker_book.path(name)
+                and (repeat or not conversation.sent_recently(f"[表情:{name}]", window))
             ):
                 return "", name, ""
     chosen: str | None = None
@@ -678,8 +685,8 @@ def _pick_sticker(
         if (
             allowed
             and chosen is None
-            and stickers.path(name)
-            and not conversation.sent_recently(f"[表情:{name}]", window)
+            and sticker_book.path(name)
+            and (repeat or not conversation.sent_recently(f"[表情:{name}]", window))
         ):
             chosen = name
             head, tail = text[: match.start()], text[match.end() :]
@@ -696,7 +703,7 @@ def _bare(text: str) -> str:
 
 
 def _sticker_url(name: str) -> str:
-    path = stickers.path(name)
+    path = sticker_book.path(name)
     return (path and data_url(path.read_bytes())) or ""
 
 
@@ -756,7 +763,7 @@ async def _save_sticker(arguments: dict, conversation: Conversation) -> None:
     if picture is None:
         return
     data = base64.b64decode(picture.partition(",")[2])
-    name = stickers.add(
+    name = sticker_book.add(
         str(arguments.get("name", "")), str(arguments.get("mood", "")), data, qq_file
     )
     if name:
@@ -770,10 +777,10 @@ def _edit_sticker(arguments: dict, key: str) -> None:
         return
     # 模型偶尔给出空参数，None 不能写成“None”。
     name, mood, new_name = (str(arguments.get(k) or "") for k in ("name", "mood", "new_name"))
-    old = stickers.index().get(name, {}).get("mood")
-    final = stickers.edit(name, mood, new_name)
+    old = sticker_book.index().get(name, {}).get("mood")
+    final = sticker_book.edit(name, mood, new_name)
     if final:
-        new = stickers.index()[final]["mood"]
+        new = sticker_book.index()[final]["mood"]
         logger.info("AI群友在 {} 改了表情包「{}」→「{}」：{} → {}", key, name, final, old, new)
 
 
@@ -904,7 +911,9 @@ async def manage_stickers(session: Session, op: str | None, name: str | None) ->
     if op == "删":
         if not await require_perm(session, Permission.BotAdmin):
             return "收藏是所有群共用的，只有 BOT 管理员及以上能删"
-        return f"删掉了「{name}」" if name and stickers.remove(name) else f"收藏里没有「{name}」"
+        return (
+            f"删掉了「{name}」" if name and sticker_book.remove(name) else f"收藏里没有「{name}」"
+        )
     if session.event.guild is not None and not await require_perm(session, Permission.GroupAdmin):
         return "只有群管理员及以上能查看表情包收藏"
     if op == "看":
@@ -913,7 +922,7 @@ async def manage_stickers(session: Session, op: str | None, name: str | None) ->
             return f"收藏里没有「{name}」"
         await session.send([Image(src=url)])
         return None
-    index = stickers.index()
+    index = sticker_book.index()
     if not index:
         return "还没有收藏表情包"
     lines = [f"表情包收藏 {len(index)}/{config.sticker_limit}："]

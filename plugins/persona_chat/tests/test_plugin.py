@@ -37,7 +37,7 @@ def fake_llm(module, monkeypatch):
         task.cancel()
     module._waiters.clear()
     module.usage_book.store.save({})
-    module.stickers.store.save({})
+    module.sticker_book.store.save({})
     module.chat_store.save({})
     module._unsaved.clear()
     return fake
@@ -370,7 +370,7 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     assert [line.text for line in lines] == ["@你 [表情包]", "哈哈", "@你 [图片]", "嗯"]
     # 眼前有表情包时不强制只能说话，模型才能顺手收藏
     assert not first and second
-    assert module.stickers.name_of("abc.gif") == "猫猫震惊"
+    assert module.sticker_book.name_of("abc.gif") == "猫猫震惊"
     assert "猫猫震惊：吃惊" in messages[3]["content"]
 
     # 同一张再出现，模型直接认得，不再看图
@@ -380,7 +380,7 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
 
 
 async def test_model_can_correct_a_sticker_note(module, fake_llm):
-    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
     edit = {
         "tool": "edit_sticker",
         "name": "猫猫震惊",
@@ -390,12 +390,12 @@ async def test_model_can_correct_a_sticker_note(module, fake_llm):
     fake_llm.replies.append([edit, {"text": "哦 原来是无语啊"}])
     await feed(module, session([At("42"), Text(" 那张猫是无语不是震惊")], message_id="m1"))
 
-    index = module.stickers.index()
+    index = module.sticker_book.index()
     assert list(index) == ["猫猫无语"] and index["猫猫无语"]["mood"] == "猫翻白眼；无语时发"
 
 
 async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):
-    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
     onebot = OneBot()
     fake_llm.replies.append([{"text": "真的假的\n[表情:猫猫震惊]笑死[表情:狗头]", "mention": 1}])
     s = session([At("42"), Text(" 我中奖了")], message_id="m1", internal=onebot)
@@ -410,13 +410,18 @@ async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):
     assert text == {"type": "text", "data": {"text": "笑死"}}  # 编的“狗头”删掉
     lines = module.conversations["group:100"].lines
     assert lines[-1].text == "[表情:猫猫震惊]笑死" and lines[-1].message_id == "501"
-    assert module.stickers.index()["猫猫震惊"]["used"] == 1
+    assert module.sticker_book.index()["猫猫震惊"]["used"] == 1
 
     # 最近发过的不再发（收藏 1 张时是 1 分钟内）；没有原始接口时退回普通图片
-    fake_llm.replies.append([{"text": "[表情:猫猫震惊]"}])
+    fake_llm.replies.append([{"text": "[表情:猫猫震惊]\n还来"}])
     s = session([At("42"), Text(" 再来")], user="2", message_id="m2", internal=onebot)
     await feed(module, s)
-    assert len(onebot.sent) == 1 and lines[-1].speaker is not None
+    assert len(onebot.sent) == 1 and lines[-1].text == "还来"
+    # 整个回复只有这张时照发，被叫到不会一声不吭
+    fake_llm.replies.append([{"text": "[表情:猫猫震惊]"}])
+    s = session([At("42"), Text(" 再来")], user="4", message_id="m4", internal=onebot)
+    await feed(module, s)
+    assert len(onebot.sent) == 2 and lines[-1].text == "[表情:猫猫震惊]"
     for line in lines:  # 当作很久以前
         line.at = 0
     fake_llm.replies.append([{"text": "[表情:猫猫震惊]"}])
@@ -475,16 +480,16 @@ async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(
     assert s.send.called
 
     # 第一轮只改了表情包备注：改动保留，再强制说话时告诉它已经改好
-    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
     edit = {"tool": "edit_sticker", "name": "猫猫震惊", "mood": "无语时发"}
     fake_llm.replies += [[edit], [{"text": "改好啦"}]]
     await feed(module, session([At("42"), Text(" 那张是无语")], user="2", message_id="m2"))
     assert fake_llm.requests[-1][1] and "已经处理好了" in fake_llm.requests[-1][0][-1]["content"]
-    assert module.stickers.index()["猫猫震惊"]["mood"] == "无语时发"
+    assert module.sticker_book.index()["猫猫震惊"]["mood"] == "无语时发"
 
 
 async def test_typed_sticker_words_become_the_sticker(module, fake_llm):
-    module.stickers.add("得加钱", "被使唤时发", GIF, "abc.gif")
+    module.sticker_book.add("得加钱", "被使唤时发", GIF, "abc.gif")
     fake_llm.replies.append([{"text": "周报？\n得加钱哦~\n得加钱也不干"}])
     s = session([At("42"), Text(" 写周报")], message_id="m1")
     await feed(module, s)
@@ -495,7 +500,7 @@ async def test_typed_sticker_words_become_the_sticker(module, fake_llm):
 
 
 async def test_sticker_falls_back_when_onebot_hands_back_an_error(module, fake_llm):
-    module.stickers.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
 
     async def failing(action, **params):
         return RuntimeError("Request timeout")  # Entari 把异常当返回值交回来
