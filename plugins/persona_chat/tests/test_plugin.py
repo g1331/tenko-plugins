@@ -88,6 +88,7 @@ async def test_mention_replies_without_quote_and_records_usage(module, fake_llm)
 
     ((messages, force),) = fake_llm.requests
     assert force and untimed(messages[4]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
+    assert "#1 在叫你：“去吃火锅”" in messages[-1]["content"]  # 原话放在最后，别被前面的图带跑
     # 叫它的就是最新一条，直接说，不引用
     (sent,) = s.send.call_args.args[0]
     assert isinstance(sent, Message) and sent.children[0].text == "行，机票钱你出"

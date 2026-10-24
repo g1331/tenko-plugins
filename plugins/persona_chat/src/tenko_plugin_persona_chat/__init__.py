@@ -560,7 +560,7 @@ async def respond(
         if _over_budget(key):
             return
         if target is not None:
-            hint = mention_hint(target.number, mood)
+            hint = mention_hint(target.number, mood, target.text)
         else:
             hint = FOLLOW_HINT if follow else UNPROMPTED_HINT
         now = datetime.now()

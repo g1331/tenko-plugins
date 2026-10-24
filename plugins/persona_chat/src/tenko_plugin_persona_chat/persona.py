@@ -129,17 +129,24 @@ SUMMARY_PROMPT = """\
 只写记录里有的事实，不编造，不评价；用简短的条目，总共不超过 600 字。"""
 
 
-def mention_hint(number: int, mood: str = "call") -> str:
-    """``call`` 必须回；``again`` 是连着来回好几轮；``tired`` 是最近说太多话、累了。"""
+def mention_hint(number: int, mood: str = "call", said: str = "") -> str:
+    """``call`` 必须回；``again`` 是连着来回好几轮；``tired`` 是最近说太多话、累了。
 
+    ``said`` 是叫她的那条的内容：原话放到最后，她才不会被前面刚发的图带跑、忘了回问题。
+    """
+
+    said = said.removeprefix("@你").strip()[:80]
+    called = f"#{number} 在叫你：“{said}”" if said else f"#{number} 在叫你"
     if mood == "again":
-        return f"#{number} 又在叫你。你们已经连着来回好几轮了，没有新内容就别回，调用 stay_silent。"
+        return f"{called}。你们已经连着来回好几轮了，没有新内容就别回，调用 stay_silent。"
     if mood == "tired":
         return (
-            f"#{number} 在叫你，但你这阵子已经说了很多话，有点累了。想回就简短回一句，"
+            f"{called}，但你这阵子已经说了很多话，有点累了。想回就简短回一句，"
             "也可以像真人一样说自己要歇会儿；实在懒得理就调用 stay_silent。"
         )
-    return f"#{number} 在叫你，要回复，默认接这条。"
+    if said:
+        return f"{called}。要回复，先接住这句话本身；前面的图和别的话只在相关时顺带。"
+    return f"{called}，要回复，默认接这条。"
 
 
 def search_hint(query: str, results: str) -> str:
