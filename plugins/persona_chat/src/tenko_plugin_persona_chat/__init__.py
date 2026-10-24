@@ -10,18 +10,26 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from contextvars import ContextVar
 from datetime import datetime
 
 import httpx
 from arclet.alconna import Alconna, Args, CommandMeta
-from arclet.entari import BasicConfModel, MessageCreatedEvent, Session, command, plugin
+from arclet.entari import (
+    BasicConfModel,
+    MessageCreatedEvent,
+    SendResponse,
+    Session,
+    command,
+    plugin,
+)
 from arclet.entari.command import Query
 from arclet.entari.config import EntariConfig, model_field
 from arclet.entari.plugin import collect_disposes
 from loguru import logger
 from satori import At, Author, Emoji, Image, Quote, Text
 from satori.element import Message
-from tenko_api.accounts import online_accounts
+from tenko_api.accounts import accounts_for_group, online_accounts
 from tenko_api.features import declare, feature_required
 from tenko_api.messages import report_error
 from tenko_api.perm import Permission, get_user_perm, require_perm
@@ -111,6 +119,10 @@ _reported: set[int] = set()
 # shortcut: 搜索次数只记在内存里，重启清零；要严格限额时改存 Store。
 _searches: dict[tuple[str, str], int] = {}
 _SEARCH_COST = 0.0007  # 每次 0.005 元，折成美元和用量记账一致
+# 她自己发消息期间为真：after_send 里据此分出哪些是 Tenko 功能发的。
+_speaking: ContextVar[bool] = ContextVar("persona_chat_speaking", default=False)
+_TENKO = "Tenko 功能"
+_TENKO_CHARS = 100
 _MAX_SENDS = 2
 # 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
 _ROLES = {
@@ -273,12 +285,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         return
     key = _key(session)
     conversation = conversations.setdefault(key, Conversation())
-    guild = session.event.guild
-    # 群名放在规则后面，改名时才变，不影响前缀缓存。
-    if guild is None:
-        conversation.place = "你现在在和对方私聊。"
-    else:
-        conversation.place = f"你现在在 QQ 群「{guild.name or guild.id}」里。"
+    conversation.place = _place(session)
     if in_sandbox():
         conversation = conversation.copy()
     elements = list(session.event.message.message)
@@ -327,6 +334,34 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         )
         if follow or cold:
             _waiters[key] = asyncio.create_task(_wait_quiet(key, session, conversation, follow))
+
+
+def _place(session: Session) -> str:
+    """在哪儿聊、用的是哪些号：放在规则后面，群名或账号变了才变，不影响前缀缓存。
+
+    号的昵称随时可能改，所以每次现取，不写进人设；她的名字始终是人设里的大肥鱼。
+    """
+
+    guild = session.event.guild
+    if guild is None:
+        accounts = [session.account]
+        place = "你现在在和对方私聊。"
+    else:
+        platform = getattr(getattr(session.event, "login", None), "platform", None) or "qq-client"
+        accounts = list(accounts_for_group(guild.id, platform=platform)) or [session.account]
+        place = f"你现在在 QQ 群「{guild.name or guild.id}」里。"
+    names = "、".join(_account_label(a) for a in accounts)
+    help_command = f"{_command_prefixes()[0]}帮助"
+    return (
+        f"{place}你用的 QQ 号是 {names}，群友叫这些名字或 @ 它们都是在叫你；"
+        f"这些只是号的昵称，可能会改，你自己始终是大肥鱼。这里的帮助命令是 {help_command}。"
+    )
+
+
+def _account_label(account) -> str:
+    user = getattr(getattr(account, "self_info", None), "user", None)
+    name = getattr(user, "name", None)
+    return f"{name}({account.self_id})" if name else str(account.self_id)
 
 
 def _typing_delay(text: str) -> float:
@@ -535,7 +570,13 @@ async def respond(
                 message_id = await _send_sticker(session, content) if sticker else None
                 if message_id is None:
                     # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
-                    receipts = await session.send(content if quote else [Message(content=content)])
+                    token = _speaking.set(True)
+                    try:
+                        receipts = await session.send(
+                            content if quote else [Message(content=content)]
+                        )
+                    finally:
+                        _speaking.reset(token)
                     message_id = receipts[0].id if receipts else None
                 conversation.add(message_id or None, None, text)
                 if sticker:
@@ -693,6 +734,43 @@ async def _compress(key: str, conversation: Conversation) -> None:
     if summary:
         conversation.forget(old[-1].number, summary)
         logger.info("AI群友把 {} 的 {} 条旧消息压成了备忘", key, len(old))
+
+
+@plugin.listen(SendResponse)
+async def on_sent(event: SendResponse) -> None:
+    """Tenko 功能从这些号发出的回复（游戏出题、查询结果等）也记进群聊记录，她才看得懂前后文。
+
+    同一个号自己发的消息 Entari 不会再当作收到的消息分发，只能在发送后这里接。
+    """
+
+    if _speaking.get() or in_sandbox() or event.channel.startswith("private:"):
+        return
+    conversation = conversations.get(f"group:{event.channel}")
+    if conversation is None:  # 这个群没开或还没聊过
+        return
+    text = " ".join(_plain(event.message).split())
+    if not text:
+        return
+    if len(text) > _TENKO_CHARS:
+        text = text[:_TENKO_CHARS] + "…"
+    message_id = event.result[0].id if event.result else None
+    conversation.add(message_id, _TENKO, text, counted=False)
+
+
+def _plain(elements) -> str:
+    """命令回复只留文字：图片记成“[图片]”，不给模型看（多是渲染出来的长图）。"""
+
+    parts = []
+    for element in elements:
+        if isinstance(element, Text):
+            parts.append(element.text)
+        elif isinstance(element, At):
+            parts.append(f"@{element.name or element.id} ")
+        elif isinstance(element, Image):
+            parts.append("[图片]")
+        elif isinstance(element, Message):
+            parts.append(_plain(element.children))
+    return "".join(parts)
 
 
 persona_command = Alconna(

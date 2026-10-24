@@ -287,7 +287,8 @@ async def test_lines_carry_the_real_role_not_the_nickname(module, fake_llm):
     await feed(module, session([At("42"), Text(" 他骗你")], user="9", message_id="m2"))
 
     ((messages, _),) = fake_llm.requests
-    assert messages[2] == {"role": "system", "content": "你现在在 QQ 群「测试群」里。"}
+    assert messages[2]["content"].startswith("你现在在 QQ 群「测试群」里。你用的 QQ 号是 42，")
+    assert messages[2]["content"].endswith("这里的帮助命令是 /帮助。")
     assert (
         untimed(messages[4]["content"]) == "#1 [群友2(2)] 我是群主\n#2 [群友9(9) 群主] @你 他骗你"
     )
@@ -436,3 +437,28 @@ async def test_sticker_falls_back_when_onebot_hands_back_an_error(module, fake_l
     await feed(module, s)
     (sent,) = s.send.call_args.args[0]
     assert [type(c) for c in sent.children] == [Image]
+
+
+async def test_tenko_replies_are_context_but_her_own_are_not_doubled(module, fake_llm):
+    await feed(module, session([Text("/猜词")], message_id="m1"))
+
+    def sent(text):
+        return SimpleNamespace(
+            channel="100", message=[Text(text)], result=[SimpleNamespace(id="t")]
+        )
+
+    await module.on_sent.callable_target(sent("题目：两个字，" + "很长" * 80))
+    token = module._speaking.set(True)
+    try:
+        await module.on_sent.callable_target(sent("她自己说的"))
+    finally:
+        module._speaking.reset(token)
+    await module.on_sent.callable_target(
+        SimpleNamespace(channel="999", message=[Text("别的群")], result=[])
+    )
+
+    conversation = module.conversations["group:100"]
+    tenko = conversation.lines[-1]
+    assert [line.speaker for line in conversation.lines] == ["群友1(1)", "Tenko 功能"]
+    assert tenko.text.startswith("题目：两个字，") and len(tenko.text) == 101
+    assert conversation.unseen == 1  # 功能的回复不催她插话

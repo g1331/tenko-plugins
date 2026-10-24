@@ -68,7 +68,10 @@ class Conversation:
         images: tuple[str, ...] = (),
         role: str = "",
         sticker: tuple[str, str] | None = None,
+        counted: bool = True,
     ) -> Line:
+        """``counted`` 为假的不算新消息，例如 Tenko 功能的回复：不催她插话。"""
+
         line = Line(
             self.next_number,
             message_id,
@@ -81,7 +84,7 @@ class Conversation:
         )
         self.next_number += 1
         self.lines.append(line)
-        if speaker is not None:
+        if speaker is not None and counted:
             self.unseen += 1
         return line
 
