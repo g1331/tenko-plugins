@@ -12,6 +12,7 @@ import re
 import time
 from contextvars import ContextVar
 from datetime import datetime
+from itertools import islice
 
 import httpx
 from arclet.alconna import Alconna, Args, CommandMeta
@@ -49,7 +50,14 @@ from .chat import (
     split,
     summary_messages,
 )
-from .persona import FOLLOW_HINT, PERSONA, UNPROMPTED_HINT, mention_hint, search_hint
+from .persona import (
+    FOLLOW_HINT,
+    PERSONA,
+    SHORT_HINT,
+    UNPROMPTED_HINT,
+    mention_hint,
+    search_hint,
+)
 from .stickers import TOKEN, Stickers
 
 
@@ -151,6 +159,9 @@ _STREAK_LOOSE = 3
 _STREAK_MUTE = 6
 # 跟聊时攒够这么多条新消息才问一次模型，不是每句都接。
 _FOLLOW_MIN_NEW = 2
+# 日志里最活跃的群友大约说两成的话；她最近 20 条里超过这个比例就不主动开口。
+_SHARE_WINDOW = 20
+_MAX_SHARE = 0.25
 
 client = httpx.AsyncClient(
     base_url=config.base_url,
@@ -439,10 +450,20 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         await respond(session, conversation, line, force=mood == "call", mood=mood)
     elif not private and key not in _waiters:
         now = time.monotonic()
-        # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
-        fresh = _load(conversation, now) * 3 < 2
-        # 紧跟在她后面的那条多半是在回她，一条就问；不然一对一聊着聊着就断了。
-        answered = len(conversation.lines) > 1 and conversation.lines[-2].speaker is None
+        # 精力用掉三分之二、或者最近的话里她已经占得比最活跃的群友还多时，只在被叫到时说话。
+        lines = conversation.lines
+        recent = islice(lines, max(len(lines) - _SHARE_WINDOW, 0), None)
+        fresh = (
+            _load(conversation, now) * 3 < 2
+            and sum(line.speaker is None for line in recent) <= _SHARE_WINDOW * _MAX_SHARE
+        )
+        # 紧跟在她后面打的字多半是在回她，一条就问；不然一对一聊着聊着就断了。
+        # 只发一张图、一个表情多半是群友自己的反应，不当成在回她。
+        answered = (
+            len(conversation.lines) > 1
+            and conversation.lines[-2].speaker is None
+            and bool(spoken.strip())
+        )
         follow = (
             fresh
             and now - conversation.last_reply_at < config.follow_seconds
@@ -629,7 +650,7 @@ async def respond(
             hint = FOLLOW_HINT if follow else UNPROMPTED_HINT
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
-        hint = f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{hint}"
+        hint = f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{hint}{SHORT_HINT}"
         conversation.unseen = 0
         usages: list[dict] = []
 

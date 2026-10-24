@@ -1,4 +1,5 @@
 import re
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -323,7 +324,9 @@ async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm,
 
     hints = [messages[-1]["content"] for messages, _ in fake_llm.requests[1:]]
     # 精力 6，说满 4 句（1 句被叫 + 3 句跟聊）用掉三分之二，不再主动开口
-    assert len(hints) == 3 and all(h.endswith(module.FOLLOW_HINT) for h in hints)
+    assert len(hints) == 3 and all(
+        h.endswith(module.FOLLOW_HINT + module.SHORT_HINT) for h in hints
+    )
     assert not any(force for _, force in fake_llm.requests[1:])
 
 
@@ -340,6 +343,22 @@ async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm)
     # 再来一条不是紧跟着她的，照旧攒够两条才问
     await feed(module, session([Text("你呢")], user="2", message_id="m2"))
     assert "group:100" not in module._waiters and len(fake_llm.requests) == 2
+
+
+async def test_she_stops_chiming_in_once_she_talks_too_much(module, fake_llm):
+    conversation = module.conversations.setdefault("group:100", module.Conversation())
+    for n in range(14):
+        conversation.add(f"h{n}", "群友7(7)", "嗯", (), "", None)
+    for n in range(4):
+        conversation.add(f"b{n}", None, "我说", (), "", None)
+    conversation.last_reply_at = time.monotonic()
+    await feed(module, session([Text("是吗")], user="7", message_id="m1"))
+    module._waiters.pop("group:100").cancel()  # 最近 20 条她占 4 条，还会接话
+
+    conversation.add("b4", None, "对", (), "", None)
+    conversation.add("b5", None, "就是", (), "", None)
+    await feed(module, session([Text("是吗")], user="7", message_id="m2"))
+    assert "group:100" not in module._waiters  # 占到 6 条，只在被叫到时说话
 
 
 async def test_tired_bot_may_ignore_calls_then_stops(module, fake_llm, monkeypatch):
@@ -438,7 +457,7 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     onebot.images["13"] = [{"file": "abc.gif", "sub_type": 1}]
     await feed(module, session([Image(src="u3")], message_id="13", internal=onebot))
     assert lines[-1].text == "[表情包:猫猫震惊]" and lines[-1].images == ()
-    module._waiters.pop("group:100").cancel()  # 它紧跟在她后面，触发的跟聊这里不管
+    assert "group:100" not in module._waiters  # 紧跟在她后面的单张表情不算在回她
     # 叫她时带着它，多半是要她看这张，照样给她看图
     onebot.images["14"] = [{"file": "abc.gif", "sub_type": 1}]
     fake_llm.replies.append([{"text": "这张我有"}])
