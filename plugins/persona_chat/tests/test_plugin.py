@@ -203,7 +203,7 @@ async def test_unknown_quote_and_at_are_spelled_out(module, fake_llm):
 
 async def test_rejected_pictures_are_dropped_and_retried(module, fake_llm, monkeypatch):
     async def download(http, url):
-        return f"data:image/png;base64,{url}"
+        return b"\x89PNG" + url.encode()
 
     monkeypatch.setattr(module, "_download", download)
     seen = []
@@ -362,7 +362,7 @@ class OneBot:
 
 async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatch):
     async def download(http, url):
-        return module.data_url(GIF)
+        return GIF
 
     monkeypatch.setattr(module, "_download", download)
     onebot = OneBot({"11": [{"file": "abc.gif", "sub_type": 1}], "12": [{"file": "p.jpg"}]})

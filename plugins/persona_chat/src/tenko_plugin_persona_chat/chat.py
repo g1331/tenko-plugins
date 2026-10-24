@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+
+from PIL import Image
 
 from .persona import RULES, SUMMARY_PROMPT
 
@@ -242,6 +245,12 @@ def build_messages(
         else:
             blocks.append({"type": "text", "text": text})
         for url in (line.pictures or []) if line.number in shown else []:
+            if url.startswith(_FRAMES):
+                if blocks[-1]["type"] == "text":
+                    blocks[-1]["text"] += _FRAMES_NOTE
+                else:
+                    blocks.append({"type": "text", "text": _FRAMES_NOTE})
+                url = url.removeprefix(_FRAMES)
             blocks.append({"type": "image_url", "image_url": {"url": url, "detail": "low"}})
     for message in messages:
         content = message["content"]
@@ -281,6 +290,54 @@ def data_url(data: bytes) -> str | None:
     if kind is None and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         kind = "webp"
     return kind and f"data:image/{kind};base64,{base64.b64encode(data).decode()}"
+
+
+# 动图抽帧拼成的图在 pictures 里带这个前缀，发请求时换成一句说明。
+_FRAMES = "frames:"
+_FRAMES_NOTE = "（下面这张是动图按时间顺序抽的几帧，从左到右、从上到下）"
+
+
+def picture_url(data: bytes, most: int = 6) -> str | None:
+    """给模型看的图：动图均匀抽至多 ``most`` 帧拼成一张 JPEG，其余原样转成 data URL。
+
+    模型收到动图只看第一帧，动作和笑点常在后面；低清晰度下一张图的 token 基本固定，拼图不多花钱。
+    """
+
+    if data.startswith(b"GIF8"):
+        try:
+            with Image.open(io.BytesIO(data)) as gif:
+                count = getattr(gif, "n_frames", 1)
+                if count > 1:
+                    return _FRAMES + data_url(_contact_sheet(gif, count, most))
+        except (OSError, ValueError, Image.DecompressionBombError):
+            pass  # 解不开就照原样发，模型至少看得到第一帧
+    return data_url(data)
+
+
+def _contact_sheet(gif: Image.Image, count: int, most: int) -> bytes:
+    picks = (
+        sorted({round(i * (count - 1) / (most - 1)) for i in range(most)})
+        if count > most
+        else range(count)
+    )
+    frames = []
+    for index in picks:
+        gif.seek(index)
+        frame = gif.convert("RGBA")
+        frame.thumbnail((256, 256))
+        flat = Image.new("RGB", frame.size, "white")  # 透明处垫白，免得变成一片黑
+        flat.paste(frame, mask=frame)
+        frames.append(flat)
+    width = max(f.width for f in frames)
+    height = max(f.height for f in frames)
+    columns = min(3, len(frames))
+    rows = -(-len(frames) // columns)
+    sheet = Image.new("RGB", (width * columns, height * rows), "white")
+    for k, frame in enumerate(frames):
+        sheet.paste(frame, ((k % columns) * width, (k // columns) * height))
+    buffer = io.BytesIO()
+    sheet.save(buffer, "JPEG", quality=85)
+    return buffer.getvalue()
 
 
 def split(text: str, limit: int, most: int = 3) -> list[str]:

@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import re
 import time
 from contextvars import ContextVar
@@ -46,6 +45,7 @@ from .chat import (
     build_messages,
     data_url,
     estimate_cost,
+    picture_url,
     split,
     summary_messages,
 )
@@ -142,6 +142,7 @@ _ROLES = {
 }
 _MAX_TOKENS = 300
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
+_MAX_GIF_BYTES = 8 * 1024 * 1024  # 动图要整个下下来才能抽帧
 _SUMMARY_TOKENS = 1000
 # 对方在 bot 刚说完几秒内又来叫，连续几轮后不再强制回复，再多就不理，防止和别的 bot 无限对聊。
 _QUICK_SECONDS = 10
@@ -464,19 +465,26 @@ def _over_budget(key: str) -> bool:
     )
 
 
-async def _download(http: httpx.AsyncClient, url: str) -> str | None:
+async def _download(http: httpx.AsyncClient, url: str) -> bytes | None:
     data = bytearray()
     try:
         async with http.stream("GET", url) as response:
             response.raise_for_status()
             async for chunk in response.aiter_bytes():
                 data += chunk
-                if len(data) > _MAX_IMAGE_BYTES:
+                limit = _MAX_GIF_BYTES if data[:4] == b"GIF8" else _MAX_IMAGE_BYTES
+                if len(data) > limit:
                     return None
     except (httpx.HTTPError, httpx.InvalidURL) as error:
         logger.debug("AI群友下载图片失败：{!r}", error)
         return None
-    return data_url(bytes(data))
+    return bytes(data)
+
+
+async def _picture(http: httpx.AsyncClient, url: str) -> str | None:
+    data = await _download(http, url)
+    # 解动图费 CPU，放到线程里，别卡住别的消息。
+    return data and await asyncio.to_thread(picture_url, data)
 
 
 async def _fetch_pictures(lines: list[Line]) -> None:
@@ -486,7 +494,7 @@ async def _fetch_pictures(lines: list[Line]) -> None:
     # 另开一个不带密钥的客户端：图片在 QQ 的服务器上，API key 不能发过去。
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http:
         for line in pending:
-            got = await asyncio.gather(*(_download(http, url) for url in line.images))
+            got = await asyncio.gather(*(_picture(http, url) for url in line.images))
             line.pictures = [picture for picture in got if picture]
 
 
@@ -772,10 +780,9 @@ async def _save_sticker(arguments: dict, conversation: Conversation) -> None:
     qq_file, src = line.sticker
     line.sticker = None
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http:
-        picture = await _download(http, src)
-    if picture is None:
+        data = await _download(http, src)
+    if data is None or data_url(data) is None:
         return
-    data = base64.b64decode(picture.partition(",")[2])
     name = sticker_book.add(
         str(arguments.get("name", "")), str(arguments.get("mood", "")), data, qq_file
     )

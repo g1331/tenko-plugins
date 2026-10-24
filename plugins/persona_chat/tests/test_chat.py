@@ -1,5 +1,7 @@
 """纯逻辑；插件包只能在宿主加载后导入，所以经 module fixture 取子模块。"""
 
+import base64
+import io
 import re
 from datetime import UTC, date, datetime
 
@@ -118,6 +120,32 @@ def test_recent_pictures_follow_their_line_within_budget(chat):
     assert user["content"][1]["image_url"] == {"url": "data:u2", "detail": "low"}
     assert old not in conversation.with_images(2)
     assert isinstance(chat.build_messages("人设", conversation, "提示")[2]["content"], str)
+
+
+def test_animated_gif_becomes_a_contact_sheet(chat):
+    from PIL import Image
+
+    frames = [Image.new("RGB", (40, 30), color) for color in ("red", "green", "blue", "white") * 3]
+    buffer = io.BytesIO()
+    frames[0].save(buffer, "GIF", save_all=True, append_images=frames[1:])
+    url = chat.picture_url(buffer.getvalue())
+    assert url.startswith("frames:data:image/jpeg;base64,")
+    sheet = Image.open(io.BytesIO(base64.b64decode(url.partition(",")[2])))
+    assert sheet.size == (120, 60)  # 12 帧抽 6 帧，3×2
+
+    still = io.BytesIO()
+    frames[0].save(still, "GIF")
+    assert chat.picture_url(still.getvalue()).startswith("data:image/gif;")
+    assert chat.picture_url(b"GIF89a broken").startswith("data:image/gif;")
+
+    conversation = chat.Conversation()
+    conversation.add("1", "群友(1)", "[表情包]", ["u"]).pictures = [url]
+    messages = chat.build_messages("人设", conversation, "提示", 1)
+    (blocks,) = (m["content"] for m in messages if isinstance(m["content"], list))
+    assert [b["type"] for b in blocks] == ["text", "image_url"]
+    assert "动图" in blocks[0]["text"] and blocks[1]["image_url"]["url"] == url.removeprefix(
+        "frames:"
+    )
 
 
 def test_data_url_sniffs_supported_formats(chat):
