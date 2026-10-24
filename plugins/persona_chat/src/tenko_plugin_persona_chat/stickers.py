@@ -44,8 +44,15 @@ class Stickers:
         path = entry and self.folder / entry["file"]
         return path if path and path.is_file() else None
 
-    def add(self, name: str, mood: str, data: bytes, qq_file: str) -> str | None:
-        """收进一张，返回最终的名字；名字不合法、格式不认识或已经收过就返回 ``None``。"""
+    def add(
+        self, name: str, mood: str, data: bytes, qq_file: str, replace: str = ""
+    ) -> tuple[str, list[str]] | None:
+        """收进一张，返回 (最终的名字, 腾位置丢掉的名字)。
+
+        名字不合法、格式不认识或已经收过就返回 ``None``。
+
+        满了先丢模型挑的 ``replace``；没挑或挑的不在收藏里，丢用得最少、最久没用的。
+        """
 
         name, mood = _clean(name, 12), _clean(mood, 60, r"[\s\[\]]+")
         kind = next((k for magic, k in _KINDS.items() if data.startswith(magic)), None)
@@ -60,10 +67,14 @@ class Stickers:
         final, n = name, 2
         while final in index:
             final, n = f"{name}{n}", n + 1
+        dropped = []
         while index and len(index) >= self.limit:
-            # 满了先丢用得最少、最久没用的。
-            stale = min(index, key=lambda k: (index[k]["used"], index[k]["last"]))
+            if replace in index:
+                stale = replace
+            else:
+                stale = min(index, key=lambda k: (index[k]["used"], index[k]["last"]))
             self._drop(index, stale)
+            dropped.append(stale)
         self.folder.mkdir(parents=True, exist_ok=True)
         (self.folder / file).write_bytes(data)
         now = time.time()
@@ -76,7 +87,7 @@ class Stickers:
             "last": now,
         }
         self.store.save(index)
-        return final
+        return final, dropped
 
     def edit(self, name: str, mood: str, new_name: str = "") -> str | None:
         """改备注，``new_name`` 合法且没被占用时顺带改名。
@@ -120,4 +131,10 @@ class Stickers:
         if not index:
             return "你的表情包收藏还是空的。"
         items = "\n".join(f"{name}：{s['mood']}" for name, s in index.items())
-        return f"你收藏的表情包（名字：图上的字、梗和什么时候发）：\n{items}"
+        full = (
+            f"收藏已经满了（{self.limit} 张）：再收新的要在 save_sticker 的 replace 里"
+            "填一张你最不想要的，腾出位置。\n"
+            if len(index) >= self.limit
+            else ""
+        )
+        return f"{full}你收藏的表情包（名字：图上的字、梗和什么时候发）：\n{items}"

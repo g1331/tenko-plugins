@@ -394,6 +394,23 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     assert lines[-2].text == "@你 [表情包:猫猫震惊]" and lines[-2].images == ("u4",)
 
 
+async def test_called_bot_still_talks_after_only_saving_a_sticker(module, fake_llm, monkeypatch):
+    async def download(http, url):
+        return GIF
+
+    monkeypatch.setattr(module, "_download", download)
+    monkeypatch.setattr(module.config, "search_daily", 0)
+    onebot = OneBot({"11": [{"file": "abc.gif", "sub_type": 1}]})
+    save = {"tool": "save_sticker", "number": 1, "name": "猫猫震惊", "mood": "吃惊"}
+    fake_llm.replies += [[save], [{"text": "收了"}]]
+    s = session([At("42"), Image(src="u1")], message_id="11", internal=onebot)
+    await feed(module, s)
+
+    assert module.sticker_book.name_of("abc.gif") == "猫猫震惊"
+    assert [force for _, force in fake_llm.requests] == [False, True]
+    assert module.conversations["group:100"].lines[-1].text == "收了"
+
+
 async def test_model_can_correct_a_sticker_note(module, fake_llm):
     module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
     edit = {

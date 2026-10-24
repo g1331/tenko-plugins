@@ -510,15 +510,15 @@ async def _fetch_pictures(lines: list[Line]) -> None:
             line.pictures = [picture for picture in got if picture]
 
 
-async def _ask(conversation: Conversation, hint: str, *, force: bool):
+async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: bool = False):
     budget = max(config.vision_images, 0)
     shown = conversation.with_images(budget)
     await _fetch_pictures(shown)
     persona = config.persona or PERSONA
 
     catalog = sticker_book.catalog() if config.sticker_limit else ""
-    # 眼前有表情包时不强制只能 send_message，模型才能顺手收藏；提示里仍要求它回复。
-    force = force and not any(line.sticker and line.pictures for line in shown)
+    # 眼前有表情包时第一轮不强制只能 send_message，模型才能顺手收藏；提示里仍要求它回复。
+    force = force and (retry or not any(line.sticker and line.pictures for line in shown))
 
     async def ask(images: int):
         messages = build_messages(persona, conversation, hint, images, catalog)
@@ -569,8 +569,8 @@ async def respond(
         conversation.unseen = 0
         usages: list[dict] = []
 
-        async def ask(hint: str, force: bool) -> list[dict]:
-            calls, usage = await _ask(conversation, hint, force=force)
+        async def ask(hint: str, force: bool, retry: bool = False) -> list[dict]:
+            calls, usage = await _ask(conversation, hint, force=force, retry=retry)
             usages.append(usage)
             if not in_sandbox():
                 now = datetime.now()
@@ -586,16 +586,17 @@ async def respond(
             again = None
             if searching and query.strip():
                 again = f"{hint}\n{search_hint(query, await _search(key, query))}"
-            elif searching and force and all("tool" in c for c in calls):
+            elif force and (searching or calls) and all("tool" in c for c in calls):
+                # 第一轮没强制（能搜，或眼前有表情包要能收藏）却没说话：再强制问一次。
                 again = hint
             if again is not None:
                 kept = [c for c in calls if c.get("tool") in ("save_sticker", "edit_sticker")]
                 if kept and not query.strip():
                     again = f"{again}\n{_STICKERS_DONE}"
-                calls = kept + await ask(again, force and not query.strip())
+                calls = kept + await ask(again, force and not query.strip(), retry=True)
                 if force and query.strip() and all("tool" in c for c in calls):
                     # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
-                    calls += await ask(f"{again}\n{_STICKERS_DONE}", True)
+                    calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             logger.warning("AI群友请求失败：HTTP {} {}", status, error.response.text[:200])
@@ -795,11 +796,18 @@ async def _save_sticker(arguments: dict, conversation: Conversation) -> None:
         data = await _download(http, src)
     if data is None or data_url(data) is None:
         return
-    name = sticker_book.add(
-        str(arguments.get("name", "")), str(arguments.get("mood", "")), data, qq_file
+    saved = sticker_book.add(
+        str(arguments.get("name", "")),
+        str(arguments.get("mood", "")),
+        data,
+        qq_file,
+        str(arguments.get("replace") or ""),
     )
-    if name:
+    if saved:
+        name, dropped = saved
         logger.info("AI群友收藏了表情包「{}」", name)
+        for old in dropped:
+            logger.info("AI群友收藏满了，丢掉了表情包「{}」", old)
 
 
 def _edit_sticker(arguments: dict, key: str) -> None:

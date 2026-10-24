@@ -186,26 +186,35 @@ PNG = b"\x89PNG" + b"0" * 20
 
 
 def test_stickers_dedupe_rename_evict_and_list(module, tmp_path):
-    # 包里的 stickers 是收藏实例，盖住了同名子模块
     stickers = type(module.sticker_book)(MemoryStore(tmp_path / "stickers.json"), limit=2)
     assert stickers.catalog() == "你的表情包收藏还是空的。"
-    assert stickers.add(" 猫猫[震惊] ", "吃惊、无语", PNG, "a.png") == "猫猫震惊"
+    assert stickers.add(" 猫猫[震惊] ", "吃惊、无语", PNG, "a.png") == ("猫猫震惊", [])
     assert stickers.add("别的名字", "x", PNG, "b.png") is None  # 同一张图
     assert stickers.add("狗头", "x", b"GIF8" + b"1" * 20, "a.png") is None  # 同一个 QQ 文件
-    assert stickers.add("猫猫震惊", "嘲讽", b"GIF8" + b"2" * 20, "c.gif") == "猫猫震惊2"
+    assert stickers.add("猫猫震惊", "嘲讽", b"GIF8" + b"2" * 20, "c.gif") == ("猫猫震惊2", [])
     assert stickers.add("坏图", "x", b"not an image", "d") is None
     assert stickers.name_of("a.png") == "猫猫震惊" and stickers.name_of("") is None
     assert stickers.catalog().endswith("猫猫震惊：吃惊、无语\n猫猫震惊2：嘲讽")
 
+    assert stickers.catalog().startswith("收藏已经满了（2 张）")
     stickers.use("猫猫震惊")
-    assert stickers.add("新来的", "开心", b"GIF8" + b"3" * 20, "e.gif") == "新来的"
-    assert list(stickers.index()) == ["猫猫震惊", "新来的"]  # 满了丢没用过的
+    new = stickers.add("新来的", "开心", b"GIF8" + b"3" * 20, "e.gif", replace="没有这张")
+    assert new == ("新来的", ["猫猫震惊2"])  # 满了没挑对：丢没用过的
+    assert list(stickers.index()) == ["猫猫震惊", "新来的"]
+    new = stickers.add("又来的", "开心", b"GIF8" + b"5" * 20, "g.gif", replace="猫猫震惊")
+    assert new == ("又来的", ["猫猫震惊"])  # 挑了就丢它，哪怕用过
+    assert list(stickers.index()) == ["新来的", "又来的"]
+    assert stickers.remove("又来的") and stickers.add("猫猫震惊", "吃惊、无语", PNG, "a.png") == (
+        "猫猫震惊",
+        [],
+    )
+    stickers.use("猫猫震惊")
     assert len(list((tmp_path / "stickers").iterdir())) == 2
     assert stickers.remove("新来的") and not stickers.remove("新来的")
     assert stickers.path("新来的") is None and stickers.path("猫猫震惊").is_file()
 
     # 改备注；新名字被占用就只改备注，空备注和不存在的名字不改
-    assert stickers.add("狗头", "嘲讽", b"GIF8" + b"4" * 20, "f.gif") == "狗头"
+    assert stickers.add("狗头", "嘲讽", b"GIF8" + b"4" * 20, "f.gif") == ("狗头", [])
     assert stickers.edit("猫猫震惊", "猫瞪眼「啊？」；吃惊时发", "狗头") == "猫猫震惊"
     assert stickers.edit("猫猫震惊", "猫瞪眼「啊？」；吃惊时发", "猫猫啊") == "猫猫啊"
     assert stickers.index()["猫猫啊"]["mood"] == "猫瞪眼「啊？」；吃惊时发"

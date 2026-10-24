@@ -65,6 +65,10 @@ SAVE_STICKER = {
                         "以及什么时候发，例如“猫瞪大眼「啊？」；听到离谱的事、被吓到时发”"
                     ),
                 },
+                "replace": {
+                    "type": "string",
+                    "description": "收藏满了才填：要丢掉腾位置的那张的名字，挑最不想要的",
+                },
             },
             "required": ["number", "name", "mood"],
         },
