@@ -225,8 +225,10 @@ def _speaker(session: Session) -> str:
 
 def render(
     elements: list, conversation: Conversation, self_ids: set[str], raw: list[dict] | None = None
-) -> tuple[str, bool, bool, tuple[str, ...], tuple[str, str] | None]:
-    """转成给模型看的文字，并返回 (文字, 是否 @ 了 bot, 是否回复了 bot, 图片地址, 表情包)。
+) -> tuple[str, bool, bool, tuple[str, ...], tuple[str, str] | None, tuple[str, ...]]:
+    """转成给模型看的文字。
+
+    返回 (文字, 是否 @ 了 bot, 是否回复了 bot, 图片地址, 表情包, 收藏里已有的表情包地址)。
 
     ``raw`` 是 OneBot 原始的图片段，按顺序对应消息里的图片，用来分出表情包和照片；
     表情包是第一张还没收藏的 (QQ 文件名, 地址)。
@@ -234,6 +236,7 @@ def render(
 
     parts: list[str] = []
     images: list[str] = []
+    known: list[str] = []
     raw = raw or []
     sticker: tuple[str, str] | None = None
     at_me = reply_me = False
@@ -262,7 +265,9 @@ def render(
             qq_file = str(info.get("file") or "")
             if str(info.get("sub_type")) == "1" or "emoji_id" in info:
                 if name := sticker_book.name_of(qq_file):
-                    parts.append(f"[表情包:{name}]")  # 收藏里有，模型认得，不用再看图
+                    parts.append(f"[表情包:{name}]")  # 收藏里有，平时看备注就够，不用再看图
+                    if element.src:
+                        known.append(element.src)
                     continue
                 parts.append("[表情包]")
                 if sticker is None and element.src:
@@ -275,7 +280,8 @@ def render(
             parts.append(f"[{element.name or '表情'}]")
         else:
             parts.append("[表情]" if getattr(element, "tag", "") == "onebot:mface" else "")
-    return " ".join("".join(parts).split()), at_me, reply_me, tuple(images), sticker
+    text = " ".join("".join(parts).split())
+    return text, at_me, reply_me, tuple(images), sticker, tuple(known)
 
 
 def _internal(session: Session):
@@ -334,11 +340,18 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         conversation = conversation.copy()
     elements = list(session.event.message.message)
     raw = await _raw_images(session) if any(isinstance(e, Image) for e in elements) else []
-    text, at_me, reply_me, images, sticker = render(elements, conversation, self_ids, raw)
+    text, at_me, reply_me, images, sticker, known = render(elements, conversation, self_ids, raw)
     # 唤醒词只认群友亲手打的字：@ 一个叫“大肥鱼”的群友、引用它的消息都不算叫 bot。
     spoken = "".join(e.text for e in elements if isinstance(e, Text))
     if not text:
         return
+    private = session.event.guild is None
+    calling = (
+        private or at_me or reply_me or is_reply_me or any(w in spoken for w in config.wake_words)
+    )
+    # 叫她时带的收藏表情包也给她看图：多半是要她看这张，光凭备注会认错。
+    if calling:
+        images += known
     role = _ROLES.get(await get_user_perm(session), "")
     line = conversation.add(
         session.event.message.id, _speaker(session), text, images, role, sticker
@@ -349,8 +362,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     if text.lstrip("@你 ").startswith(_command_prefixes()):
         return
 
-    private = session.event.guild is None
-    if private or at_me or reply_me or is_reply_me or any(w in spoken for w in config.wake_words):
+    if calling:
         now = time.monotonic()
         if now - _cooldowns.get((key, user_id), float("-inf")) < config.user_cooldown_seconds:
             return
