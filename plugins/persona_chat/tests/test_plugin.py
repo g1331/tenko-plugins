@@ -412,6 +412,16 @@ async def test_called_bot_still_talks_after_only_saving_a_sticker(module, fake_l
     assert module.conversations["group:100"].lines[-1].text == "收了"
 
 
+async def test_forced_reply_that_still_searches_is_asked_again(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "search_daily", 0)
+    fake_llm.replies += [[{"tool": "search", "query": "籽岷 梗"}], [{"text": "老MC主播嘛"}]]
+    await feed(module, session([At("42"), Text(" 籽岷有什么梗")], message_id="m1"))
+
+    (first, _), (second, force) = fake_llm.requests
+    assert force and module._JUST_TALK in second[-1]["content"]
+    assert module.conversations["group:100"].lines[-1].text == "老MC主播嘛"
+
+
 async def test_model_can_correct_a_sticker_note(module, fake_llm):
     module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
     edit = {

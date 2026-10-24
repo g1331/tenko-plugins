@@ -133,6 +133,7 @@ _TENKO = "Tenko 功能"
 _TENKO_CHARS = 100
 _MAX_SENDS = 2
 _STICKERS_DONE = "表情包已经处理好了，这次只说话。"
+_JUST_TALK = "这次不能搜，也别调用别的工具，直接说话。"
 # 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
 _ROLES = {
     Permission.GroupAdmin: "群管理",
@@ -583,18 +584,20 @@ async def respond(
         try:
             calls = await ask(hint, force and not searching)
             query = next((str(c.get("query", "")) for c in calls if c.get("tool") == "search"), "")
+            searched = bool(searching and query.strip())
             again = None
-            if searching and query.strip():
+            if searched:
                 again = f"{hint}\n{search_hint(query, await _search(key, query))}"
             elif force and (searching or calls) and all("tool" in c for c in calls):
-                # 第一轮没强制（能搜，或眼前有表情包要能收藏）却没说话：再强制问一次。
+                # 第一轮没强制（能搜，或眼前有表情包要能收藏）却没说话；或者强制了，
+                # DeepSeek 仍去调 search 之类的工具：点明只说话，再强制问一次。
                 again = hint
             if again is not None:
                 kept = [c for c in calls if c.get("tool") in ("save_sticker", "edit_sticker")]
-                if kept and not query.strip():
-                    again = f"{again}\n{_STICKERS_DONE}"
-                calls = kept + await ask(again, force and not query.strip(), retry=True)
-                if force and query.strip() and all("tool" in c for c in calls):
+                if not searched:
+                    again = f"{again}\n{_STICKERS_DONE if kept else _JUST_TALK}"
+                calls = kept + await ask(again, force and not searched, retry=True)
+                if force and searched and all("tool" in c for c in calls):
                     # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
                     calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
         except httpx.HTTPStatusError as error:
