@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+{#- 视觉沿用 bf-manager 网页：切角半透明面板、Oswald 数字、琥珀色强调、稀有度配色。 -#}
+<style>
+  @font-face { font-family: "Oswald"; src: url({{ asset("Oswald.ttf") }}) format("truetype"); font-weight: 200 700; }
+  {% if sc_font %}@font-face { font-family: "SC"; src: url({{ sc_font }}) format("woff2"); font-weight: 100 900; }{% endif %}
+  :root {
+    --amber: #fbbf24; --amber-deep: #f59e0b; --amber-soft: #fcd34d;
+    --w80: rgba(255,255,255,.8); --w55: rgba(255,255,255,.55); --w45: rgba(255,255,255,.45);
+    --w40: rgba(255,255,255,.4); --w25: rgba(255,255,255,.25); --line: rgba(255,255,255,.1);
+    --green: #10b981; --red: #ef4444;
+    --gold: #ca843a; --blue: #1e90ff; --skin-gold: #ecd996; --skin-blue: #bfcfde;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #000; }
+  body { width: 1000px; color: #fff; font-family: "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 14px;
+    -webkit-font-smoothing: antialiased; }
+  .d { font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-variant-numeric: tabular-nums; }
+  .page { position: relative; padding: 28px 28px 20px; overflow: hidden; }
+  .bg { position: absolute; inset: 0; z-index: 0; }
+  .bg i { position: absolute; inset: -12px; background-size: cover; background-position: center top; filter: blur(2px); }
+  .bg::before { content: ""; position: absolute; inset: 0; z-index: 1; background: rgba(0,0,0,.55); }
+  .bg::after { content: ""; position: absolute; inset: 0; z-index: 1;
+    background: linear-gradient(180deg, rgba(0,0,0,.75), rgba(0,0,0,.35) 40%, rgba(0,0,0,.9)); }
+  .page > *:not(.bg) { position: relative; z-index: 2; }
+  .panel { background: rgba(0,0,0,.45); backdrop-filter: blur(4px); padding: 22px 24px;
+    clip-path: polygon(0 20px, 20px 0, 100% 0, 100% calc(100% - 20px), calc(100% - 20px) 100%, 0 100%); }
+  .sh { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; font-size: 17px; font-weight: 600; }
+  .sh::before { content: ""; width: 3px; height: 16px; background: #fff; flex: none; }
+  .sh .aside { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--w40); }
+  .label { font-size: 11px; letter-spacing: .05em; color: rgba(255,255,255,.5); }
+  .eyebrow { font-family: "Oswald", sans-serif; font-size: 12px; letter-spacing: .2em; color: var(--amber-deep); text-transform: uppercase; }
+  .avatar { border-radius: 50%; object-fit: cover; background: rgba(255,255,255,.08); flex: none; border: 4px solid #6b6b72; }
+  .avatar.online { border-color: #3aca6b; }
+  .icon { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .bar { height: 4px; background: rgba(255,255,255,.07); }
+  .bar i { display: block; height: 100%; background: rgba(251,191,36,.8); }
+  .rarity-gold { color: var(--skin-gold); } .rarity-blue { color: var(--skin-blue); } .rarity-white { color: #fff; }
+  .star { width: 13px; height: 13px; flex: none; }
+  footer { margin-top: 16px; text-align: center; font-size: 11px; color: var(--w40); letter-spacing: .1em; }
+  {% block style %}{% endblock %}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="bg"><i style="background-image: url({{ background }})"></i></div>
+  {% block body %}{% endblock %}
+  <footer><span class="d">BF-MANAGER</span> · {{ source }} · <span class="d">{{ now }}</span></footer>
+</div>
+</body>
+</html>

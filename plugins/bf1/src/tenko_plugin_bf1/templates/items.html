@@ -1,0 +1,58 @@
+{% extends "_base.html" %}
+{% from "_macros.html" import star, avatar %}
+{#- 卡片排版，配色和稀有度沿用 bf-manager 网页的 EquipmentTable。 -#}
+{% block style %}
+  .who { display: flex; align-items: center; gap: 18px; margin-bottom: 20px; }
+  .who h1 { margin: 2px 0 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 34px; line-height: 1.2; word-break: break-all; }
+  .who h1 .tag { color: var(--w45); margin-right: 10px; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card { position: relative; background: rgba(0,0,0,.45); backdrop-filter: blur(4px);
+    clip-path: polygon(0 16px, 16px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%); }
+  .pic { position: relative; height: 128px; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, rgba(255,255,255,.1), rgba(255,255,255,.02) 70%);
+    border-bottom: 2px solid var(--accent); }
+  .pic img { max-width: 300px; max-height: 100px; object-fit: contain; }
+  .rank { position: absolute; left: 18px; top: 10px; font-family: "Oswald", sans-serif; font-size: 22px; font-weight: 700; color: var(--w40); }
+  .rank.top { color: var(--amber); }
+  .stars { position: absolute; right: 16px; top: 10px; display: inline-flex; align-items: center; gap: 4px;
+    font-family: "Oswald", sans-serif; font-size: 20px; font-weight: 700; }
+  .stars .star { width: 18px; height: 18px; }
+  .body { padding: 14px 20px 18px; }
+  .name { font-size: 19px; font-weight: 700; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { margin-top: 3px; font-size: 13px; color: var(--w45); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stats { display: grid; grid-template-columns: repeat({{ columns|length }}, 1fr); gap: 8px; margin-top: 14px;
+    padding-top: 12px; border-top: 1px solid var(--line); }
+  .stat .label { font-size: 12px; }
+  .stat .v { font-family: "Oswald", sans-serif; font-size: 21px; font-weight: 500; line-height: 1.3; margin-top: 2px; }
+  .stat:first-child .v { color: var(--amber); font-weight: 700; }
+  .empty { padding: 30px 0; text-align: center; color: var(--w40); }
+{% endblock %}
+{% block body %}
+<div class="who">
+  {{ avatar(avatar_url, false, 72) }}
+  <div>
+    <div class="eyebrow">Battlefield 1 · {{ title }}</div>
+    <h1>{% if tag %}<span class="tag">[{{ tag }}]</span>{% endif %}{{ name }}</h1>
+  </div>
+</div>
+<div class="cards">
+  {% for i in items %}
+  {#- 60 星以上底边染成稀有度色，其余用分隔线色。 -#}
+  <div class="card" style="--accent: {{ i.star_color if i.stars >= 60 else 'rgba(255,255,255,.08)' }}">
+    <div class="pic">
+      <span class="rank{{ ' top' if loop.index <= 3 }}">#{{ loop.index }}</span>
+      {% if i.stars %}<span class="stars" style="color: {{ i.star_color }}">{{ star(i.star_color) }}{{ i.stars }}</span>{% endif %}
+      {% if i.image %}<img src="{{ i.image }}">{% endif %}
+    </div>
+    <div class="body">
+      <div class="name">{{ i.name }}</div>
+      <div class="sub">{% if i.skin %}<span class="rarity-{{ i.rarity }}">{{ i.skin }}</span> · {% endif %}{{ i.category }}</div>
+      <div class="stats">
+        {% for label in columns %}<div class="stat"><div class="label">{{ label }}</div><div class="v">{{ i.stats[loop.index0] }}</div></div>{% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% if not items %}<section class="panel empty">还没有击杀记录</section>{% endif %}
+{% endblock %}

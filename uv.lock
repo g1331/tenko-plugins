@@ -4,6 +4,7 @@ requires-python = ">=3.11, <3.14"
 
 [manifest]
 members = [
+    "tenko-plugin-bf1",
     "tenko-plugin-persona-chat",
     "tenko-plugin-repeater",
 ]
@@ -1255,6 +1256,25 @@ version = "0.4.2"
 source = { git = "https://github.com/g1331/tenko?subdirectory=packages%2Ftenko-api&rev=f16d5dbfa63e8d3230a7f83b2a0bf28fbb39f9d1#f16d5dbfa63e8d3230a7f83b2a0bf28fbb39f9d1" }
 
 [[package]]
+name = "tenko-plugin-bf1"
+version = "0.1.0"
+source = { editable = "plugins/bf1" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "tenko-api" },
+    { name = "zhconv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3" },
+    { name = "tenko-api", specifier = ">=0.4,<0.5" },
+    { name = "zhconv", specifier = ">=1.4" },
+]
+
+[[package]]
 name = "tenko-plugin-persona-chat"
 version = "0.1.25"
 source = { editable = "plugins/persona_chat" }
@@ -1529,6 +1549,12 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c0/5e/3ce00497c5c0babb74d4130c10c3828ccd215b4819d12020c42429f991ac/yarl-1.25.1-cp313-cp313-win_arm64.whl", hash = "sha256:b10dd0557ba422715b5206b3743192135a6022acca8baec51aa127d0a75db8fe", size = 97270, upload-time = "2026-09-15T19:32:14.127Z" },
     { url = "https://files.pythonhosted.org/packages/54/22/318c7980066769c6bcd9221ed2248294f5698811da099013098c670565ed/yarl-1.25.1-py3-none-any.whl", hash = "sha256:681c758b0490f9e96b78e5fa8e8dc6e648e9185bb6eaebe73183c33ea0c445f3", size = 63617, upload-time = "2026-09-15T19:34:59.616Z" },
 ]
+
+[[package]]
+name = "zhconv"
+version = "1.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/47/c8ae2d5d4025e253211ff3d8c163f457db1da94976cb582337a5ab76cb87/zhconv-1.4.3.tar.gz", hash = "sha256:ad42d9057ca0605f8e41d62b67ca797f879f58193ee6840562c51459b2698c45", size = 211571, upload-time = "2021-10-31T05:59:44.096Z" }
 
 [[package]]
 name = "zipp"
