@@ -186,13 +186,21 @@ SUMMARY_PROMPT = """\
 
 
 def mention_hint(number: int, mood: str = "call", said: str = "") -> str:
-    """``call`` 必须回；``again`` 是连着来回好几轮；``tired`` 是最近说太多话、累了。
+    """``call`` 必须回；``named`` 是只提到她的名字；``again`` 是连着来回好几轮；
+    ``tired`` 是最近说太多话、累了。
 
     ``said`` 是叫她的那条的内容：原话放到最后，她才不会被前面刚发的图带跑、忘了回问题。
     """
 
     said = said.removeprefix("@你").strip()[:80]
     called = f"#{number} 在叫你：“{said}”" if said else f"#{number} 在叫你"
+    if mood == "named":
+        return (
+            f"#{number} 提到了你的名字：“{said}”，但没 @ 你、也没引用你。"
+            "你这名字很火，不少人自己也部署了一个同名的 AI：说“我的”“我电脑里的”“我把它当女儿养”，"
+            "多半是在说他们自己那个，不是你。是在叫你、问你、跟你说话就回；"
+            "在说他们自己那个就别当成在说你，有意思就像旁观的群友那样接一句，否则调用 stay_silent。"
+        )
     if mood == "again":
         return f"{called}。你们已经连着来回好几轮了，没有新内容就别回，调用 stay_silent。"
     if mood == "tired":

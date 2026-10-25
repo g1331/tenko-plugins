@@ -443,6 +443,9 @@ async def test_wake_word_only_counts_in_typed_text(module, fake_llm):
 
     await feed(module, session([At("77", name="大肥鱼"), Text(" 大肥鱼你说呢")], user="3"))
     assert len(fake_llm.requests) == 1
+    # 只提到名字不强制回：很多人自己部署了大肥鱼，“我的大肥鱼”不一定在说她
+    ((messages, force),) = fake_llm.requests
+    assert not force and "部署了一个同名的 AI" in messages[-1]["content"]
 
 
 async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm, monkeypatch):

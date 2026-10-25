@@ -1,7 +1,7 @@
 """AI 群友：接入 DeepSeek（OpenAI 兼容接口），用人设口吻陪群友聊天。
 
-被 @、被回复、听到唤醒词或在私聊里，一定回复；群里累计若干条消息后，让模型自己判断要不要
-插一句。模型只能往当前会话发文字和收藏的表情包，以及收藏群友发的表情包，不能做别的事。
+被 @、被回复或在私聊里，一定回复；只听到唤醒词时由模型判断是不是在叫她；群里累计若干条
+消息后，让模型自己判断要不要插一句。模型只能往当前会话发文字和收藏的表情包，以及收藏群友发的表情包，不能做别的事。
 请求组装和记账在 :mod:`.chat`，接口调用在 :mod:`.llm`，表情包收藏在 :mod:`.stickers`。
 """
 
@@ -541,6 +541,9 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         if streak >= _STREAK_MUTE or load >= 1.5:
             return
         mood = "again" if streak >= _STREAK_LOOSE else "tired" if load >= 1 else "call"
+        # 只是提到名字：很多人自己部署了同名的 AI，“我的大肥鱼”不一定在说她，让她自己判断。
+        if mood == "call" and not (private or at_me or reply_me or is_reply_me):
+            mood = "named"
         await respond(session, conversation, line, force=mood == "call", mood=mood)
     elif not private and not lookalike and key not in _waiters:
         now = time.monotonic()
