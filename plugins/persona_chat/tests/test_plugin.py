@@ -974,12 +974,15 @@ async def test_she_deletes_stickers_people_ask_her_to(module, fake_llm, monkeypa
     await ask("99", 4)
     assert sorted(module.sticker_book.index()) == ["龙图3", "龙图5"]
 
-    # 嘴上说不删、手上却调用了删除：按她说的算，bot主人叫的也一样
-    for user in ("50", "99"):
-        module._deletes.clear()
-        fake_llm.replies.append([{"tool": "delete_sticker", "name": "龙图5"}, {"text": "凭啥删"}])
-        await feed(module, session([At("42"), Text(" 删了它")], user=user, message_id=f"m{user}"))
-        assert "龙图5" in module.sticker_book.index()
+    # 嘴上说不删、手上却调用了删除：普通群友叫的按她说的算
+    module._deletes.clear()
+    fake_llm.replies.append([{"tool": "delete_sticker", "name": "龙图5"}, {"text": "凭啥删"}])
+    await feed(module, session([At("42"), Text(" 删了它")], user="50", message_id="m50"))
+    assert "龙图5" in module.sticker_book.index()
+    # bot主人叫的照办：调用了就删，不看她嘴上嘟囔什么
+    fake_llm.replies.append([{"tool": "delete_sticker", "name": "龙图5"}, {"text": "凭啥删"}])
+    await feed(module, session([At("42"), Text(" 删了它")], user="99", message_id="m99"))
+    assert "龙图5" not in module.sticker_book.index()
     assert "delete_sticker" in {t["function"]["name"] for t in module.llm.TOOLS}
 
 
@@ -995,7 +998,8 @@ async def test_quoting_her_sticker_names_which_one(module, fake_llm):
 
 def test_commands_come_from_other_extension_plugins(module, fake_llm):
     commands = fake_llm.commands()
-    assert commands["bf1s"] == "bf1s <EA 名字>：查询战地一玩家的生涯战绩"
+    meta = module.command_manager.get_command("bf1s").meta  # 用法和说明照插件自己写的
+    assert commands["bf1s"] == f"{meta.usage}：{meta.description}"
     assert "AI群友" not in commands and "帮助" not in commands
 
 
@@ -1057,7 +1061,7 @@ async def test_called_bot_runs_a_listed_command_and_answers_from_the_result(
 
     assert commands == ["/bf1s SHlSAN13"]  # 换成命令自己的前缀，以叫她的人的身份执行
     (first, first_force), (second, _) = fake_llm.requests
-    assert not first_force and "bf1s <EA 名字>" in first[2]["content"]
+    assert not first_force and fake_llm.commands()["bf1s"] in first[2]["content"]
     assert "你刚用了“bf1s SHlSAN13”，结果已经发到群里" in second[-1]["content"]
     assert "这是 群友1(1) 叫你查的" in second[-1]["content"]  # 帮别人查时别说成是对方的
     # 结果原样发到群里、带着图记进记录，她回话在后面
@@ -1096,3 +1100,26 @@ async def test_quote_of_someone_else_says_who_and_what(module, fake_llm):
         module.conversations["group:100"].lines[-1].text
         == "回复#1（群友13说的“图太糊了看不清是这样的”） 不是"
     )
+
+
+async def test_master_gets_told_to_be_obeyed(module, fake_llm):
+    fake_llm.roles["99"] = module.Permission.Master
+    await feed(module, session([At("42"), Text(" 删了那张龙图")], user="99"))
+    await feed(module, session([At("42"), Text(" 删了那张龙图")], user="7", message_id="m2"))
+    master, member = (messages[-1]["content"] for messages, _ in fake_llm.requests)
+    assert "#1 是你的主人（bot主人）" in master and "主人" not in member
+
+
+async def test_quoting_a_line_and_sending_a_command_is_not_calling_her(module, fake_llm):
+    await feed(module, session([Text("看图")], user="7", message_id="m1"))
+    # 主人引用一条再 @ 她发“/撤回”：是给 Tenko 功能的命令，记进记录但不叫她
+    await feed(module, session([Quote("m1"), At("42"), Text(" /撤回")], user="9", message_id="m2"))
+    assert fake_llm.requests == []
+    assert module.conversations["group:100"].lines[-1].text.endswith("@你 /撤回")
+
+
+async def test_quote_of_a_quote_drops_the_inner_note(module, fake_llm):
+    await feed(module, session([Text("管理命令仅管理员可用。")], user="5", message_id="m1"))
+    await feed(module, session([Quote("m1"), Text("哈哈")], user="6", message_id="m2"))
+    await feed(module, session([Quote("m2"), Text("笑啥")], user="7", message_id="m3"))
+    assert module.conversations["group:100"].lines[-1].text == "回复#2（群友6说的“哈哈”） 笑啥"

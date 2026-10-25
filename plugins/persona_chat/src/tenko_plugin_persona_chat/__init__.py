@@ -69,6 +69,7 @@ from .persona import (
     SHORT_HINT,
     UNPROMPTED_HINT,
     answer_hint,
+    boss_hint,
     command_hint,
     day_hint,
     mention_hint,
@@ -375,7 +376,9 @@ def render(
                 mine = quoted.speaker is None and re.fullmatch(r"\[表情:[^\]]+\]", quoted.text)
                 # 只给编号她得自己回头翻是谁说的，常翻错人：把谁说的、说了啥带上。
                 who = "你" if quoted.speaker is None else quoted.speaker.rpartition("(")[0]
-                said = quoted.text if len(quoted.text) <= 20 else quoted.text[:20] + "…"
+                # 被引用的那条自己也是引用时，去掉它开头那层“回复…”，不然注释套注释读不懂。
+                said = re.sub(r"^回复(?:#\d+（.*?）|\[.*?\]) ", "", quoted.text)
+                said = said if len(said) <= 20 else said[:20] + "…"
                 parts.append(
                     f"回复#{quoted.number}（你发的{quoted.text}） "
                     if mine
@@ -536,7 +539,8 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             old.sharp = True
     _changed(key)
     # 命令也记进上下文（群里别的 bot 的游戏、群友的示范都靠它看懂），但不算在叫 bot。
-    if text.lstrip("@你 ").startswith(_command_prefixes()):
+    # 只看亲手打的字：引用一条再 @ 她发“/撤回”，记录里开头是“回复#…”，也是命令。
+    if spoken.lstrip().startswith(_command_prefixes()):
         return
 
     if calling:
@@ -922,6 +926,8 @@ async def respond(
                 if follow
                 else UNPROMPTED_HINT
             )
+        if target is not None and target.role.endswith(_TRUSTED):
+            hint += boss_hint(target.number, target.role.split()[-1])
         if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
             hint += LONG_HINT
         said = [line.text for line in conversation.lines if line.speaker is None][-30:]
@@ -973,7 +979,7 @@ async def respond(
                 if not searched:
                     again = f"{again}\n{_STICKERS_DONE if kept else _JUST_TALK}"
                 calls = kept + await ask(again, force and not searched, retry=True)
-                if force and searched and all("tool" in c for c in calls):
+                if force and all("tool" in c for c in calls):
                     # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
                     calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
         except httpx.HTTPStatusError as error:
@@ -1254,7 +1260,7 @@ async def _delete_sticker(name: str, key: str, trusted: bool, said: str) -> None
     """删掉一张收藏；收藏所有群共用，删了记日志，被带偏了能查到是哪个会话、原来写的什么。
 
     模型常一边调用删除一边嘴上说“凭啥删”“我留着”：按她说的话再问一句答应了没有，答应了才删。
-    bot主人、bot管理员叫的也要问，不然删了她嘴上还说留着；他们只是不受每天次数限制。
+    bot主人、bot管理员叫的不问、不限次数：她调用了就删，那句确认实测常把“哈？…行 删了”判成没答应。
     """
 
     today = datetime.now().date().isoformat()
@@ -1264,7 +1270,7 @@ async def _delete_sticker(name: str, key: str, trusted: bool, said: str) -> None
     mood = sticker_book.index().get(name, {}).get("mood")
     if mood is None:
         return
-    if said.strip() and not await _agreed(name, said, key):
+    if not trusted and said.strip() and not await _agreed(name, said, key):
         logger.info("AI群友在 {} 嘴上没答应删「{}」，不删：{}", key, name, said)
         return
     if sticker_book.remove(name):
