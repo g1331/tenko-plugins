@@ -268,6 +268,22 @@ def _speaker(session: Session) -> str:
     return f"{name}({session.user.id})"
 
 
+def _role(session: Session, level: int) -> str:
+    """发言人的身份。宿主的权限是群身份和 bot 授权取高，群主兼 bot主人只剩“bot主人”，
+    她就不认这个群主了：有 bot 身份时把群身份也标上，例如“群主 bot主人”。"""
+
+    role = _ROLES.get(level, "")
+    if level < Permission.BotAdmin or session.event.guild is None:
+        return role
+    member = session.event.member
+    ids = {str(getattr(r, "id", "")).lower() for r in getattr(member, "roles", None) or ()}
+    if ids & {"owner", "群主"}:
+        return f"群主 {role}"
+    if ids & {"admin", "administrator", "管理员"}:
+        return f"群管理 {role}"
+    return role
+
+
 _FORWARD_CHARS = 300
 _FORWARD_IMAGES = 4
 
@@ -496,7 +512,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     # 叫她时带的收藏表情包也给她看图：多半是要她看这张，光凭备注会认错。
     if calling:
         images += known
-    role = _ROLES.get(await get_user_perm(session), "")
+    role = _role(session, await get_user_perm(session))
     line = conversation.add(
         session.event.message.id, speaker, text, images, role, sticker, counted=not lookalike
     )
@@ -951,7 +967,7 @@ async def respond(
             await _save_sticker(arguments, conversation)
         for arguments in edits:
             _edit_sticker(arguments, key)
-        trusted = target is not None and target.role in _TRUSTED
+        trusted = target is not None and target.role.endswith(_TRUSTED)
         said = "\n".join(c["text"] for c in calls[:_MAX_SENDS])
         for arguments in deletes:
             await _delete_sticker(str(arguments.get("name") or ""), key, trusted, said)
@@ -1138,7 +1154,8 @@ def _edit_sticker(arguments: dict, key: str) -> None:
 async def _delete_sticker(name: str, key: str, trusted: bool, said: str) -> None:
     """删掉一张收藏；收藏所有群共用，删了记日志，被带偏了能查到是哪个会话、原来写的什么。
 
-    别人叫删的，模型常一边调用删除一边嘴上说“凭啥删”：按她说的话再问一句答应了没有，答应了才删。
+    模型常一边调用删除一边嘴上说“凭啥删”“我留着”：按她说的话再问一句答应了没有，答应了才删。
+    bot主人、bot管理员叫的也要问，不然删了她嘴上还说留着；他们只是不受每天次数限制。
     """
 
     today = datetime.now().date().isoformat()
@@ -1148,7 +1165,7 @@ async def _delete_sticker(name: str, key: str, trusted: bool, said: str) -> None
     mood = sticker_book.index().get(name, {}).get("mood")
     if mood is None:
         return
-    if not trusted and said.strip() and not await _agreed(name, said, key):
+    if said.strip() and not await _agreed(name, said, key):
         logger.info("AI群友在 {} 嘴上没答应删「{}」，不删：{}", key, name, said)
         return
     if sticker_book.remove(name):

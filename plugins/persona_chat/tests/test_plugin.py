@@ -578,6 +578,16 @@ async def test_lines_carry_the_real_role_not_the_nickname(module, fake_llm):
     )
 
 
+async def test_owner_who_is_also_bot_master_keeps_both_roles(module, fake_llm):
+    fake_llm.roles["9"] = module.Permission.Master  # 宿主取高，只给出 bot主人
+    s = session([At("42"), Text(" 我就是群主")], user="9", message_id="m1")
+    s.event.member = SimpleNamespace(nick=None, roles=[SimpleNamespace(id="owner")])
+    await feed(module, s)
+
+    ((messages, _),) = fake_llm.requests
+    assert untimed(messages[4]["content"]) == "#1 [群友9(9) 群主 bot主人] @你 我就是群主"
+
+
 async def test_private_reply_is_not_quoted(module, fake_llm):
     fake_llm.replies.append([{"text": "在呢", "reply_to": 99}])
     s = session([Text("你好")], group=None)
@@ -955,16 +965,16 @@ async def test_she_deletes_stickers_people_ask_her_to(module, fake_llm, monkeypa
         await ask(str(10 + i), i)
     assert sorted(module.sticker_book.index()) == ["龙图3", "龙图4", "龙图5"]
 
-    fake_llm.roles["99"] = module.Permission.Master  # bot主人叫她删不限次数，也不用再问
-    asked = len(answers)
+    fake_llm.roles["99"] = module.Permission.Master  # bot主人叫她删不限次数
     await ask("99", 4)
-    assert sorted(module.sticker_book.index()) == ["龙图3", "龙图5"] and len(answers) == asked
+    assert sorted(module.sticker_book.index()) == ["龙图3", "龙图5"]
 
-    # 嘴上说不删、手上却调用了删除：按她说的算
-    module._deletes.clear()
-    fake_llm.replies.append([{"tool": "delete_sticker", "name": "龙图5"}, {"text": "凭啥删"}])
-    await feed(module, session([At("42"), Text(" 删了它")], user="50", message_id="m50"))
-    assert "龙图5" in module.sticker_book.index()
+    # 嘴上说不删、手上却调用了删除：按她说的算，bot主人叫的也一样
+    for user in ("50", "99"):
+        module._deletes.clear()
+        fake_llm.replies.append([{"tool": "delete_sticker", "name": "龙图5"}, {"text": "凭啥删"}])
+        await feed(module, session([At("42"), Text(" 删了它")], user=user, message_id=f"m{user}"))
+        assert "龙图5" in module.sticker_book.index()
     assert "delete_sticker" in {t["function"]["name"] for t in module.llm.TOOLS}
 
 
