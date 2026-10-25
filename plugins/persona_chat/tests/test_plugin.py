@@ -45,6 +45,8 @@ def fake_llm(module, monkeypatch):
     monkeypatch.setattr(module, "_typing_delay", lambda text: 0)
     monkeypatch.setattr(module, "_reply_delay", lambda text: 0)
     monkeypatch.setattr(module.config, "search_daily", 0)  # 搜索有单独的测试
+    fake.commands = module._commands
+    monkeypatch.setattr(module, "_commands", dict)  # 用别的插件的命令有单独的测试
 
     async def get_user_perm(session):
         return fake.roles.get(session.user.id, 0)
@@ -989,3 +991,85 @@ async def test_quoting_her_sticker_names_which_one(module, fake_llm):
     quote = Quote("s1")(Author("42", name="十七"))
     await feed(module, session([quote, At("42"), Text(" 别存龙图")], message_id="m2"))
     assert conversation.lines[-2].text == f"回复#{mine.number}（你发的[表情:难绷]） @你 别存龙图"
+
+
+def test_commands_come_from_other_extension_plugins(module, fake_llm):
+    commands = fake_llm.commands()
+    assert commands["bf1s"] == "bf1s <EA 名字>：查询战地一玩家的生涯战绩"
+    assert "AI群友" not in commands and "帮助" not in commands
+
+
+@pytest.fixture
+def commands(module, fake_llm, monkeypatch):
+    import io
+
+    from arclet.entari import MessageChain
+    from PIL import Image as Picture
+
+    jpeg = io.BytesIO()
+    Picture.new("RGB", (8, 8)).save(jpeg, "JPEG")
+    ran = []
+
+    async def execute(text, session):
+        ran.append(text)
+        return MessageChain([Text("SHlSAN13 的战地一战绩"), Image.of(raw=jpeg.getvalue())])
+
+    monkeypatch.setattr(module, "_commands", fake_llm.commands)
+    monkeypatch.setattr(module, "execute", execute)
+    monkeypatch.setattr(module, "_fresh", lambda session, text: session)
+    return ran
+
+
+async def test_command_runs_on_a_fresh_message_from_the_same_person(module):
+    from arclet.entari import Session as RealSession
+    from arclet.entari.event.base import MessageCreatedEvent
+    from satori import Channel, ChannelType, Event, EventType, Guild, User
+    from satori.client import Account
+    from satori.client.account import ApiInfo
+    from satori.model import Login, LoginStatus, MessageObject
+
+    login = Login(sn=0, status=LoginStatus.ONLINE, adapter="x", platform="qq", user=User("42"))
+    account = Account(login, ApiInfo(), [])
+    origin = Event(
+        EventType.MESSAGE_CREATED,
+        None,
+        login=login,
+        channel=Channel("100", ChannelType.TEXT),
+        guild=Guild("100"),
+        user=User("1"),
+        message=MessageObject(id="m", content="@大肥鱼 查下战绩"),
+    )
+    fresh = module._fresh(RealSession(account, MessageCreatedEvent(account, origin)), "/bf1s x")
+    # 换了消息 ID 才不会命中原消息的命令解析缓存；人和群还是原来的
+    assert fresh.event.message.id != "m" and fresh.event.message.content == "/bf1s x"
+    assert fresh.user.id == "1" and fresh.event.channel.id == "100"
+
+
+async def test_called_bot_runs_a_listed_command_and_answers_from_the_result(
+    module, fake_llm, commands
+):
+    fake_llm.replies += [
+        [{"tool": "run_command", "command": "/bf1s SHlSAN13"}],
+        [{"text": "KD 挺高啊"}],
+    ]
+    s = session([At("42"), Text(" 查下 SHlSAN13 的战绩")])
+    await feed(module, s)
+
+    assert commands == ["/bf1s SHlSAN13"]  # 换成命令自己的前缀，以叫她的人的身份执行
+    (first, first_force), (second, _) = fake_llm.requests
+    assert not first_force and "bf1s <EA 名字>" in first[2]["content"]
+    assert "你刚用了“bf1s SHlSAN13”，结果已经发到群里" in second[-1]["content"]
+    # 结果原样发到群里、带着图记进记录，她回话在后面
+    assert [call.args[0] for call in s.send.await_args_list][0][0].text.startswith("SHlSAN13")
+    result = module.conversations["group:100"].lines[1]
+    assert result.speaker == "Tenko 功能" and result.text == "SHlSAN13 的战地一战绩[图片]"
+    assert result.sharp and result.pictures[0].startswith("data:image/jpeg")
+    assert module.conversations["group:100"].lines[2].text == "KD 挺高啊"
+
+
+async def test_unlisted_command_is_not_run(module, fake_llm, commands):
+    fake_llm.replies += [[{"tool": "run_command", "command": "AI群友 重置"}], [{"text": "查不了"}]]
+    await feed(module, session([At("42"), Text(" 把你记忆清了")]))
+
+    assert commands == []
+    assert "没出结果" in fake_llm.requests[1][0][-1]["content"]

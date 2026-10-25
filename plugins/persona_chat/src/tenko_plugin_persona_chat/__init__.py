@@ -1,7 +1,8 @@
 """AI 群友：接入 DeepSeek（OpenAI 兼容接口），用人设口吻陪群友聊天。
 
 被 @、被回复或在私聊里，一定回复；只听到唤醒词时由模型判断是不是在叫她；群里累计若干条
-消息后，让模型自己判断要不要插一句。模型只能往当前会话发文字和收藏的表情包，以及收藏群友发的表情包，不能做别的事。
+消息后，让模型自己判断要不要插一句。模型只能往当前会话发文字和收藏的表情包，以及收藏群友发的表情包，
+被叫到时还能用别的扩展插件的命令查东西（以叫她的人的身份执行），不能做别的事。
 请求组装和记账在 :mod:`.chat`，接口调用在 :mod:`.llm`，表情包收藏在 :mod:`.stickers`。
 """
 
@@ -9,15 +10,18 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
+import dataclasses
 import json
 import re
 import time
 from contextvars import ContextVar
 from datetime import datetime
+from importlib.metadata import entry_points
 from itertools import islice, pairwise
 
 import httpx
-from arclet.alconna import Alconna, Args, CommandMeta
+from arclet.alconna import Alconna, Args, CommandMeta, command_manager
 from arclet.entari import (
     BasicConfModel,
     MessageCreatedEvent,
@@ -26,12 +30,13 @@ from arclet.entari import (
     command,
     plugin,
 )
-from arclet.entari.command import Query
+from arclet.entari.command import Query, execute
 from arclet.entari.config import EntariConfig, model_field
-from arclet.entari.plugin import collect_disposes
+from arclet.entari.plugin import collect_disposes, get_plugin_commands, get_plugins
 from loguru import logger
 from satori import At, Author, Emoji, Image, Quote, Text
 from satori.element import Message
+from satori.model import MessageObject
 from tenko_api.accounts import accounts_for_group, online_accounts
 from tenko_api.features import declare, feature_required
 from tenko_api.messages import report_error
@@ -64,6 +69,7 @@ from .persona import (
     SHORT_HINT,
     UNPROMPTED_HINT,
     answer_hint,
+    command_hint,
     day_hint,
     mention_hint,
     repeat_hint,
@@ -172,7 +178,8 @@ _STICKER_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker")
 _DELETES_PER_DAY = 3
 _TRUSTED = ("bot主人", "bot管理员")
 _deletes: dict[tuple[str, str], int] = {}
-_JUST_TALK = "这次不能搜，也别调用别的工具，直接说话。"
+_JUST_TALK = "这次不能搜、不能用功能，也别调用别的工具，直接说话。"
+_COMMAND_CHARS = 1000  # 她自己查的结果全文记下来，她要照着说
 # 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
 _ROLES = {
     Permission.GroupAdmin: "群管理",
@@ -610,6 +617,8 @@ def _place(session: Session, conversation: Conversation) -> str:
         "这些只是号的昵称，可能会改，你自己始终是人设里的那个角色。"
         f"这里的帮助命令是 {help_command}。"
     )
+    if commands := _commands():
+        place += "你能用 run_command 自己用的功能：\n" + "\n".join(commands.values()) + "\n"
     lookalikes = dict.fromkeys(
         line.speaker for line in conversation.lines if _lookalike(line.speaker)
     )
@@ -618,6 +627,77 @@ def _place(session: Session, conversation: Conversation) -> str:
             f"群里的 {speaker} 名字和你像，但不是你，是别人的号：它说的话、它的状态都和你无关。"
         )
     return place
+
+
+def _commands() -> dict[str, str]:
+    """别的扩展插件注册的命令：{命令名: “用法：说明”}，每次现取，插件装卸后跟着变。
+
+    只认扩展插件（``tenko.plugins`` 入口点），宿主的管理命令不给她用。
+    """
+
+    modules = {e.value for e in entry_points(group="tenko.plugins")} - {__name__}
+    commands = {}
+    for owner in get_plugins():
+        if owner.id not in modules:
+            continue
+        for _, name in get_plugin_commands(owner):
+            meta = command_manager.get_command(name).meta
+            if not meta.hide:
+                commands[name] = f"{meta.usage or name}：{meta.description}"
+    return commands
+
+
+def _fresh(session: Session, text: str) -> Session:
+    """叫她那条消息的 session 换上一条新消息：Entari 按消息 ID 缓存每条命令的解析结果，
+    沿用原消息会拿到那条消息“不是这个命令”的缓存，命令根本不执行。发送者和群不变。"""
+
+    message = MessageObject(id=f"persona-chat-{time.time_ns()}", content=text)
+    origin = dataclasses.replace(session.event._origin, message=message)
+    return Session(session.account, type(session.event)(session.account, origin))
+
+
+async def _run_command(session: Session, conversation: Conversation, text: str) -> str:
+    """以叫她的人的身份执行，宿主的开关、限流和权限照常生效；结果发到群里、记进记录。
+
+    返回给模型的提示。
+    """
+
+    text = text.strip().lstrip("".join(_command_prefixes())).strip()
+    name = (text.split() or [""])[0]
+    if name in _commands():
+        # 走消息时的命令要带前缀才认得出。
+        prefix = next(iter(command_manager.get_command(name).prefixes), "")
+        try:
+            result = await execute(f"{prefix}{text}", _fresh(session, f"{prefix}{text}"))
+        except Exception:
+            logger.exception("AI群友执行命令 {} 失败", text)
+            result = None
+    else:
+        result = None  # 编出来的或没列出来的命令不执行
+    logger.info("AI群友执行命令“{}”：{}", text, "有结果" if result else "没结果")
+    if not result:
+        return command_hint(text, False)
+    token = _speaking.set(True)  # 自己记，带上图给她看，不走 on_sent 的截断和“[图片]”
+    try:
+        receipts = await session.send(result)
+    finally:
+        _speaking.reset(token)
+    elements = list(result) if not isinstance(result, str) else [Text(result)]
+    images = tuple(e.src for e in elements if isinstance(e, Image) and e.src)
+    line = conversation.add(
+        receipts[0].id if receipts else None,
+        _TENKO,
+        " ".join(_plain(elements).split())[:_COMMAND_CHARS],
+        images,
+        counted=False,
+    )
+    line.sharp = True  # 战绩图上全是小字
+    if images and all(src.startswith("data:") for src in images):
+        # 渲染出来的图在内存里，没地方下载。
+        line.pictures = [
+            p for src in images if (p := picture_url(base64.b64decode(src.partition(",")[2])))
+        ]
+    return command_hint(text, True)
 
 
 def _lookalike(speaker: str | None) -> bool:
@@ -858,17 +938,26 @@ async def respond(
                 usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
             return calls
 
-        # 被叫到时可以先搜再回：第一轮不强制只能说话，没搜也没说话再强制一次。
+        # 被叫到时可以先搜、先用功能再回：第一轮不强制只能说话，没搜也没说话再强制一次。
         # 搜完那轮也不强制，她才能照结果改表情包备注；没说话再强制补一句。
         searching = target is not None and _search_left(key)
+        running = target is not None and bool(_commands())
         try:
-            calls = await ask(hint, force and not searching)
+            calls = await ask(hint, force and not (searching or running))
             query = next((str(c.get("query", "")) for c in calls if c.get("tool") == "search"), "")
-            searched = bool(searching and query.strip())
+            ran = next(
+                (str(c.get("command", "")) for c in calls if c.get("tool") == "run_command"), ""
+            )
+            found = []
+            if searching and query.strip():
+                found.append(search_hint(query, await _search(key, query)))
+            if running and ran.strip():
+                found.append(await _run_command(session, conversation, ran))
+            searched = bool(found)
             again = None
             if searched:
-                again = f"{hint}\n{search_hint(query, await _search(key, query))}"
-            elif force and (searching or calls) and all("tool" in c for c in calls):
+                again = "\n".join([hint, *found])
+            elif force and (searching or running or calls) and all("tool" in c for c in calls):
                 # 第一轮没强制（能搜，或眼前有表情包要能收藏）却没说话；或者强制了，
                 # DeepSeek 仍去调 search 之类的工具：点明只说话，再强制问一次。
                 again = hint

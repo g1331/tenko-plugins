@@ -1,5 +1,6 @@
 """调用 OpenAI 兼容的 /chat/completions；模型只能说话（send_message）或不说（stay_silent），
-顺手可以收藏表情包（save_sticker），不确定的事实可以先搜（search）。"""
+顺手可以收藏表情包（save_sticker），不确定的事实可以先搜（search），
+也能用别的插件的查询功能（run_command）。"""
 
 from __future__ import annotations
 
@@ -126,6 +127,25 @@ SEARCH = {
         },
     },
 }
+RUN_COMMAND = {
+    "type": "function",
+    "function": {
+        "name": "run_command",
+        "description": (
+            "用群里装的功能查一下，结果会发到群里，出来后再回复。只能用提示里列出的命令。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "命令和参数，不带前缀，例如“bf1s SHlSAN13”",
+                }
+            },
+            "required": ["command"],
+        },
+    },
+}
 FORCE_SEND = {"type": "function", "function": {"name": "send_message"}}
 
 
@@ -148,7 +168,15 @@ async def summarize(
     return (data["choices"][0]["message"].get("content") or "").strip(), data.get("usage") or {}
 
 
-TOOLS = [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, EDIT_STICKER, DELETE_STICKER, SEARCH]
+TOOLS = [
+    SEND_MESSAGE,
+    STAY_SILENT,
+    SAVE_STICKER,
+    EDIT_STICKER,
+    DELETE_STICKER,
+    SEARCH,
+    RUN_COMMAND,
+]
 
 
 async def chat(
