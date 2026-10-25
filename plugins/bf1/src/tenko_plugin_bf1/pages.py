@@ -352,7 +352,7 @@ async def _screenshot(service: Any, page_html: str) -> bytes:
     if not await service.start() or service.browser is None:
         raise RuntimeError("浏览器不可用")
     context = await service.browser.new_context(
-        viewport={"width": WIDTH, "height": 800}, device_scale_factor=2
+        viewport={"width": WIDTH, "height": 800}, device_scale_factor=1
     )
     try:
         page = await context.new_page()
@@ -360,7 +360,7 @@ async def _screenshot(service: Any, page_html: str) -> bytes:
             await page.set_content(page_html, wait_until="load", timeout=15_000)
         except Exception as error:  # 个别远程图片拉不到时照样截，缺图的位置会隐藏
             logger.debug("战地一图片有资源没加载完：{!r}", error)
-        return await page.screenshot(full_page=True, type="jpeg", quality=88)
+        return await page.screenshot(full_page=True, type="jpeg", quality=80)
     finally:
         await context.close()
 
