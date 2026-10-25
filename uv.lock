@@ -1256,7 +1256,7 @@ source = { git = "https://github.com/g1331/tenko?subdirectory=packages%2Ftenko-a
 
 [[package]]
 name = "tenko-plugin-persona-chat"
-version = "0.1.18"
+version = "0.1.19"
 source = { editable = "plugins/persona_chat" }
 dependencies = [
     { name = "httpx" },
