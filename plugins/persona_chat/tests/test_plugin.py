@@ -35,6 +35,13 @@ def fake_llm(module, monkeypatch):
     module.conversations.clear()
     module._cooldowns.clear()
     module._streaks.clear()
+    module._talks.clear()
+
+    async def today(key):
+        return ""
+
+    fake.today = module._today
+    monkeypatch.setattr(module, "_today", today)  # 每天的小事有单独的测试
     monkeypatch.setattr(module, "_typing_delay", lambda text: 0)
     monkeypatch.setattr(module, "_reply_delay", lambda text: 0)
     monkeypatch.setattr(module.config, "search_daily", 0)  # 搜索有单独的测试
@@ -49,6 +56,7 @@ def fake_llm(module, monkeypatch):
     module.usage_book.store.save({})
     module.sticker_book.store.save({})
     module.chat_store.save({})
+    module.day_store.save({})
     module._unsaved.clear()
     return fake
 
@@ -867,3 +875,60 @@ def test_usage_in_a_group_only_shows_that_group(module):
     assert "群 200" in module.format_usage(periods)
     mine = module.format_usage(periods, only="group:100")
     assert mine.startswith("AI群友本群用量") and "200" not in mine and "26 token" not in mine
+
+
+async def test_long_talk_with_one_person_gets_nudged_to_change_topic(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    monkeypatch.setattr(module, "_QUICK_SECONDS", 0)  # 不算防 bot 对聊的连轮
+    for i in range(5):
+        fake_llm.replies.append([{"text": f"嗯{i}"}])
+        await feed(module, session([At("42"), Text(f" 第{i}句")], message_id=f"m{i}"))
+    hints = [messages[-1]["content"] for messages, _ in fake_llm.requests]
+    assert [module.LONG_HINT in h for h in hints] == [False, False, False, True, False]
+
+
+async def test_catchphrases_she_just_used_are_named(module, fake_llm, monkeypatch):
+    fake_llm.replies.append([{"text": "我只会吃白饭"}])
+    await feed(module, session([At("42"), Text(" 你会干啥")], message_id="m1"))
+    fake_llm.replies.append([{"text": "嗯"}])
+    await feed(module, session([At("42"), Text(" 真的吗")], user="2", message_id="m2"))
+    assert "这些梗你最近刚用过：白饭" in fake_llm.requests[-1][0][-1]["content"]
+
+    # 换了人设：内置的梗不再适用，群友规则照样在
+    monkeypatch.setattr(module.config, "persona", "你是阿喵，一个爱打音游的大学生。")
+    fake_llm.replies.append([{"text": "嗯"}])
+    await feed(module, session([At("42"), Text(" 再说说")], user="3", message_id="m3"))
+    messages = fake_llm.requests[-1][0]
+    assert messages[0]["content"].startswith("你是阿喵")
+    assert "你在群里是群友" in messages[1]["content"]
+    assert "这些梗" not in messages[-1]["content"]
+    monkeypatch.setattr(module.config, "catchphrases", ["音游"])
+    fake_llm.replies.append([{"text": "我在打音游"}])
+    await feed(module, session([At("42"), Text(" 在干嘛")], user="4", message_id="m4"))
+    fake_llm.replies.append([{"text": "嗯"}])
+    await feed(module, session([At("42"), Text(" 然后呢")], user="5", message_id="m5"))
+    assert "这些梗你最近刚用过：音游" in fake_llm.requests[-1][0][-1]["content"]
+
+
+async def test_her_day_is_made_once_from_the_persona(module, fake_llm, monkeypatch):
+    asked = []
+
+    async def summarize(client, *, model, messages, max_tokens):
+        asked.append(messages)
+        return "1. 上午被用户拉着改周报。\n2. 下午睡了一觉\n", {"completion_tokens": 30}
+
+    monkeypatch.setattr(module.llm, "summarize", summarize)
+    monkeypatch.setattr(module, "_today", fake_llm.today)
+    module.day_store.save({"2000-01-01": "很久以前的事。"})
+    fake_llm.replies.append([{"text": "在呢"}])
+    await feed(module, session([At("42"), Text(" 今天咋样")], message_id="m1"))
+    fake_llm.replies.append([{"text": "嗯"}])
+    await feed(module, session([At("42"), Text(" 然后呢")], user="2", message_id="m2"))
+
+    assert len(asked) == 1 and asked[0][0]["content"] == module.PERSONA
+    assert "很久以前的事" in asked[0][1]["content"]  # 避开前几天的
+    hint = fake_llm.requests[-1][0][-1]["content"]
+    assert "你今天：上午被用户拉着改周报；下午睡了一觉。" in hint
+    today = module.datetime.now().date().isoformat()
+    assert module.day_store.load()[today] == "上午被用户拉着改周报；下午睡了一觉。"
+    assert module.usage_book.tokens(module.datetime.now().date(), "group:100") == 44

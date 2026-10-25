@@ -55,13 +55,18 @@ from .chat import (
     summary_messages,
 )
 from .persona import (
+    CATCHPHRASES,
+    DAY_PROMPT,
     FOLLOW_HINT,
+    LONG_HINT,
     PERSONA,
     PICK_STICKER_PROMPT,
     SHORT_HINT,
     UNPROMPTED_HINT,
     answer_hint,
+    day_hint,
     mention_hint,
+    repeat_hint,
     search_hint,
 )
 from .stickers import TOKEN, Stickers
@@ -79,7 +84,12 @@ class PersonaChatConfig(BasicConfModel):
         default_factory=lambda: ["大肥鱼"], description="消息里含这些词时当作在叫 bot。"
     )
     persona: str = ""
-    """人设提示词；为空时用内置的“大肥鱼”。"""
+    """人设提示词：她是谁、来历、口味、语气和示例对话；为空时用内置的“大肥鱼”。
+    怎么当群友（接话、关心人、有立场、少用梗）是通用规则，换人设也照样生效，不用写进来。"""
+    catchphrases: list[str] = model_field(
+        default_factory=list,
+        description="人设里的梗和口头禅；她最近用过的会在提示里点名让她别再用。为空且用内置人设时用内置的。",
+    )
     context_tokens: int = 32000
     """一次请求的输入超过这么多 token 后，把较早的聊天压缩成备忘，压回一半左右。"""
     batch_size: int = 8
@@ -136,6 +146,13 @@ _saved_at = 0.0
 _SAVE_SECONDS = 60
 _cooldowns: dict[tuple[str, str], float] = {}
 _streaks: dict[tuple[str, str], int] = {}
+# 和同一个人连着聊了几轮：{(会话, 发言人): (轮数, 上次时间)}，隔了 _TALK_GAP 秒重新算。
+_talks: dict[tuple[str, str], tuple[int, float]] = {}
+_TALK_GAP = 300
+_LONG_ROUNDS = 4  # 每聊满 4 轮提醒一次她别在一个梗上打转，每轮都提她就每轮换话题
+# 她今天的几件小事，按人设每天生成一次：{日期: 内容}，存最近几天，生成时避开重复。
+day_store = Store("days", version=1)
+_day_lock = asyncio.Lock()
 _waiters: dict[str, asyncio.Task[None]] = {}
 _reported: set[int] = set()
 # shortcut: 搜索次数只记在内存里，重启清零；要严格限额时改存 Store。
@@ -559,7 +576,8 @@ def _place(session: Session, conversation: Conversation) -> str:
     help_command = f"{_command_prefixes()[0]}帮助"
     place = (
         f"{place}你用的 QQ 号是 {names}，群友叫这些名字或 @ 它们都是在叫你；"
-        f"这些只是号的昵称，可能会改，你自己始终是大肥鱼。这里的帮助命令是 {help_command}。"
+        "这些只是号的昵称，可能会改，你自己始终是人设里的那个角色。"
+        f"这里的帮助命令是 {help_command}。"
     )
     lookalikes = dict.fromkeys(
         line.speaker for line in conversation.lines if _lookalike(line.speaker)
@@ -594,6 +612,50 @@ def _typing_delay(text: str) -> float:
     """连发下一条前停一下，像在打字：每秒约 6 个字，最多 3 秒。"""
 
     return min(0.5 + len(text) / 6, 3.0)
+
+
+def _rounds(key: str, speaker: str | None) -> int:
+    """记一轮和 ``speaker`` 的来回，返回连着聊到第几轮。"""
+
+    now = time.monotonic()
+    count, last = _talks.get((key, speaker or ""), (0, float("-inf")))
+    count = count + 1 if now - last < _TALK_GAP else 1
+    _talks[(key, speaker or "")] = (count, now)
+    return count
+
+
+async def _today(key: str) -> str:
+    """她今天的几件小事；当天第一次用时按人设生成，失败就当没有，下次再试。"""
+
+    day = datetime.now()
+    today = day.date().isoformat()
+    async with _day_lock:
+        days = day_store.load(default={})
+        if today in days:
+            return days[today]
+        recent = "；".join(days[d] for d in sorted(days)[-2:])
+        before = f"最近几天是：{recent}别和这些重复。" if recent else ""
+        date = f"{today}（周{'一二三四五六日'[day.weekday()]}）"
+        try:
+            text, usage = await llm.summarize(
+                client,
+                model=config.model,
+                messages=[
+                    {"role": "system", "content": config.persona or PERSONA},
+                    {"role": "user", "content": DAY_PROMPT.format(date=date, before=before)},
+                ],
+                max_tokens=200,
+            )
+        except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
+            logger.warning("AI群友生成今天的小事失败：{!r}", error)
+            return ""
+        if not in_sandbox():
+            usage_book.add(day.date(), key, usage, estimate_cost(usage, day))
+        lines = [re.sub(r"^\s*(?:[-·•]|\d+[.、)])\s*", "", line) for line in text.splitlines()]
+        text = "；".join(line.rstrip("。；") for line in lines if line) + "。" if text else ""
+        days = {d: days[d] for d in sorted(days)[-2:]} | {today: text}
+        day_store.save(days)
+        return text
 
 
 def _load(conversation: Conversation, now: float) -> float:
@@ -744,9 +806,16 @@ async def respond(
                 if follow
                 else UNPROMPTED_HINT
             )
+        if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
+            hint += LONG_HINT
+        said = [line.text for line in conversation.lines if line.speaker is None][-30:]
+        phrases = config.catchphrases or ([] if config.persona else CATCHPHRASES)
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
-        hint = f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{hint}{SHORT_HINT}"
+        hint = (
+            f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{day_hint(await _today(key))}"
+            f"{hint}{repeat_hint(said, phrases)}{SHORT_HINT}"
+        )
         conversation.unseen = 0
         usages: list[dict] = []
 
