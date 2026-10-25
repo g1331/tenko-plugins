@@ -61,3 +61,21 @@ jobs:
 
       - name: Publish with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  notify-registry:
+    name: Notify the registry
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      # 让目录马上发现并测试这个版本，不用等它每小时的检查。
+      # REGISTRY_TOKEN：对 g1331/tenko-registry 有 Contents 读写权限的 fine-grained 令牌；没配置就跳过。
+      - name: Dispatch plugin-released
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::没有配置 REGISTRY_TOKEN，目录会在下一次整点检查时收录"
+            exit 0
+          fi
+          gh api repos/g1331/tenko-registry/dispatches \
+            -f event_type=plugin-released -f "client_payload[id]=${GITHUB_REF_NAME%-v*}"
