@@ -1,6 +1,6 @@
 [project]
 name = "tenko-plugin-bf1"
-version = "0.1.4"
+version = "0.1.5"
 description = "Tenko 战地一查询：经 bf-manager 查询玩家战绩、武器、载具和服务器"
 readme = "README.md"
 license = "GPL-3.0-only"
