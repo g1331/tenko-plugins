@@ -810,3 +810,14 @@ async def test_context_parts_add_up_to_the_last_real_prompt(module, fake_llm, mo
     # 分项按这次实际输入折算，加起来还是 5000，只多了她刚回的那句“嗯”
     assert status.startswith("上下文已用 15%  ~5k / 32k\n▰▰▱▱▱▱▱▱▱▱")
     assert "缓存命中 90%" in status
+
+
+def test_usage_in_a_group_only_shows_that_group(module):
+    usage = {"prompt_cache_miss_tokens": 10, "completion_tokens": 3}
+    for key in ("group:100", "group:200"):
+        module.usage_book.add(module.datetime.now().date(), key, usage, 0.01)
+
+    periods = module.usage_book.summary(module.datetime.now().date())
+    assert "群 200" in module.format_usage(periods)
+    mine = module.format_usage(periods, only="group:100")
+    assert mine.startswith("AI群友本群用量") and "200" not in mine and "26 token" not in mine

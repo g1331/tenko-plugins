@@ -1146,12 +1146,13 @@ def _plain(elements) -> str:
 
 persona_command = Alconna(
     "AI群友",
-    Args["action", "重置|用量|上下文|表情"]["op;?", "看|删"]["name;?", str],
+    Args["action", "重置|重置用量|用量|上下文|表情"]["op;?", "看|删"]["name;?", str],
     meta=CommandMeta(
         "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量和上下文，或管理它收藏的表情包",
-        usage="AI群友 重置 | 用量 | 上下文 | 表情 [看|删 名字]",
+        usage="AI群友 重置 | 重置用量 | 用量 | 上下文 | 表情 [看|删 名字]",
         example=(
-            "/AI群友 重置\n/AI群友 用量\n/AI群友 上下文\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊"
+            "/AI群友 重置\n/AI群友 重置用量\n/AI群友 用量\n/AI群友 上下文\n"
+            "/AI群友 表情\n/AI群友 表情 看 猫猫震惊"
         ),
     ),
 )
@@ -1184,8 +1185,18 @@ async def manage(
     if action.result == "表情":
         return await manage_stickers(session, op.result if op.available else None, name.result)
     if not await require_perm(session, Permission.BotAdmin):
-        return "只有 BOT 管理员及以上能查看用量"
-    return format_usage(usage_book.summary(datetime.now().date()))
+        return "只有 BOT 管理员及以上能查看或重置用量"
+    key = _key(session)
+    today = datetime.now().date()
+    if action.result == "重置用量":
+        cleared = usage_book.reset(today, key)
+        return (
+            f"清掉了今天的 {cleared:,} token，额度从现在重新算" if cleared else "今天还没用过额度"
+        )
+    # 群里人人看得到回复：只给本群的，各群的用量只在私聊里列。
+    return format_usage(
+        usage_book.summary(today), only=key if session.event.guild is not None else None
+    )
 
 
 async def manage_stickers(session: Session, op: str | None, name: str | None) -> str | None:
@@ -1284,14 +1295,20 @@ def _k(tokens: float) -> str:
     return f"~{int(tokens)}" if tokens else "0"
 
 
-def format_usage(periods: list[tuple[str, dict[str, list[float]]]]) -> str:
-    lines = ["AI群友用量（按 deepseek-flash 价目估算）"]
+def format_usage(periods: list[tuple[str, dict[str, list[float]]]], only: str | None = None) -> str:
+    lines = [
+        "AI群友本群用量（按 deepseek-flash 价目估算）"
+        if only
+        else "AI群友用量（按 deepseek-flash 价目估算）"
+    ]
     for title, rows in periods:
-        total = rows.get(GLOBAL)
+        total = rows.get(only or GLOBAL)
         if not total:
             lines.append(f"{title}：没有用量")
             continue
         lines.append(f"{title}：{_amount(total)}")
+        if only:
+            continue
         others = sorted(
             ((k, v) for k, v in rows.items() if k != GLOBAL), key=lambda item: -sum(item[1][:3])
         )

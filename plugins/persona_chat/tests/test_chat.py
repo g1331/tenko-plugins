@@ -102,6 +102,21 @@ def test_usage_book_counts_per_key_and_globally_and_keeps_a_week(chat):
     assert list(book.store.data) == ["2026-10-20"]  # 10-01 已超出 7 天
 
 
+def test_usage_reset_only_restarts_the_quota(chat):
+    book = chat.UsageBook(MemoryStore())
+    usage = {"prompt_cache_miss_tokens": 10, "prompt_cache_hit_tokens": 5, "completion_tokens": 3}
+    day = date(2026, 10, 20)
+    book.add(day, "group:1", usage, 0.01)
+
+    assert book.reset(day, "group:1") == 13 and book.tokens(day, "group:1") == 0
+    assert book.reset(day, "group:1") == 0
+    book.add(day, "group:1", usage, 0.01)
+    assert book.tokens(day, "group:1") == 13  # 额度只算重置之后的
+    today, week = book.summary(day)
+    assert today[1] == {"*": [20, 10, 6, 0.02], "group:1": [20, 10, 6, 0.02]}  # 用量照旧统计
+    assert week[1] == today[1]
+
+
 def test_recent_pictures_follow_their_line_within_budget(chat):
     conversation = chat.Conversation(10)
     old = conversation.add("m1", "甲(1)", "[图片]", ("u1",))

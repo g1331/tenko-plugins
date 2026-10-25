@@ -435,8 +435,14 @@ def estimate_cost(usage: dict[str, Any], now: datetime) -> float:
     return cost * 2 if peak else cost
 
 
+_RESET = "reset:"
+
+
 class UsageBook:
-    """按天记 token 和估算费用：{日期: {会话键 或 "*": [未命中, 命中, 输出, 美元]}}，保留 7 天。"""
+    """按天记 token 和估算费用：{日期: {会话键 或 "*": [未命中, 命中, 输出, 美元]}}，保留 7 天。
+
+    重置额度时当天另记一笔 ``"reset:会话键": 当时已计的 token``，额度只算之后的，用量照旧统计。
+    """
 
     def __init__(self, store: Any) -> None:
         self.store = store
@@ -444,8 +450,20 @@ class UsageBook:
     def tokens(self, day: date, key: str) -> int:
         """计入每日上限的 token：未命中缓存的输入加输出；命中缓存的只按 2% 计价，不算。"""
 
-        row = self.store.load(default={}).get(day.isoformat(), {}).get(key)
-        return int(row[0] + row[2]) if row else 0
+        today = self.store.load(default={}).get(day.isoformat(), {})
+        row = today.get(key)
+        return int(row[0] + row[2]) - today.get(_RESET + key, 0) if row else 0
+
+    def reset(self, day: date, key: str) -> int:
+        """从现在起重新计 ``key`` 当天的额度，返回清掉了多少。"""
+
+        used = self.tokens(day, key)
+        if used:
+            data = self.store.load(default={})
+            today = data[day.isoformat()]
+            today[_RESET + key] = today.get(_RESET + key, 0) + used
+            self.store.save(data)
+        return used
 
     def add(self, day: date, key: str, usage: dict[str, Any], cost: float) -> None:
         data = self.store.load(default={})
@@ -469,5 +487,8 @@ class UsageBook:
         week: dict[str, list[float]] = {}
         for rows in data.values():
             for key, row in rows.items():
+                if key.startswith(_RESET):
+                    continue
                 week[key] = [a + b for a, b in zip(week.get(key, [0, 0, 0, 0.0]), row, strict=True)]
-        return [("今日", data.get(day.isoformat(), {})), ("近 7 天", week)]
+        today = {k: v for k, v in data.get(day.isoformat(), {}).items() if not k.startswith(_RESET)}
+        return [("今日", today), ("近 7 天", week)]
