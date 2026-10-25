@@ -73,10 +73,15 @@ async def _get(path: str, **params: Any) -> Any:
 async def _persona(name: str) -> dict[str, Any]:
     result = await _get("/players/search", name=name)
     personas = result["personas"]
-    if not personas:
-        raise Bf1Error(f"没找到玩家 {name}")
+    # 搜索是模糊匹配，精确同名的不一定排第一。
+    exact = [p for p in personas if p["display_name"].casefold() == name.casefold()]
+    if not exact:
+        if not personas:
+            raise Bf1Error(f"没找到玩家 {name}")
+        names = "、".join(p["display_name"] for p in personas[:5])
+        raise Bf1Error(f"没找到玩家 {name}，相近的有：{names}")
     # 重名时 bf-manager 会回填生涯时长，0 是没玩过 BF1 的空号。
-    return next((p for p in personas if p.get("time_played_hours")), personas[0])
+    return next((p for p in exact if p.get("time_played_hours")), exact[0])
 
 
 def _hours(seconds: float | None) -> str:

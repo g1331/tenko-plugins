@@ -183,6 +183,18 @@ async def test_errors_become_replies(module, api):
     assert await module._answer(module.stats_reply("nobody", None)) == "没找到玩家 nobody"
 
 
+async def test_fuzzy_search_picks_the_exact_name(module, api):
+    api["/players/search"] = {
+        "personas": [
+            {"persona_id": 1, "display_name": "YuEmAt34", "time_played_hours": None},
+            {"persona_id": 2, "display_name": "YueMaT", "time_played_hours": None},
+        ]
+    }
+    assert (await module._persona("yuemat"))["persona_id"] == 2
+    reply = await module._answer(module._persona("yue"))
+    assert reply == "没找到玩家 yue，相近的有：YuEmAt34、YueMaT"
+
+
 async def test_servers_sorted_by_players(module, api, rendered):
     api["/servers"] = lambda **params: {
         "total": 12,
