@@ -352,7 +352,9 @@ async def _screenshot(service: Any, page_html: str) -> bytes:
     if not await service.start() or service.browser is None:
         raise RuntimeError("浏览器不可用")
     context = await service.browser.new_context(
-        viewport={"width": WIDTH, "height": 800}, device_scale_factor=1
+        # 整页截图不会比视口矮，视口给小一点，内容短时才不会在下面留一截黑底。
+        viewport={"width": WIDTH, "height": 100},
+        device_scale_factor=1,
     )
     try:
         page = await context.new_page()
