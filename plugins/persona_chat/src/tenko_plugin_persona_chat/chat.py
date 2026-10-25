@@ -302,6 +302,10 @@ def build_messages(
                 url = url.removeprefix(_FRAMES)
             detail = "high" if line.sharp else "low"
             blocks.append({"type": "image_url", "image_url": {"url": url, "detail": detail}})
+        if blocks[-1]["type"] == "image_url":
+            # 图后面紧接着下一个人的话，不标一句模型常把图算到下一个人头上。
+            owner = f"（上面的图是 #{line.number} {line.speaker} 发的）"
+            blocks.append({"type": "text", "text": owner})
     for message in messages:
         content = message["content"]
         if isinstance(content, list) and len(content) == 1 and content[0]["type"] == "text":

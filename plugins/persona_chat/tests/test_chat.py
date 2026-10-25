@@ -130,6 +130,7 @@ def test_recent_pictures_follow_their_line_within_budget(chat):
 
     # 预算 2 张：#2 的两张跟在它后面，更早的 #1 只剩文字
     assert [b["type"] for b in user["content"]] == ["text", "image_url", "image_url", "text"]
+    assert user["content"][3]["text"] == "（上面的图是 #2 乙(2) 发的）\n#3 [甲(1)] 哈哈"
     assert (
         untimed(user["content"][0]["text"]) == "#1 [甲(1)] [图片]\n#2 [乙(2)] 看这个 [图片] [图片]"
     )
@@ -170,7 +171,7 @@ def test_animated_gif_becomes_a_contact_sheet(chat):
     conversation.add("1", "群友(1)", "[表情包]", ["u"]).pictures = [url]
     messages = chat.build_messages("人设", conversation, "提示", 1)
     (blocks,) = (m["content"] for m in messages if isinstance(m["content"], list))
-    assert [b["type"] for b in blocks] == ["text", "image_url"]
+    assert [b["type"] for b in blocks] == ["text", "image_url", "text"]
     assert "动图" in blocks[0]["text"] and blocks[1]["image_url"]["url"] == url.removeprefix(
         "frames:"
     )
