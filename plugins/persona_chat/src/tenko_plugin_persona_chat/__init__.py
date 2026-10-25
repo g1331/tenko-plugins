@@ -158,7 +158,7 @@ _ROLES = {
     Permission.Master: "bot主人",
 }
 _MAX_TOKENS = 300
-_MAX_IMAGE_BYTES = 2 * 1024 * 1024
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 手机原图常有七八兆，下下来再缩小
 _MAX_GIF_BYTES = 8 * 1024 * 1024  # 动图要整个下下来才能抽帧
 _SUMMARY_TOKENS = 1000
 _KEEP_IMAGE_TOKENS = 4000  # 压缩时只留最近这么多 token 的图：约 20 张低清或 4 张高清

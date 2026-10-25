@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .persona import RULES, SUMMARY_PROMPT
 
@@ -384,7 +384,24 @@ def picture_url(data: bytes, most: int = 6) -> str | None:
                     return _FRAMES + data_url(_contact_sheet(gif, count, most))
         except (OSError, ValueError, Image.DecompressionBombError):
             pass  # 解不开就照原样发，模型至少看得到第一帧
-    return data_url(data)
+    return data_url(_shrink(data))
+
+
+def _shrink(data: bytes, side: int = 2048) -> bytes:
+    """长边超过 ``side`` 或超过 2 MB 的照片缩小重存成 JPEG：手机原图动辄几千像素、七八兆，
+    原样发过去又慢又可能被拒，高清晰度也只看这么大。解不开就原样返回。"""
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if len(data) <= 2 * 1024 * 1024 and max(image.size) <= side:
+                return data
+            image = ImageOps.exif_transpose(image).convert("RGB")  # 手机照片常靠 EXIF 标方向
+            image.thumbnail((side, side))
+            buffer = io.BytesIO()
+            image.save(buffer, "JPEG", quality=85)
+            return buffer.getvalue()
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return data
 
 
 def _contact_sheet(gif: Image.Image, count: int, most: int) -> bytes:

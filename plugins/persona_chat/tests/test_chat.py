@@ -6,6 +6,7 @@ import re
 from datetime import UTC, date, datetime
 
 import pytest
+from PIL import Image
 
 
 @pytest.fixture
@@ -281,3 +282,18 @@ def test_retire_images_keeps_only_the_latest(chat):
     conversation.lines[3].pictures = ["data:a", "data:b"]
     blocks = chat.build_messages("人设", conversation, "提示", 3)[2]["content"]
     assert [b["image_url"]["detail"] for b in blocks if b["type"] == "image_url"] == ["high"] * 2
+
+
+def test_big_photos_are_shrunk_before_sending(chat):
+    buffer = io.BytesIO()
+    Image.effect_noise((3000, 1500), 80).convert("RGB").save(buffer, "JPEG", quality=100)
+    photo = buffer.getvalue()
+    assert len(photo) > 2 * 1024 * 1024  # 噪点存不小，跟手机原图一样大
+
+    sent = base64.b64decode(chat.picture_url(photo).split(",")[1])
+    assert len(sent) < len(photo)
+    assert Image.open(io.BytesIO(sent)).size == (2048, 1024)
+
+    small = io.BytesIO()
+    Image.new("RGB", (300, 300), "red").save(small, "PNG")
+    assert chat.picture_url(small.getvalue()) == chat.data_url(small.getvalue())  # 小图原样
