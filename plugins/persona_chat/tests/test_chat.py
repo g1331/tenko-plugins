@@ -271,7 +271,13 @@ def test_retire_images_keeps_only_the_latest(chat):
     for i in range(4):
         line = conversation.add(f"m{i}", "甲(1)", "[图片]", (f"u{i}a", f"u{i}b"))
         line.shown = i > 0
+    conversation.lines[3].sharp = True
 
-    assert conversation.retire_images(3) == 2  # 最近两条共 4 张够了，#2 的两张看过，撤掉
-    assert [line.images != () for line in conversation.lines] == [False, False, True, True]
+    # 最近一条两张高清约 2000 token 已经超出 1500，再往前的都撤掉；#1 没看过，不算撤掉的
+    assert conversation.retire_images(1500) == 2 * 2 * 190
+    assert [line.images != () for line in conversation.lines] == [False, False, False, True]
     assert not conversation.lines[1].shown and conversation.lines[1].pictures is None
+
+    conversation.lines[3].pictures = ["data:a", "data:b"]
+    blocks = chat.build_messages("人设", conversation, "提示", 3)[2]["content"]
+    assert [b["image_url"]["detail"] for b in blocks if b["type"] == "image_url"] == ["high"] * 2

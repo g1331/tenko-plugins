@@ -161,8 +161,7 @@ _MAX_TOKENS = 300
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 _MAX_GIF_BYTES = 8 * 1024 * 1024  # 动图要整个下下来才能抽帧
 _SUMMARY_TOKENS = 1000
-_KEEP_IMAGES = 6  # 压缩时只留最近这么多张看过的图
-_IMAGE_TOKENS = 190  # 一张低清图，实测大小图都差不多
+_KEEP_IMAGE_TOKENS = 4000  # 压缩时只留最近这么多 token 的图：约 20 张低清或 4 张高清
 _TOOLS = json.dumps(llm.TOOLS, ensure_ascii=False)
 # 对方在 bot 刚说完几秒内又来叫，连续几轮后不再强制回复，再多就不理，防止和别的 bot 无限对聊。
 _QUICK_SECONDS = 10
@@ -473,6 +472,13 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         session.event.message.id, speaker, text, images, role, sticker, counted=not lookalike
     )
     conversation.last_message_at = time.monotonic()
+    if calling:
+        # 叫她时带的图、引用的那张图多半要她细看，用高清。
+        line.sharp = True
+        if (quoted := re.match(r"回复#(\d+)", text)) and (
+            old := conversation.by_number(int(quoted[1]))
+        ):
+            old.sharp = True
     _changed(key)
     # 命令也记进上下文（群里别的 bot 的游戏、群友的示范都靠它看懂），但不算在叫 bot。
     if text.lstrip("@你 ").startswith(_command_prefixes()):
@@ -686,9 +692,9 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
             client, model=config.model, messages=messages, force=force, max_tokens=_MAX_TOKENS
         )
         # 给“上下文”命令校准：粗估的各部分按这次实际输入等比例折算。
-        pictures = sum(len(line.pictures or []) for line in shown) if images else 0
+        pictures = sum(line.image_tokens for line in shown if line.pictures) if images else 0
         rough = sum(context_parts(persona, _TOOLS, conversation, catalog, hint).values())
-        text = usage.get("prompt_tokens", 0) - pictures * _IMAGE_TOKENS
+        text = usage.get("prompt_tokens", 0) - pictures
         if text > 0 and rough > 0:
             conversation.scale = text / rough
         conversation.hint = hint
@@ -1097,22 +1103,24 @@ async def _compress(key: str, conversation: Conversation, prompt_tokens: int) ->
     usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
     if summary:
         before = conversation.summary
-        images = sum(len(line.images) for line in old if line.shown)
+        images = sum(line.image_tokens for line in old if line.shown)
         conversation.forget(old[-1].number, summary)
         # 备忘一改，后面的缓存反正要重算：顺手撤掉旧图、换新表情包目录，不多花钱。
-        retired = conversation.retire_images(_KEEP_IMAGES)
+        retired = conversation.retire_images(_KEEP_IMAGE_TOKENS)
         conversation.stickers = None
         conversation.compressed_at = time.time()
         # 压完的输入只能估：下次请求的 usage 才是准数，“上下文”命令里看得到。
         after = (
             prompt_tokens
             - sum(estimate_tokens(line.text) for line in old)
-            - (images + retired) * _IMAGE_TOKENS
+            - images
+            - retired
             + estimate_tokens(summary)
             - estimate_tokens(before)
         )
         logger.info(
-            "AI群友把 {} 的 {} 条旧消息压成了备忘，撤掉 {} 张旧图：输入 {:,} → 约 {:,} token",
+            "AI群友把 {} 的 {} 条旧消息压成了备忘，撤掉约 {:,} token 的旧图："
+            "输入 {:,} → 约 {:,} token",
             key,
             len(old),
             images + retired,
@@ -1252,8 +1260,10 @@ def format_context(key: str, conversation: Conversation) -> str:
             config.persona or PERSONA, _TOOLS, conversation, catalog, conversation.hint
         ).items()
     }
-    images = sum(len(line.images) for line in lines if line.shown)
-    parts["看过的图"] = images * _IMAGE_TOKENS
+    seen = [line for line in lines if line.shown]
+    parts["看过的图"] = sum(line.image_tokens for line in seen)
+    images = sum(len(line.images) for line in seen)
+    sharp = sum(len(line.images) for line in seen if line.sharp)
     when = (
         f"，上次压缩 {datetime.fromtimestamp(conversation.compressed_at):%H:%M}"
         if conversation.compressed_at
@@ -1264,7 +1274,7 @@ def format_context(key: str, conversation: Conversation) -> str:
         "表情包目录": f"{len(stickers)} 张" + ("，有变化，下次压缩时并进来" if changed else ""),
         "备忘": f"{len(conversation.summary)} 字{when}",
         "原文": f"{len(lines)} 条" + (f"，#{lines[0].number}–#{lines[-1].number}" if lines else ""),
-        "看过的图": f"{images} 张",
+        "看过的图": f"{images} 张" + (f"，其中 {sharp} 张高清" if sharp else ""),
     }
     total = sum(parts.values())
     filled = min(round(total / max(config.context_tokens, 1) * 10), 10)

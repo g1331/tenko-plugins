@@ -301,6 +301,30 @@ async def test_forwarded_chat_is_read_out(module, fake_llm):
         assert said in module.conversations["group:100"].lines[-1].text
 
 
+async def test_pictures_she_is_asked_to_look_at_are_sharp(module, fake_llm, monkeypatch):
+    async def download(http, url):
+        return b"\x89PNG" + url.encode()
+
+    monkeypatch.setattr(module, "_download", download)
+    await feed(module, session([Image(src="u1")], user="7", message_id="m1"))
+    await feed(module, session([Image(src="u2")], user="8", message_id="m2"))
+    fake_llm.replies.append([{"text": "嗯"}])
+    # 引用 #1 的图叫她：那张和她这条都用高清，旁边顺带的 #2 照旧低清
+    quote = Quote("m1")(Author("7"), Image(src="u1"))
+    await feed(module, session([quote, At("42"), Text(" 这上面写的啥")], message_id="m3"))
+
+    messages, _ = fake_llm.requests[-1]
+    details = [
+        (b["image_url"]["url"], b["image_url"]["detail"])
+        for m in messages
+        if isinstance(m["content"], list)
+        for b in m["content"]
+        if b["type"] == "image_url"
+    ]
+    assert [d for _, d in details] == ["high", "low"]
+    assert details[0][0].endswith(module.data_url(b"\x89PNGu1").split(",")[1])
+
+
 async def test_rejected_pictures_are_dropped_and_retried(module, fake_llm, monkeypatch):
     async def download(http, url):
         return b"\x89PNG" + url.encode()

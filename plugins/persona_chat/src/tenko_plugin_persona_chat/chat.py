@@ -33,6 +33,13 @@ class Line:
     role: str = ""  # 群身份，例如“群主”；普通成员为空
     sticker: tuple[str, str] | None = None  # 还没收藏的表情包：(QQ 文件名, 原地址)
     shown: bool = False  # 图已经给模型看过：之后一直带着，不存盘
+    sharp: bool = False  # 叫她来看的图用高清：低清读不出密密麻麻的小字，会照样编个数出来
+
+    @property
+    def image_tokens(self) -> int:
+        """这条的图发给模型约占多少 token：实测低清一张约 190、高清约 1000，和原图大小关系不大。"""
+
+        return len(self.images) * (1000 if self.sharp else 190)
 
     @property
     def who(self) -> str:
@@ -166,8 +173,8 @@ class Conversation:
             kept += 1
         return list(self.lines)[: len(self.lines) - kept]
 
-    def retire_images(self, keep: int) -> int:
-        """只留最近 ``keep`` 张图，更早的退回“[图片]”，返回撤掉的看过的图有几张。
+    def retire_images(self, keep_tokens: int) -> int:
+        """只留最近约 ``keep_tokens`` 的图，更早的退回“[图片]”，返回撤掉的看过的图占多少 token。
 
         只在压缩时调用：那时备忘刚改写，后面的缓存本来就要重算，撤图不多花钱；
         平时撤图会从那条起打断缓存。
@@ -175,10 +182,10 @@ class Conversation:
 
         retired = 0
         for line in reversed(self.lines):
-            if keep > 0:
-                keep -= len(line.images)
+            if keep_tokens > 0:
+                keep_tokens -= line.image_tokens
             elif line.images:
-                retired += len(line.images) if line.shown else 0
+                retired += line.image_tokens if line.shown else 0
                 line.images, line.pictures, line.shown = (), None, False
         return retired
 
@@ -293,7 +300,8 @@ def build_messages(
                 else:
                     blocks.append({"type": "text", "text": _FRAMES_NOTE})
                 url = url.removeprefix(_FRAMES)
-            blocks.append({"type": "image_url", "image_url": {"url": url, "detail": "low"}})
+            detail = "high" if line.sharp else "low"
+            blocks.append({"type": "image_url", "image_url": {"url": url, "detail": detail}})
     for message in messages:
         content = message["content"]
         if isinstance(content, list) and len(content) == 1 and content[0]["type"] == "text":
