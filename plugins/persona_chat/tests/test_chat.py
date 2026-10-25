@@ -298,3 +298,25 @@ def test_big_photos_are_shrunk_before_sending(chat):
     small = io.BytesIO()
     Image.new("RGB", (300, 300), "red").save(small, "PNG")
     assert chat.picture_url(small.getvalue()) == chat.data_url(small.getvalue())  # 小图原样
+
+
+async def test_every_tool_call_but_silence_comes_back(module):
+    import json
+
+    import httpx
+
+    def reply(request):
+        calls = [
+            {"function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+            for name, args in [
+                ("delete_sticker", {"name": "难绷"}),
+                ("stay_silent", {}),
+                ("send_message", {"text": "行 删了"}),
+                ("unknown", {}),
+            ]
+        ]
+        return httpx.Response(200, json={"choices": [{"message": {"tool_calls": calls}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        calls, _ = await module.llm.chat(c, model="m", messages=[], force=False, max_tokens=9)
+    assert calls == [{"name": "难绷", "tool": "delete_sticker"}, {"text": "行 删了"}]

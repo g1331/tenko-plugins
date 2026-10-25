@@ -166,6 +166,12 @@ _MAX_SENDS = 2
 # 单独挑的表情包贴切到这个分（1-5）才跟着发：实测约三成回复会配上，和群友发图的频率相当。
 _STICKER_SCORE = 4
 _STICKERS_DONE = "表情包已经处理好了，这次只说话。"
+_STICKER_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker")
+# 群友口头叫她删表情包：bot主人、bot管理员叫的照删，别人叫的每个群每天最多删这么几张，
+# 免得被起哄把所有群共用的收藏删光。
+_DELETES_PER_DAY = 3
+_TRUSTED = ("bot主人", "bot管理员")
+_deletes: dict[tuple[str, str], int] = {}
 _JUST_TALK = "这次不能搜，也别调用别的工具，直接说话。"
 # 宿主给的成员权限（实时群身份和手动授权取高）对应的身份；普通成员不标，省 token。
 _ROLES = {
@@ -342,7 +348,13 @@ def render(
                 )
             reply_me = quoted is not None and quoted.speaker is None
             if quoted:
-                parts.append(f"回复#{quoted.number} ")
+                # 引用她发的表情包多半在说那张图：点明是哪张，不然她回头翻编号常翻错、不认账。
+                mine = quoted.speaker is None and re.fullmatch(r"\[表情:[^\]]+\]", quoted.text)
+                parts.append(
+                    f"回复#{quoted.number}（你发的{quoted.text}） "
+                    if mine
+                    else f"回复#{quoted.number} "
+                )
             elif forward := next(filter(None, map(_forward, element.children)), None):
                 # 引用转发多半是要她看这段记录，整段给她，不截成开头 40 字。
                 parts.append(f"回复[{(author and author.name) or '某人'}：{forward[0]}] ")
@@ -842,7 +854,7 @@ async def respond(
                 # DeepSeek 仍去调 search 之类的工具：点明只说话，再强制问一次。
                 again = hint
             if again is not None:
-                kept = [c for c in calls if c.get("tool") in ("save_sticker", "edit_sticker")]
+                kept = [c for c in calls if c.get("tool") in _STICKER_TOOLS]
                 if not searched:
                     again = f"{again}\n{_STICKERS_DONE if kept else _JUST_TALK}"
                 calls = kept + await ask(again, force and not searched, retry=True)
@@ -864,6 +876,7 @@ async def respond(
 
         saves = [c for c in calls if c.get("tool") == "save_sticker"]
         edits = [c for c in calls if c.get("tool") == "edit_sticker"]
+        deletes = [c for c in calls if c.get("tool") == "delete_sticker"]
         calls = [c for c in calls if "tool" not in c]
         await _add_sticker(conversation, calls[:_MAX_SENDS], key)
         first = next((c["text"] for c in calls[:_MAX_SENDS] if c["text"].strip()), "")
@@ -938,6 +951,10 @@ async def respond(
             await _save_sticker(arguments, conversation)
         for arguments in edits:
             _edit_sticker(arguments, key)
+        trusted = target is not None and target.role in _TRUSTED
+        said = "\n".join(c["text"] for c in calls[:_MAX_SENDS])
+        for arguments in deletes:
+            await _delete_sticker(str(arguments.get("name") or ""), key, trusted, said)
         if calls and not sent:
             logger.info("AI群友在 {} 想说的话全被丢掉了：{}", key, [c["text"] for c in calls])
         if sent:
@@ -1116,6 +1133,46 @@ def _edit_sticker(arguments: dict, key: str) -> None:
     if final:
         new = sticker_book.index()[final]["mood"]
         logger.info("AI群友在 {} 改了表情包「{}」→「{}」：{} → {}", key, name, final, old, new)
+
+
+async def _delete_sticker(name: str, key: str, trusted: bool, said: str) -> None:
+    """删掉一张收藏；收藏所有群共用，删了记日志，被带偏了能查到是哪个会话、原来写的什么。
+
+    别人叫删的，模型常一边调用删除一边嘴上说“凭啥删”：按她说的话再问一句答应了没有，答应了才删。
+    """
+
+    today = datetime.now().date().isoformat()
+    if not trusted and _deletes.get((today, key), 0) >= _DELETES_PER_DAY:
+        logger.info("AI群友在 {} 今天删表情包的次数用完了，没删「{}」", key, name)
+        return
+    mood = sticker_book.index().get(name, {}).get("mood")
+    if mood is None:
+        return
+    if not trusted and said.strip() and not await _agreed(name, said, key):
+        logger.info("AI群友在 {} 嘴上没答应删「{}」，不删：{}", key, name, said)
+        return
+    if sticker_book.remove(name):
+        if not trusted:
+            _deletes[(today, key)] = _deletes.get((today, key), 0) + 1
+        logger.info("AI群友在 {} 删了表情包「{}」：{}", key, name, mood)
+
+
+async def _agreed(name: str, said: str, key: str) -> bool:
+    prompt = (
+        f"群友叫你删掉表情包「{name}」，你回的是：\n{said}\n"
+        "按这句回复，你是答应删掉了吗？只回答“是”或“否”。"
+    )
+    try:
+        answer, usage = await llm.summarize(
+            client, model=config.model, messages=[{"role": "user", "content": prompt}], max_tokens=5
+        )
+    except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
+        logger.warning("AI群友确认删表情包失败：{!r}", error)
+        return False
+    if not in_sandbox():
+        now = datetime.now()
+        usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+    return answer.startswith("是")
 
 
 def _search_left(key: str) -> bool:

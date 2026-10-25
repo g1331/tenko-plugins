@@ -95,6 +95,23 @@ EDIT_STICKER = {
         },
     },
 }
+DELETE_STICKER = {
+    "type": "function",
+    "function": {
+        "name": "delete_sticker",
+        "description": (
+            "从收藏里删掉一张表情包，以后不再发它。调用了就是真删了，"
+            "同时说的话要对得上（“行 删了”）；想留着、嘴上说不删时就别调用。"
+            "bot主人、bot管理员叫你删的直接删；别人嫌它难看、恶心、是刷屏的烂梗图，"
+            "你也觉得有道理才删；捉弄你、想把你的收藏删光的不删。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "收藏目录里的名字"}},
+            "required": ["name"],
+        },
+    },
+}
 SEARCH = {
     "type": "function",
     "function": {
@@ -131,7 +148,7 @@ async def summarize(
     return (data["choices"][0]["message"].get("content") or "").strip(), data.get("usage") or {}
 
 
-TOOLS = [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, EDIT_STICKER, SEARCH]
+TOOLS = [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, EDIT_STICKER, DELETE_STICKER, SEARCH]
 
 
 async def chat(
@@ -165,7 +182,8 @@ async def chat(
     for call in data["choices"][0]["message"].get("tool_calls") or []:
         function = call.get("function") or {}
         name = function.get("name")
-        if name not in ("send_message", "save_sticker", "edit_sticker", "search"):
+        # stay_silent 没有参数要带回去；别的工具都从 TOOLS 里认，新加的工具不会被漏掉。
+        if name == "stay_silent" or name not in {t["function"]["name"] for t in TOOLS}:
             continue
         try:
             arguments = json.loads(function.get("arguments") or "")

@@ -932,3 +932,47 @@ async def test_her_day_is_made_once_from_the_persona(module, fake_llm, monkeypat
     today = module.datetime.now().date().isoformat()
     assert module.day_store.load()[today] == "上午被用户拉着改周报；下午睡了一觉。"
     assert module.usage_book.tokens(module.datetime.now().date(), "group:100") == 44
+
+
+async def test_she_deletes_stickers_people_ask_her_to(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    module._deletes.clear()
+    answers = []
+
+    async def summarize(client, *, model, messages, max_tokens):
+        answers.append(messages[0]["content"])
+        return ("否" if "凭啥" in messages[0]["content"] else "是"), {}
+
+    monkeypatch.setattr(module.llm, "summarize", summarize)
+    for i in range(6):
+        module.sticker_book.add(f"龙图{i}", "龙图", GIF + bytes([i]), f"{i}.gif")
+
+    async def ask(user, i):
+        fake_llm.replies.append([{"tool": "delete_sticker", "name": f"龙图{i}"}, {"text": "删了"}])
+        await feed(module, session([At("42"), Text(" 删了龙图")], user=user, message_id=f"m{i}"))
+
+    for i in range(4):  # 普通群友一天只能让她删三张
+        await ask(str(10 + i), i)
+    assert sorted(module.sticker_book.index()) == ["龙图3", "龙图4", "龙图5"]
+
+    fake_llm.roles["99"] = module.Permission.Master  # bot主人叫她删不限次数，也不用再问
+    asked = len(answers)
+    await ask("99", 4)
+    assert sorted(module.sticker_book.index()) == ["龙图3", "龙图5"] and len(answers) == asked
+
+    # 嘴上说不删、手上却调用了删除：按她说的算
+    module._deletes.clear()
+    fake_llm.replies.append([{"tool": "delete_sticker", "name": "龙图5"}, {"text": "凭啥删"}])
+    await feed(module, session([At("42"), Text(" 删了它")], user="50", message_id="m50"))
+    assert "龙图5" in module.sticker_book.index()
+    assert "delete_sticker" in {t["function"]["name"] for t in module.llm.TOOLS}
+
+
+async def test_quoting_her_sticker_names_which_one(module, fake_llm):
+    await feed(module, session([Text("斗图")], user="7", message_id="m1"))
+    conversation = module.conversations["group:100"]
+    mine = conversation.add("s1", None, "[表情:难绷]")
+    fake_llm.replies.append([{"text": "行 删了"}])
+    quote = Quote("s1")(Author("42", name="十七"))
+    await feed(module, session([quote, At("42"), Text(" 别存龙图")], message_id="m2"))
+    assert conversation.lines[-2].text == f"回复#{mine.number}（你发的[表情:难绷]） @你 别存龙图"
