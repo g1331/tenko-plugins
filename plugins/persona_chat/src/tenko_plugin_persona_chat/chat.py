@@ -97,6 +97,18 @@ class Conversation:
             self.unseen += 1
         return line
 
+    def her_words_before(self, line: Line) -> str:
+        """``line`` 前面她连着说的几句。"""
+
+        said: list[str] = []
+        for other in reversed(self.lines):
+            if other.number >= line.number:
+                continue
+            if other.speaker is not None:
+                break
+            said.insert(0, other.text)
+        return " ".join(said)
+
     def by_number(self, number: object) -> Line | None:
         return next((line for line in self.lines if line.number == number), None)
 

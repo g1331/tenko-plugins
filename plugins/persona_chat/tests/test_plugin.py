@@ -441,7 +441,8 @@ async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm)
     await feed(module, session([Text("第一千话")], message_id="m1"))
     await module._waiters["group:100"]
     assert len(fake_llm.requests) == 2
-    assert "#3 紧跟在你后面说：“第一千话”" in fake_llm.requests[1][0][-1]["content"]
+    hint = fake_llm.requests[1][0][-1]["content"]
+    assert "#3 紧跟在你后面说：“第一千话”" in hint and "你刚说的是：“你追到哪了”" in hint
 
     # 再来一条不是紧跟着她的，照旧攒够两条才问
     await feed(module, session([Text("你呢")], user="2", message_id="m2"))
@@ -454,6 +455,19 @@ async def test_talking_to_someone_else_right_after_her_is_not_answering(module, 
 
     await feed(module, session([At("7"), Text(" 你看完没")], message_id="m1"))
     assert "group:100" not in module._waiters and len(fake_llm.requests) == 1
+
+
+async def test_repeating_someone_else_right_after_her_is_not_answering(module, fake_llm):
+    await feed(module, session([Text("哪个是你")], user="7", message_id="m0"))
+    fake_llm.replies.append([{"text": "金杰又在看这个"}])
+    await feed(module, session([At("42"), Text(" 你看这图")], message_id="m1"))
+
+    # 跟着别人问图上“哪个是你”，不是在回她
+    await feed(module, session([Text("哪个是你")], user="8", message_id="m2"))
+    assert "group:100" not in module._waiters and len(fake_llm.requests) == 1
+
+    await feed(module, session([Text("怎么又是金杰")], user="9", message_id="m3"))
+    module._waiters.pop("group:100").cancel()  # 不是复读的照常当作可能在接她的话
 
 
 async def test_she_stops_chiming_in_once_she_talks_too_much(module, fake_llm, monkeypatch):

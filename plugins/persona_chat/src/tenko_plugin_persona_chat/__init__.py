@@ -503,6 +503,11 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             and conversation.lines[-2].speaker is None
             and bool(spoken.strip())
             and not any(isinstance(e, (At, Quote)) for e in elements)
+            # 一字不差地重复别人刚说的话，多半是跟着问那个人，比如别人问图上“哪个是你”。
+            and not any(
+                other.speaker not in (None, speaker) and other.text.strip() == text.strip()
+                for other in islice(reversed(conversation.lines), 1, 12)
+            )
         )
         # 最近的话里她开口的次数已经比最活跃的群友还多时，别人没在回她就不插嘴。
         recent = list(
@@ -727,7 +732,7 @@ async def respond(
             hint = mention_hint(target.number, mood, target.text)
         else:
             hint = (
-                answer_hint(answer.number, answer.text)
+                answer_hint(answer.number, answer.text, conversation.her_words_before(answer))
                 if answer
                 else FOLLOW_HINT
                 if follow
