@@ -1,5 +1,8 @@
 import pytest
+import pytest_asyncio
 from satori import Image, Text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 PERSONA = {"persona_id": 2, "display_name": "abc", "avatar_url": None}
 STATS = {
@@ -226,8 +229,19 @@ async def test_servers_sorted_by_players(module, api, rendered):
     assert "没找到" in await module.servers_reply("none", None)
 
 
-async def test_binding_lets_queries_skip_the_name(module, player, rendered):
-    module.bindings.save({})
+@pytest_asyncio.fixture
+async def db(module, monkeypatch):
+    """内存 SQLite 代替宿主给插件的库。"""
+
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(module.Binding.__table__.create)
+    monkeypatch.setattr(module, "get_session", lambda: AsyncSession(engine))
+    yield
+    await engine.dispose()
+
+
+async def test_binding_lets_queries_skip_the_name(module, player, rendered, db):
     reply = await module._answer(module.stats_reply(None, None, "qq1"))
     assert reply.startswith("还没绑定 EA 名字")
     assert await module.bind_reply(None, "qq1") == "用法：/bf1绑定 <EA 名字>"
@@ -236,7 +250,16 @@ async def test_binding_lets_queries_skip_the_name(module, player, rendered):
     player["/players/2"] = PERSONA
     reply = await module.stats_reply(None, None, "qq1")
     assert reply.startswith("abc 的战地一战绩")
-    module.bindings.save({})
+
+
+async def test_old_json_bindings_move_into_the_database(module, player, db):
+    module._legacy.save({"qq1": {"pid": 9, "name": "old"}, "qq2": {"pid": 8, "name": "kept"}})
+    assert (await module.bind_reply("abc", "qq1")).startswith("已绑定 abc")
+    # 新绑定覆盖 JSON 里的旧值，JSON 里别人的绑定原样导入
+    assert await module.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
+    assert await module.bind_reply(None, "qq2") == "当前绑定：kept（PID 8）"
+    assert not module._legacy.path.exists()
+    module._legacy.path.with_name("bindings.json.imported").unlink()
 
 
 SERVER = {

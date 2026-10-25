@@ -16,9 +16,11 @@ from arclet.entari import BasicConfModel, MessageChain, Session, command, plugin
 from arclet.entari.command import Query
 from loguru import logger
 from satori import Image, Text
+from sqlalchemy import BigInteger, String, select
+from sqlalchemy.orm import Mapped, mapped_column
 from tenko_api.features import declare
 from tenko_api.render import RenderService
-from tenko_api.storage import Store
+from tenko_api.storage import Model, Store, get_session
 
 from . import pages
 
@@ -48,8 +50,44 @@ config = plugin.get_config(Bf1Config)
 TOP = 10
 ITEM_CARDS = 10
 
-bindings = Store("bindings", version=1)
-"""用户 ID → {pid, name}。"""
+
+class Binding(Model):
+    """QQ 号 → 绑定的 EA 账号（按 PID 查，改名不影响）。"""
+
+    user_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    pid: Mapped[int] = mapped_column(BigInteger)
+    # 从旧 bot 迁过来的绑定有些没有名字
+    name: Mapped[str | None] = mapped_column(String(64))
+
+
+# 0.1.4–0.1.5 把绑定存在这个 JSON 里，第一次用到绑定时导入数据库
+_legacy = Store("bindings", version=1)
+_legacy_lock = asyncio.Lock()
+
+
+async def _import_legacy() -> None:
+    if not _legacy.path.exists():
+        return
+    async with _legacy_lock:
+        if not _legacy.path.exists():
+            return
+        data = _legacy.load(default={})
+        async with get_session() as db:
+            existing = set(await db.scalars(select(Binding.user_id)))
+            db.add_all(
+                Binding(user_id=user_id, pid=bound["pid"], name=bound.get("name"))
+                for user_id, bound in data.items()
+                if user_id not in existing
+            )
+            await db.commit()
+        _legacy.path.rename(_legacy.path.with_name(f"{_legacy.path.name}.imported"))
+        logger.info("已把 {} 条绑定从 {} 导入数据库", len(data), _legacy.path.name)
+
+
+async def _bound(user_id: str) -> Binding | None:
+    await _import_legacy()
+    async with get_session() as db:
+        return await db.get(Binding, user_id)
 
 
 class Bf1Error(Exception):
@@ -205,10 +243,10 @@ async def _player(name: str | None, user_id: str) -> dict[str, Any]:
 
     if name:
         return await _persona(name)
-    bound = bindings.load(default={}).get(user_id)
+    bound = await _bound(user_id)
     if not bound:
         raise Bf1Error("还没绑定 EA 名字：先发 /bf1绑定 你的EA名字，或者在命令后面带上名字")
-    return await _get(f"/players/{bound['pid']}")
+    return await _get(f"/players/{bound.pid}")
 
 
 async def stats_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
@@ -259,14 +297,17 @@ async def items_reply(
 
 async def bind_reply(name: str | None, user_id: str) -> str:
     if not name:
-        bound = bindings.load(default={}).get(user_id)
+        bound = await _bound(user_id)
         if not bound:
             return "用法：/bf1绑定 <EA 名字>"
-        return f"当前绑定：{bound['name']}（PID {bound['pid']}）"
+        return f"当前绑定：{bound.name or '名字未知'}（PID {bound.pid}）"
     persona = await _persona(name)
-    data = bindings.load(default={})
-    data[user_id] = {"pid": persona["persona_id"], "name": persona["display_name"]}
-    bindings.save(data)
+    await _import_legacy()
+    async with get_session() as db:
+        await db.merge(
+            Binding(user_id=user_id, pid=persona["persona_id"], name=persona["display_name"])
+        )
+        await db.commit()
     return (
         f"已绑定 {persona['display_name']}（PID {persona['persona_id']}），"
         "之后 /bf1s /bf1w /bf1v 不带名字就查这个号"
