@@ -224,3 +224,105 @@ async def test_servers_sorted_by_players(module, api, rendered):
     assert rendered["context"]["summary"] == "共找到 12 个有人的服务器，按人数显示前 10 个"
     api["/servers"] = {"total": 0, "items": []}
     assert "没找到" in await module.servers_reply("none", None)
+
+
+async def test_binding_lets_queries_skip_the_name(module, player, rendered):
+    module.bindings.save({})
+    reply = await module._answer(module.stats_reply(None, None, "qq1"))
+    assert reply.startswith("还没绑定 EA 名字")
+    assert await module.bind_reply(None, "qq1") == "用法：/bf1绑定 <EA 名字>"
+    assert (await module.bind_reply("abc", "qq1")).startswith("已绑定 abc（PID 2）")
+    assert await module.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
+    player["/players/2"] = PERSONA
+    reply = await module.stats_reply(None, None, "qq1")
+    assert reply.startswith("abc 的战地一战绩")
+    module.bindings.save({})
+
+
+SERVER = {
+    "name": "[S] test",
+    "player_count": 2,
+    "max_player_count": 64,
+    "mode_display_name": "征服",
+    "map_display_name": "西奈沙漠",
+    "region_display_name": "亚洲",
+    "game_id": 7,
+}
+
+
+async def test_server_detail_picks_the_busiest_match(module, api, rendered):
+    api["/servers"] = {"total": 2, "items": [{**SERVER, "game_id": 6, "player_count": 1}, SERVER]}
+    api["/servers/7"] = {
+        "summary": SERVER,
+        "description": "欢迎",
+        "map_rotation": [{"map_display_name": "西奈沙漠", "mode_display_name": "征服"}],
+        "extras": {"owner": {"display_name": "boss"}, "bookmark_count": 1200, "admins": [1]},
+    }
+    api["/servers/7/players"] = {
+        "teams": [
+            {
+                "team_id": 0,
+                "faction": "美国",
+                "avg_rank": 75.5,
+                "rank_150_count": 1,
+                "players": [
+                    {"display_name": "low", "rank": 3, "stats": None},
+                    {"display_name": "top", "rank": 150, "is_admin": True, "stats": {"kd": 2.5}},
+                ],
+            }
+        ],
+        "operation": {
+            "maps": [
+                {"name": "法欧堡", "sectors": 3},
+                {"name": "苏伊士", "sectors": 4},
+                {"name": "西奈沙漠"},
+            ],
+            "map_index": 1,
+            "sectors_taken": 1,
+            "attacker": "大英帝国",
+            "defender": "不认识",
+        },
+    }
+    reply = await module.server_reply("test", None)
+    ctx = rendered["context"]
+    assert ctx["owner"] == "boss" and ctx["roles"][0] == ("管理", 1)
+    team = ctx["teams"][0]
+    assert [p["name"] for p in team["players"]] == ["top", "low"]
+    assert (team["players"][0]["admin"], team["players"][0]["kd_hot"], team["kd"]) == (
+        True,
+        True,
+        "2.50",
+    )
+    assert [p["index"] for p in team["players"]] == [1, 2] and ctx["width"] == 1280
+    assert team["flag"].startswith("data:image/png")
+    op = ctx["operation"]
+    assert [m["sectors"] for m in op["track"]] == [[True] * 3, [True, False, False, False], []]
+    assert (op["where"], op["next"], op["defender"]) == ("区域 2/4 · 第 2/3 张图", "西奈沙漠", None)
+    assert "美国（2）：low、top" in reply and reply.endswith("用 /bf1ds gameId")
+
+    def down(**_):
+        raise module.Bf1Error("x")
+
+    api["/servers/7/players"] = down
+    await module.server_reply("7", None)
+    assert rendered["context"]["players_missing"]
+
+
+async def test_overview(module, api, rendered):
+    api["/overview"] = {
+        "available": True,
+        "players": {"total": 10708, "asia": 6541, "eu": 3701, "other": 466},
+        "servers": {"total": 274},
+        "queues": {"total": 133},
+        "spectators": {"total": 29},
+        "top_map_modes": [{"label": "征服 · 西奈沙漠", "servers": 29, "players": 1295}],
+        "mode_distribution": [{"label": "征服", "players": 3}, {"label": "行动", "players": 1}],
+        "history": [{"players": 10}, {"players": 20}],
+    }
+    reply = await module.overview_reply(None)
+    ctx = rendered["context"]
+    assert ctx["players"] == "10,708" and ctx["modes"][0] == ("征服", "3", 75)
+    assert ctx["trend"]["line"] == "0.0,150.0 900.0,0.0"
+    assert reply.startswith("战地一当前在线 10708 人，274 个服务器")
+    api["/overview"] = {"available": False}
+    assert await module._answer(module.overview_reply(None)) == "全服概况暂时没有数据，稍后再试"

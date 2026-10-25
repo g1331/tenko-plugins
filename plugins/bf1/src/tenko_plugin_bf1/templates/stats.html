@@ -52,22 +52,19 @@
   .tiles .v { font-family: "Oswald", sans-serif; font-size: 36px; font-weight: 700; line-height: 1.2; }
   .tiles .v.hot { color: var(--amber-soft); }
   .tiles .rate { font-size: 17px; color: var(--muted); margin-left: 8px; font-family: "SC", sans-serif; font-weight: 400; }
-  .cls { display: grid; grid-template-columns: 60px minmax(0, 1fr) 128px 104px 70px 70px; gap: 0 16px; align-items: center; }
-  .cls.head { padding: 0 8px 10px; font-size: 17px; color: var(--muted); }
+  .classes { padding: 18px 22px; }
+  .classes .sh { font-size: 22px; margin-bottom: 10px; }
+  .cls { display: grid; grid-template-columns: 40px minmax(0, 1fr) 130px 110px 80px; gap: 0 14px; align-items: center;
+    padding: 4px 6px; font-size: 19px; color: var(--soft); }
+  .cls.head { font-size: 16px; color: var(--muted); padding-bottom: 6px; }
   .cls.head span:nth-child(n+3), .cls .n { text-align: right; }
-  .cls.row { padding: 8px; border-top: 1px solid var(--line); }
-  .cls.best-row { background: rgba(245,158,11,.12); }
-  .cls .pic { width: 60px; height: 60px; overflow: hidden; background: rgba(255,255,255,.08); }
+  .cls.row { border-top: 1px solid var(--line); }
+  .cls.best-row { color: var(--amber-soft); }
+  .cls .pic { width: 40px; height: 40px; overflow: hidden; background: rgba(255,255,255,.08); }
   .cls .pic img { display: block; width: 100%; height: 180%; object-fit: cover; object-position: top; }
-  .cls .top { display: flex; align-items: center; gap: 10px; }
-  .cls .cname { font-size: 22px; font-weight: 700; }
-  .cls.best-row .cname { color: var(--amber-soft); }
-  .cls .badge { background: var(--amber); color: #000; font-size: 15px; font-weight: 700; line-height: 22px; padding: 0 6px; }
-  .cls .share { margin-left: auto; font-size: 18px; color: var(--muted); }
-  .cls .bar { margin-top: 8px; }
-  .cls .bar i { background: rgba(255,255,255,.55); }
-  .cls.best-row .bar i { background: var(--amber); }
-  .cls .n { font-family: "Oswald", sans-serif; font-size: 22px; color: var(--soft); }
+  .cls .badge { margin-left: 8px; background: var(--amber); color: #000; font-size: 14px; font-weight: 700; line-height: 20px; padding: 0 5px; vertical-align: 2px; }
+  .cls .share { margin-left: 8px; font-size: 16px; color: var(--muted); }
+  .cls .n { font-family: "Oswald", sans-serif; font-size: 20px; }
   .gear-row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
   .gear-row .panel { margin: 0; }
   .gear-item + .gear-item { margin-top: 16px; }
@@ -147,21 +144,6 @@
   </div>
 </section>
 
-<section class="panel">
-  <div class="sh">兵种<span class="aside">按游玩时长排序</span></div>
-  <div class="cls head"><span></span><span>兵种 · 时长占比</span><span>时长</span><span>击杀</span><span>KPM</span><span>SPM</span></div>
-  {% for c in classes %}
-  <div class="cls row{{ ' best-row' if c.best }}">
-    <div class="pic"><img src="{{ c.portrait }}"></div>
-    <div>
-      <div class="top"><span class="cname">{{ c.name }}</span>{% if c.best %}<span class="badge">最佳</span>{% endif %}<span class="share">{{ c.share }}</span></div>
-      <div class="bar"><i style="width: {{ c.ratio }}%"></i></div>
-    </div>
-    <span class="n">{{ c.time }}</span><span class="n">{{ c.kills }}</span><span class="n">{{ c.kpm }}</span><span class="n">{{ c.spm }}</span>
-  </div>
-  {% endfor %}
-</section>
-
 <div class="gear-row">
   {% for title, items in gear %}
   <section class="panel">
@@ -181,4 +163,16 @@
   </section>
   {% endfor %}
 </div>
+
+<section class="panel classes">
+  <div class="sh">兵种<span class="aside">按游玩时长排序</span></div>
+  <div class="cls head"><span></span><span>兵种 · 时长占比</span><span>时长</span><span>击杀</span><span>KPM</span></div>
+  {% for c in classes %}
+  <div class="cls row{{ ' best-row' if c.best }}">
+    <div class="pic"><img src="{{ c.portrait }}"></div>
+    <span>{{ c.name }}{% if c.best %}<span class="badge">最佳</span>{% endif %}<span class="share">{{ c.share }}</span></span>
+    <span class="n">{{ c.time }}</span><span class="n">{{ c.kills }}</span><span class="n">{{ c.kpm }}</span>
+  </div>
+  {% endfor %}
+</section>
 {% endblock %}

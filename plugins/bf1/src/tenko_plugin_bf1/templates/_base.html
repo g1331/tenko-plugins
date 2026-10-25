@@ -10,13 +10,13 @@
   :root {
     --amber: #fbbf24; --amber-deep: #f59e0b; --amber-soft: #fcd34d;
     --text: #fff; --soft: rgba(255,255,255,.88); --muted: rgba(255,255,255,.7); --line: rgba(255,255,255,.14);
-    --panel: rgba(18,18,22,.84);
+    --panel: #141418;
     --green: #10b981; --red: #ef4444;
     --gold: #ca843a; --blue: #1e90ff; --skin-gold: #ecd996; --skin-blue: #bfcfde;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: #000; }
-  body { width: 1000px; color: var(--text); font-family: "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 20px;
+  body { width: {{ width|default(1000) }}px; color: var(--text); font-family: "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 20px;
     -webkit-font-smoothing: antialiased; }
   .d { font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-variant-numeric: tabular-nums; }
   .page { position: relative; padding: 24px 24px 18px; overflow: hidden; }

@@ -302,37 +302,237 @@ def items_page(
     }
 
 
+def _server_row(s: dict[str, Any]) -> dict[str, Any]:
+    players, most = s.get("player_count") or 0, s.get("max_player_count") or 0
+    return {
+        "name": s["name"],
+        "map": s.get("map_display_name") or s.get("map_name") or "-",
+        "map_image": s.get("map_image_url"),
+        "mode": s.get("mode_display_name") or s.get("game_mode") or "-",
+        "region": s.get("region_display_name") or "-",
+        "country": s.get("country"),
+        "tick": s.get("tick_rate"),
+        "locked": bool(s.get("has_password")),
+        "game_id": s.get("game_id"),
+        "players": players,
+        "max": most,
+        "full": bool(most) and players >= most,
+        "queue": s.get("queue_count") or 0,
+        "spectators": s.get("spectator_count") or 0,
+        "ratio": min(100, _percent(players, most)),
+    }
+
+
 def servers_page(
     keyword: str, servers: list[dict[str, Any]], total: int, source: str
 ) -> dict[str, Any]:
-    rows = []
-    for s in servers:
-        players, most = s.get("player_count") or 0, s.get("max_player_count") or 0
-        rows.append(
-            {
-                "name": s["name"],
-                "map": s.get("map_display_name") or s.get("map_name") or "-",
-                "map_image": s.get("map_image_url"),
-                "mode": s.get("mode_display_name") or s.get("game_mode") or "-",
-                "region": s.get("region_display_name") or "-",
-                "country": s.get("country"),
-                "tick": s.get("tick_rate"),
-                "locked": bool(s.get("has_password")),
-                "game_id": s.get("game_id"),
-                "players": players,
-                "max": most,
-                "full": bool(most) and players >= most,
-                "queue": s.get("queue_count") or 0,
-                "spectators": s.get("spectator_count") or 0,
-                "ratio": min(100, _percent(players, most)),
-            }
-        )
-    shown = f"，按人数显示前 {len(rows)} 个" if total > len(rows) else ""
+    shown = f"，按人数显示前 {len(servers)} 个" if total > len(servers) else ""
     return {
         **_common(source),
         "keyword": keyword,
         "summary": f"共找到 {total} 个有人的服务器{shown}",
-        "servers": rows,
+        "servers": [_server_row(s) for s in servers],
+    }
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+FACTIONS = {
+    "法国": "fra",
+    "德意志帝国": "ger",
+    "大英帝国": "uk",
+    "美国": "usa",
+    "意大利王国": "ita",
+    "俄罗斯帝国": "rus",
+    "奥匈帝国": "ahu",
+    "奥斯曼帝国": "otm",
+    "皇家海军陆战队": "rm",
+    "红军": "bol",
+}
+
+
+def _flag(faction: str | None) -> str | None:
+    slug = FACTIONS.get(faction or "")
+    return asset(f"factions/{slug}.png") if slug else None
+
+
+def _team(team: dict[str, Any], first: int) -> dict[str, Any]:
+    """一队的计分板；序号从 first 开始，两队接着编号。"""
+
+    players = sorted(team.get("players") or [], key=lambda p: p.get("rank") or 0, reverse=True)
+    rows, kds, kpms, wins = [], [], [], []
+    for index, p in enumerate(players, first):
+        stats = p.get("stats") or {}
+        kd, kpm, win = stats.get("kd"), stats.get("kpm"), stats.get("win_rate")
+        kds += [kd] if isinstance(kd, int | float) else []
+        kpms += [kpm] if isinstance(kpm, int | float) else []
+        wins += [win] if isinstance(win, int | float) else []
+        hours = stats.get("time_hours")
+        rows.append(
+            {
+                "index": index,
+                "name": p.get("display_name") or "-",
+                "rank": p.get("rank") or 0,
+                "kd": _fixed(kd),
+                "kd_hot": isinstance(kd, int | float) and kd >= 2,
+                "kpm": _fixed(kpm),
+                "kpm_hot": isinstance(kpm, int | float) and kpm >= 1.5,
+                "win": f"{win:.1f}%" if isinstance(win, int | float) else "-",
+                "hours": f"{hours:.0f}h" if isinstance(hours, int | float) else "-",
+                "language": p.get("language") or "",
+                "admin": bool(p.get("is_admin")),
+                "vip": bool(p.get("is_vip")),
+            }
+        )
+    win = _mean(wins)
+    return {
+        "faction": team.get("faction") or f"队伍 {team.get('team_id')}",
+        "flag": _flag(team.get("faction")),
+        "count": len(rows),
+        "rank_150": team.get("rank_150_count") or 0,
+        "kd": _fixed(_mean(kds)),
+        "kpm": _fixed(_mean(kpms)),
+        "win": f"{win:.1f}%" if win is not None else "-",
+        "players": rows,
+    }
+
+
+def _rotation(maps: list[dict[str, Any]]) -> dict[str, Any]:
+    """轮换里模式都一样时（常见），模式只在标题写一次。"""
+
+    modes = {m.get("mode_display_name") or "-" for m in maps}
+    single = modes.pop() if len(modes) == 1 else None
+    return {
+        "rotation_mode": single,
+        "rotation": [
+            m.get("map_display_name") or "-"
+            if single
+            else f"{m.get('mode_display_name') or '-'} · {m.get('map_display_name') or '-'}"
+            for m in maps
+        ],
+    }
+
+
+def _operation(op: dict[str, Any] | None) -> dict[str, Any] | None:
+    """行动进度，照网页的区域链：攻方旗 → 每张图缩略图 + 区域箭头（拿下蓝、没拿下红）→ 守方旗。"""
+
+    maps = (op or {}).get("maps") or []
+    index = (op or {}).get("map_index")
+    if not maps or not isinstance(index, int) or not 0 <= index < len(maps):
+        return None
+    taken = op.get("sectors_taken") or 0
+    track = []
+    for i, m in enumerate(maps):
+        total = m.get("sectors") or 0
+        done = total if i < index else taken if i == index else 0
+        track.append(
+            {
+                "image": m.get("image_url"),
+                "current": i == index,
+                "sectors": [k < done for k in range(total)],
+            }
+        )
+    total = maps[index].get("sectors")
+    # 正在争夺的是下一个区域；区域数未收录时只写已拿下几个
+    where = f"区域 {min(taken + 1, total)}/{total}" if total else f"已推进 {taken} 区"
+    return {
+        "attacker": _flag(op.get("attacker")),
+        "defender": _flag(op.get("defender")),
+        "track": track,
+        "where": f"{where} · 第 {index + 1}/{len(maps)} 张图",
+        "next": maps[index + 1].get("name") if index + 1 < len(maps) else None,
+    }
+
+
+def server_page(
+    detail: dict[str, Any], players: dict[str, Any] | None, source: str
+) -> dict[str, Any]:
+    extras = detail.get("extras") or {}
+    owner = extras.get("owner") or {}
+    teams, first = [], 1
+    for raw in (players or {}).get("teams") or []:
+        teams.append(_team(raw, first))
+        first += max(32, teams[-1]["count"])
+    summary = detail["summary"]
+    common = _common(source)
+    return {
+        **common,
+        # 背景用当前地图实景，拿不到才用随机背景
+        "background": summary.get("map_image_url") or common["background"],
+        "server": _server_row(summary),
+        "operation": _operation((players or {}).get("operation")),
+        "owner": owner.get("display_name"),
+        "bookmarks": _int(extras.get("bookmark_count")),
+        "roles": [
+            (label, len(extras.get(key) or []))
+            for label, key in [("管理", "admins"), ("VIP", "vips"), ("封禁", "banned")]
+        ],
+        **_rotation(detail.get("map_rotation") or []),
+        "teams": teams,
+        "players_missing": players is None,
+        "online": [
+            ("管理", sum(p["admin"] for t in teams for p in t["players"])),
+            ("VIP", sum(p["vip"] for t in teams for p in t["players"])),
+            ("150 级", sum(t["rank_150"] for t in teams)),
+        ],
+        "width": 1280,
+    }
+
+
+def _sparkline(history: list[dict[str, Any]], width: int, height: int) -> dict[str, Any] | None:
+    points = [h["players"] for h in history if isinstance(h.get("players"), int)]
+    if len(points) < 2:
+        return None
+    low, high = min(points), max(points)
+    span = (high - low) or 1
+    step = width / (len(points) - 1)
+    line = " ".join(
+        f"{i * step:.1f},{height - (v - low) / span * height:.1f}" for i, v in enumerate(points)
+    )
+    return {
+        "line": line,
+        "area": f"0,{height} {line} {width},{height}",
+        "low": _int(low),
+        "high": _int(high),
+    }
+
+
+def overview_page(overview: dict[str, Any], source: str) -> dict[str, Any]:
+    regions = [("亚服", "asia"), ("欧服", "eu"), ("其他", "other")]
+    kinds = [("私服", "private"), ("官服", "official")]
+    players, servers = overview.get("players") or {}, overview.get("servers") or {}
+    queues = overview.get("queues") or {}
+    top = overview.get("top_map_modes") or []
+    most = max((m.get("players") or 0 for m in top), default=0)
+    modes = overview.get("mode_distribution") or []
+    total = sum(m.get("players") or 0 for m in modes)
+    return {
+        **_common(source),
+        "players": _int(players.get("total")),
+        "servers": _int(servers.get("total")),
+        "queues": _int(queues.get("total")),
+        "spectators": _int((overview.get("spectators") or {}).get("total")),
+        "split": [
+            (label, _int(players.get(key)), _int(servers.get(key)))
+            for label, key in regions + kinds
+        ],
+        "maps": [
+            {
+                "label": m.get("label") or "-",
+                "image": m.get("image"),
+                "players": _int(m.get("players")),
+                "servers": m.get("servers") or 0,
+                "ratio": _percent(m.get("players") or 0, most),
+            }
+            for m in top[:6]
+        ],
+        "modes": [
+            (m.get("label") or "-", _int(m.get("players")), _percent(m.get("players") or 0, total))
+            for m in modes[:5]
+        ],
+        "trend": _sparkline(overview.get("history") or [], 900, 150),
     }
 
 
@@ -346,14 +546,14 @@ def html(template: str, context: dict[str, Any], sc_font: str | None = None) -> 
     return _env.get_template(template).render(sc_font=sc_font, **context)
 
 
-async def _screenshot(service: Any, page_html: str) -> bytes:
+async def _screenshot(service: Any, page_html: str, width: int = WIDTH) -> bytes:
     # shortcut: 宿主的 render_template 只认宿主自带模板，这里借它的共享浏览器截插件自己的页面；
     # tenko-api 提供渲染任意 HTML 的接口后改用它。
     if not await service.start() or service.browser is None:
         raise RuntimeError("浏览器不可用")
     context = await service.browser.new_context(
         # 整页截图不会比视口矮，视口给小一点，内容短时才不会在下面留一截黑底。
-        viewport={"width": WIDTH, "height": 100},
+        viewport={"width": width, "height": 100},
         device_scale_factor=1,
     )
     try:
@@ -374,7 +574,8 @@ async def render(service: Any, template: str, context: dict[str, Any]) -> bytes 
         return None
     try:
         page_html = html(template, context, _host_font(service))
-        return await asyncio.wait_for(_screenshot(service, page_html), RENDER_TIMEOUT)
+        width = context.get("width", WIDTH)
+        return await asyncio.wait_for(_screenshot(service, page_html, width), RENDER_TIMEOUT)
     except asyncio.CancelledError:
         raise
     except Exception as error:

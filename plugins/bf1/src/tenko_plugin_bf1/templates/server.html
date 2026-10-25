@@ -1,0 +1,106 @@
+{% extends "_base.html" %}
+{#- 服务器详情：仿游戏内记分板。当前地图实景铺底，不加底板，两队左右并排。 -#}
+{% block style %}
+  body { font-size: 15px; }
+  .page { padding: 18px 26px 12px; text-shadow: 0 1px 2px rgba(0,0,0,.85); }
+  .bg i { filter: blur(6px); }
+  .bg::before { background: rgba(0,0,0,.52); }
+  h1 { margin: 2px 0 0; text-align: center; font-size: 30px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { text-align: center; font-size: 18px; font-weight: 700; margin-top: 4px; }
+  .meta { text-align: center; font-size: 14px; color: var(--muted); margin-top: 4px; }
+  .op { display: flex; justify-content: center; align-items: center; gap: 6px; margin-top: 10px; }
+  .op .flag { width: 24px; height: 24px; object-fit: contain; }
+  .op .map { width: 46px; height: 26px; object-fit: cover; opacity: .55; border: 1px solid rgba(255,255,255,.3); }
+  .op .map.now { opacity: 1; border-color: var(--amber); }
+  .op .sec { display: flex; gap: 1px; margin-right: 4px; }
+  .op .sec i { width: 11px; height: 16px; background: #ef4444; clip-path: polygon(0 0, 55% 0, 100% 50%, 55% 100%, 0 100%, 45% 50%); }
+  .op .sec i.on { background: #38bdf8; }
+  .op-text { text-align: center; font-size: 14px; color: var(--soft); margin-top: 4px; }
+  .op-text b { color: var(--amber-soft); font-weight: 400; }
+  .teams { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 14px; }
+  .cols, .sum, .row { display: grid; grid-template-columns: 30px 36px minmax(0, 1fr) 50px 50px 64px 58px 34px; gap: 0 8px; align-items: center; }
+  .cols { height: 40px; border-bottom: 1px solid rgba(255,255,255,.55); font-size: 14px; font-weight: 700; }
+  .cols .flag { width: 34px; height: 34px; object-fit: contain; grid-column: 1 / 3; justify-self: start; }
+  .cols .fac { font-size: 20px; }
+  .cols span:nth-child(n+4), .sum span:nth-child(n+3), .row span:nth-child(n+4) { text-align: right; }
+  .cols span:last-child, .sum span:last-child, .row span:last-child { text-align: center; }
+  .sum { height: 30px; border-bottom: 1px solid rgba(255,255,255,.3); font-weight: 700; }
+  .sum .who { grid-column: 1 / 4; }
+  .sum .who small { font-size: 15px; margin-left: 16px; }
+  .sum span { font-family: "Oswald", "SC", sans-serif; }
+  .list { margin-top: 8px; border-left: 1px solid rgba(255,255,255,.4); }
+  .row { height: 19px; }
+  .row .i { font-family: "Oswald", sans-serif; text-align: right; color: var(--soft); }
+  .row .lv { font-family: "Oswald", sans-serif; font-size: 11px; line-height: 13px; text-align: center; border: 1px solid rgba(255,255,255,.75); text-shadow: none; }
+  .row .lv.max { background: #f2f2f2; color: #111; border-color: #f2f2f2; font-weight: 700; }
+  .row .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .nm.admin { color: #fb7185; }
+  .row .nm.vip { color: #fde047; }
+  .row .n { font-family: "Oswald", sans-serif; }
+  .row .n.hot { color: var(--amber); font-weight: 700; }
+  .legend { display: flex; justify-content: flex-end; gap: 22px; margin-top: 16px; font-size: 14px; font-weight: 700; }
+  .legend i { display: inline-block; width: 13px; height: 13px; margin-right: 6px; vertical-align: -2px; }
+  .legend .facts { margin-right: auto; font-weight: 400; color: var(--muted); }
+  .empty { margin-top: 30px; padding: 40px; text-align: center; font-size: 20px; color: var(--soft); }
+  footer { font-size: 13px; margin-top: 8px; }
+{% endblock %}
+{% block body %}
+{% set s = server %}
+<h1>{{ s.name }}</h1>
+<div class="sub">{{ s.mode }}-{{ s.map }}-{{ s.players }}/{{ s.max }}{% if s.queue %} · 排队 {{ s.queue }}{% endif %}{% if s.spectators %} · 观战 {{ s.spectators }}{% endif %}</div>
+<div class="meta">{{ s.region }}{% if s.country %} {{ s.country }}{% endif %}{% if s.tick %} · {{ s.tick }}Hz{% endif %}{% if s.locked %} · 有密码{% endif %} · 服主 {{ owner or "-" }} · 收藏 {{ bookmarks }} · gameId {{ s.game_id }}</div>
+
+{% if operation %}
+<div class="op">
+  {% if operation.attacker %}<img class="flag" src="{{ operation.attacker }}">{% endif %}
+  {% for m in operation.track %}
+  {% if m.image %}<img class="map{{ ' now' if m.current }}" src="{{ m.image }}">{% endif %}
+  <span class="sec">{% for on in m.sectors %}<i class="{{ 'on' if on }}"></i>{% endfor %}</span>
+  {% endfor %}
+  {% if operation.defender %}<img class="flag" src="{{ operation.defender }}">{% endif %}
+</div>
+<div class="op-text">{{ operation.where }}{% if operation.next %} · 攻破后进入 <b>{{ operation.next }}</b>{% endif %}</div>
+{% elif rotation %}
+<div class="op-text">轮换{% if rotation_mode %}（{{ rotation_mode }}）{% endif %}：{{ rotation | join("、") }}</div>
+{% endif %}
+
+{% if teams %}
+<div class="teams">
+  {% for t in teams %}
+  <section>
+    <div class="cols">
+      {% if t.flag %}<img class="flag" src="{{ t.flag }}">{% else %}<span></span><span></span>{% endif %}
+      <span class="fac">{{ t.faction }}</span><span>KD</span><span>KPM</span><span>胜率</span><span>时长</span><span>语言</span>
+    </div>
+    <div class="sum">
+      <span class="who">{{ t.count }} 人<small>150 数量：{{ t.rank_150 }}</small></span>
+      <span>{{ t.kd }}</span><span>{{ t.kpm }}</span><span>{{ t.win }}</span><span></span><span></span>
+    </div>
+    <div class="list">
+      {% for p in t.players %}
+      <div class="row">
+        <span class="i">{{ p.index }}</span>
+        <span class="lv{{ ' max' if p.rank >= 150 }}">{{ p.rank }}</span>
+        <span class="nm{{ ' admin' if p.admin else ' vip' if p.vip }}">{{ p.name }}</span>
+        <span class="n{{ ' hot' if p.kd_hot }}">{{ p.kd }}</span>
+        <span class="n{{ ' hot' if p.kpm_hot }}">{{ p.kpm }}</span>
+        <span class="n">{{ p.win }}</span>
+        <span class="n">{{ p.hours }}</span>
+        <span>{{ p.language }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+<div class="legend">
+  <span class="facts">本服登记 {% for label, n in roles %}{{ label }} {{ n }}{{ " · " if not loop.last }}{% endfor %}</span>
+  <span><i style="background: var(--amber)"></i>KD ≥ 2 / KPM ≥ 1.5</span>
+  <span><i style="background: #fb7185"></i>管理：{{ online[0][1] }}</span>
+  <span><i style="background: #fde047"></i>VIP：{{ online[1][1] }}</span>
+  <span><i style="background: #f2f2f2"></i>150：{{ online[2][1] }}</span>
+</div>
+{% else %}
+<div class="empty">{{ "玩家列表暂时拿不到" if players_missing else "服务器里没有玩家" }}</div>
+{% endif %}
+{% endblock %}

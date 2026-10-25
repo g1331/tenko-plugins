@@ -18,6 +18,7 @@ from loguru import logger
 from satori import Image, Text
 from tenko_api.features import declare
 from tenko_api.render import RenderService
+from tenko_api.storage import Store
 
 from . import pages
 
@@ -46,6 +47,9 @@ config = plugin.get_config(Bf1Config)
 
 TOP = 10
 ITEM_CARDS = 10
+
+bindings = Store("bindings", version=1)
+"""用户 ID → {pid, name}。"""
 
 
 class Bf1Error(Exception):
@@ -196,8 +200,19 @@ async def _reply(
     return chain + Text(link) if link else chain
 
 
-async def stats_reply(name: str, service) -> MessageChain | str:
-    persona = await _persona(name)
+async def _player(name: str | None, user_id: str) -> dict[str, Any]:
+    """带名字按名字查；不带就查发消息的人绑定的号（按 PID，改名也不影响）。"""
+
+    if name:
+        return await _persona(name)
+    bound = bindings.load(default={}).get(user_id)
+    if not bound:
+        raise Bf1Error("还没绑定 EA 名字：先发 /bf1绑定 你的EA名字，或者在命令后面带上名字")
+    return await _get(f"/players/{bound['pid']}")
+
+
+async def stats_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
+    persona = await _player(name, user_id)
     pid = persona["persona_id"]
     stats, weapons, vehicles, ban, platoon, online = await asyncio.gather(
         _get(f"/stats/{pid}"),
@@ -226,8 +241,10 @@ async def stats_reply(name: str, service) -> MessageChain | str:
     )
 
 
-async def items_reply(kind: str, name: str, service) -> MessageChain | str:
-    persona = await _persona(name)
+async def items_reply(
+    kind: str, name: str | None, service, user_id: str = ""
+) -> MessageChain | str:
+    persona = await _player(name, user_id)
     pid = persona["persona_id"]
     result, platoon = await asyncio.gather(
         _get(f"/stats/{pid}/{kind}"), _optional(f"/stats/{pid}/platoon")
@@ -240,15 +257,90 @@ async def items_reply(kind: str, name: str, service) -> MessageChain | str:
     return await _reply(service, "items.html", context, text, _player_link(pid, kind))
 
 
-async def servers_reply(keyword: str, service) -> MessageChain | str:
+async def bind_reply(name: str | None, user_id: str) -> str:
+    if not name:
+        bound = bindings.load(default={}).get(user_id)
+        if not bound:
+            return "用法：/bf1绑定 <EA 名字>"
+        return f"当前绑定：{bound['name']}（PID {bound['pid']}）"
+    persona = await _persona(name)
+    data = bindings.load(default={})
+    data[user_id] = {"pid": persona["persona_id"], "name": persona["display_name"]}
+    bindings.save(data)
+    return (
+        f"已绑定 {persona['display_name']}（PID {persona['persona_id']}），"
+        "之后 /bf1s /bf1w /bf1v 不带名字就查这个号"
+    )
+
+
+async def _search_servers(keyword: str) -> tuple[list[dict[str, Any]], int]:
     result = await _get("/servers", name=keyword, limit=100)
     # 接口不按人数排；多取一些自己排，total 是全部匹配数。
     servers = sorted(result["items"], key=lambda s: s.get("player_count") or 0, reverse=True)
+    return servers, result["total"]
+
+
+async def servers_reply(keyword: str, service) -> MessageChain | str:
+    servers, total = await _search_servers(keyword)
     servers = servers[:TOP]
-    context = pages.servers_page(keyword, servers, result["total"], _source())
-    return await _reply(
-        service, "servers.html", context, format_servers(keyword, servers, result["total"])
+    context = pages.servers_page(keyword, servers, total, _source())
+    return await _reply(service, "servers.html", context, format_servers(keyword, servers, total))
+
+
+def format_server(detail: dict[str, Any], players: dict[str, Any] | None) -> str:
+    s = detail["summary"]
+    owner = ((detail.get("extras") or {}).get("owner") or {}).get("display_name") or "-"
+    lines = [
+        s["name"],
+        f"{s.get('player_count')}/{s.get('max_player_count')} | "
+        f"{s.get('mode_display_name') or '-'}·{s.get('map_display_name') or '-'} | "
+        f"{s.get('region_display_name') or '-'} | gameId {s.get('game_id')}",
+        f"服主 {owner}",
+    ]
+    for team in (players or {}).get("teams") or []:
+        names = "、".join(p.get("display_name") or "-" for p in team.get("players") or [])
+        lines.append(f"{team.get('faction') or '-'}（{len(team.get('players') or [])}）：{names}")
+    return "\n".join(lines)
+
+
+async def server_reply(keyword: str, service) -> MessageChain | str:
+    note = ""
+    if keyword.isdigit():
+        game_id = int(keyword)
+    else:
+        servers, total = await _search_servers(keyword)
+        if not servers:
+            raise Bf1Error(f"没找到名字含「{keyword}」的服务器（空服不在列表里）")
+        game_id = servers[0]["game_id"]
+        if total > 1:
+            note = f"「{keyword}」匹配 {total} 个服务器，这是人最多的；要看别的用 /bf1ds gameId"
+    detail, players = await asyncio.gather(
+        _get(f"/servers/{game_id}"), _optional(f"/servers/{game_id}/players")
     )
+    context = pages.server_page(detail, players, _source())
+    # 匹配说明跟在图后面当文字，不画进图里
+    fallback = format_server(detail, players)
+    return await _reply(service, "server.html", context, fallback, note or None)
+
+
+def format_overview(overview: dict[str, Any]) -> str:
+    players, servers = overview.get("players") or {}, overview.get("servers") or {}
+    lines = [
+        f"战地一当前在线 {players.get('total', '-')} 人，{servers.get('total', '-')} 个服务器",
+        f"亚服 {players.get('asia', '-')} | 欧服 {players.get('eu', '-')} | "
+        f"其他 {players.get('other', '-')}",
+    ]
+    for m in (overview.get("top_map_modes") or [])[:5]:
+        lines.append(f"{m.get('label')}：{m.get('players')} 人 / {m.get('servers')} 服")
+    return "\n".join(lines)
+
+
+async def overview_reply(service) -> MessageChain | str:
+    overview = await _get("/overview")
+    if not overview.get("available"):
+        raise Bf1Error("全服概况暂时没有数据，稍后再试")
+    context = pages.overview_page(overview, _source())
+    return await _reply(service, "overview.html", context, format_overview(overview))
 
 
 async def _answer(query) -> MessageChain | str:
@@ -261,11 +353,17 @@ async def _answer(query) -> MessageChain | str:
 def _player_command(name: str, what: str) -> Alconna:
     return Alconna(
         name,
-        Args["name", str],
+        Args["name?", str],
         meta=CommandMeta(
-            f"查询战地一玩家的{what}", usage=f"{name} <EA 名字>", example=f"/{name} SHlSAN13"
+            f"查询战地一玩家的{what}，绑定过可以不带名字",
+            usage=f"{name} [EA 名字]",
+            example=f"/{name} SHlSAN13",
         ),
     )
+
+
+def _name(name: Query[str]) -> str | None:
+    return name.result if name.available else None
 
 
 @command.on(_player_command("bf1s", "生涯战绩"))
@@ -275,7 +373,7 @@ async def bf1s(
     *,
     render_service: RenderService,
 ):
-    return await _answer(stats_reply(name.result, render_service))
+    return await _answer(stats_reply(_name(name), render_service, session.user.id))
 
 
 @command.on(_player_command("bf1w", "武器击杀排行"))
@@ -285,7 +383,7 @@ async def bf1w(
     *,
     render_service: RenderService,
 ):
-    return await _answer(items_reply("weapons", name.result, render_service))
+    return await _answer(items_reply("weapons", _name(name), render_service, session.user.id))
 
 
 @command.on(_player_command("bf1v", "载具击杀排行"))
@@ -295,7 +393,27 @@ async def bf1v(
     *,
     render_service: RenderService,
 ):
-    return await _answer(items_reply("vehicles", name.result, render_service))
+    return await _answer(items_reply("vehicles", _name(name), render_service, session.user.id))
+
+
+bind_command = Alconna(
+    "bf1绑定",
+    Args["name?", str],
+    meta=CommandMeta(
+        "把自己的 EA 名字记下来，之后查战绩可以不带名字；不带名字查看当前绑定",
+        usage="bf1绑定 [EA 名字]",
+        example="/bf1绑定 SHlSAN13",
+    ),
+)
+
+
+@command.on(bind_command)
+async def bf1bind(session: Session, name: Query[str] = Query("name")):  # noqa: B008
+    return await _answer(bind_reply(_name(name), session.user.id))
+
+
+def _keyword(keyword: Query[list]) -> str:
+    return " ".join(str(part) for part in keyword.result).strip()
 
 
 server_command = Alconna(
@@ -314,7 +432,34 @@ async def bf1ss(
     *,
     render_service: RenderService,
 ):
-    text = " ".join(str(part) for part in keyword.result).strip()
-    if not text:
+    if not (text := _keyword(keyword)):
         return "用法：/bf1ss <服务器名关键字>"
     return await _answer(servers_reply(text, render_service))
+
+
+detail_command = Alconna(
+    "bf1ds",
+    Args["keyword", AllParam],
+    meta=CommandMeta(
+        "查看战地一服务器详情和玩家名单；关键字匹配多个时显示人最多的",
+        usage="bf1ds <服务器名关键字 | gameId>",
+        example="/bf1ds pigu",
+    ),
+)
+
+
+@command.on(detail_command)
+async def bf1ds(
+    session: Session,
+    keyword: Query[list] = Query("keyword"),  # noqa: B008
+    *,
+    render_service: RenderService,
+):
+    if not (text := _keyword(keyword)):
+        return "用法：/bf1ds <服务器名关键字 | gameId>"
+    return await _answer(server_reply(text, render_service))
+
+
+@command.on(Alconna("bf1", meta=CommandMeta("战地一全服在线人数、地区分布和热门地图", usage="bf1")))
+async def bf1(session: Session, *, render_service: RenderService):
+    return await _answer(overview_reply(render_service))
