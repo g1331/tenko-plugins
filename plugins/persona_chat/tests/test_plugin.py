@@ -292,6 +292,14 @@ async def test_forwarded_chat_is_read_out(module, fake_llm):
         .text.startswith("回复[愚视：[聊天记录：杜拉罕：")
     )
 
+    # 有时 content 是节点列表的 Python repr 字符串；坏掉的就当没内容，不能整条消息报错。
+    for content, said in ((str(nodes), "[聊天记录：杜拉罕："), ("[{'x': ", "[聊天记录：]")):
+        quote = Quote("old")(
+            Author("9", name="愚视"), Custom("onebot:forward", {"id": "f3", "content": content})
+        )
+        await feed(module, session([quote, Text("这是啥")], internal=internal, message_id="m3"))
+        assert said in module.conversations["group:100"].lines[-1].text
+
 
 async def test_rejected_pictures_are_dropped_and_retried(module, fake_llm, monkeypatch):
     async def download(http, url):

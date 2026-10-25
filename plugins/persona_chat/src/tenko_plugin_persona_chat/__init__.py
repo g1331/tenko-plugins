@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import re
@@ -257,9 +258,18 @@ def _forward(element) -> tuple[str, list[str]] | None:
 
     if getattr(element, "tag", "") != "onebot:forward":
         return None
+    content = element._attrs.get("content") or []
+    if isinstance(content, str):
+        # 引用转发时适配器有时把节点列表写成了 Python repr 字符串，只按字面量解析。
+        try:
+            content = ast.literal_eval(content)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            content = []
     said: list[str] = []
     urls: list[str] = []
-    for node in element._attrs.get("content") or []:
+    for node in content if isinstance(content, list) else []:
+        if not isinstance(node, dict):
+            continue
         words = []
         for seg in node.get("message") or []:
             kind, data = seg.get("type"), seg.get("data") or {}
