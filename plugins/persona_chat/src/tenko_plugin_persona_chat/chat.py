@@ -59,6 +59,11 @@ class Conversation:
     last_unprompted_at: float = float("-inf")
     last_reply_at: float = float("-inf")
     spoken: deque[float] = field(default_factory=lambda: deque(maxlen=200))  # bot 每句话的时刻
+    stickers: dict[str, str] | None = None  # 表情包目录快照，压缩时换新；None 是还没拍
+    usage: dict[str, Any] = field(default_factory=dict)  # 上次请求的 usage，给“上下文”命令看
+    compressed_at: float = 0.0
+    scale: float = 1.4  # 实际 token ÷ 粗估，每次请求后按 usage 校准
+    hint: str = ""  # 上次请求末尾的提示
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def __post_init__(self) -> None:
@@ -148,6 +153,22 @@ class Conversation:
                 break
             kept += 1
         return list(self.lines)[: len(self.lines) - kept]
+
+    def retire_images(self, keep: int) -> int:
+        """只留最近 ``keep`` 张图，更早的退回“[图片]”，返回撤掉的看过的图有几张。
+
+        只在压缩时调用：那时备忘刚改写，后面的缓存本来就要重算，撤图不多花钱；
+        平时撤图会从那条起打断缓存。
+        """
+
+        retired = 0
+        for line in reversed(self.lines):
+            if keep > 0:
+                keep -= len(line.images)
+            elif line.images:
+                retired += len(line.images) if line.shown else 0
+                line.images, line.pictures, line.shown = (), None, False
+        return retired
 
     def forget(self, upto: int, summary: str) -> None:
         """删掉编号不超过 ``upto`` 的记录，换成新摘要。"""
@@ -267,6 +288,29 @@ def build_messages(
             message["content"] = content[0]["text"]
     messages.append({"role": "system", "content": hint})
     return messages
+
+
+def context_parts(
+    persona: str, tools: str, conversation: Conversation, stickers: str, hint: str
+) -> dict[str, float]:
+    """一次请求各部分的粗估 token（不含图），“上下文”命令按实际输入折算成准数。"""
+
+    def rough(text: str) -> float:
+        return estimate_tokens(text) - 12
+
+    talk = sum(
+        rough(m["content"])
+        for m in build_messages(persona, conversation, hint, 0, stickers)
+        if m["role"] != "system"
+    )
+    return {
+        "人设、规则和工具": rough(persona) + rough(RULES) + rough(tools),
+        "群信息": rough(conversation.place),
+        "表情包目录": rough(stickers),
+        "备忘": rough(conversation.summary),
+        "原文": talk,
+        "末尾提示": rough(hint),
+    }
 
 
 def estimate_tokens(text: str) -> float:

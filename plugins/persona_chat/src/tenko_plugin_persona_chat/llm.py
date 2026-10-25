@@ -131,6 +131,9 @@ async def summarize(
     return (data["choices"][0]["message"].get("content") or "").strip(), data.get("usage") or {}
 
 
+TOOLS = [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, EDIT_STICKER, SEARCH]
+
+
 async def chat(
     client: httpx.AsyncClient,
     *,
@@ -151,7 +154,7 @@ async def chat(
             "messages": messages,
             # 群聊闲聊不需要推理；关掉思考才能用强制工具调用。
             "thinking": {"type": "disabled"},
-            "tools": [SEND_MESSAGE, STAY_SILENT, SAVE_STICKER, EDIT_STICKER, SEARCH],
+            "tools": TOOLS,
             "tool_choice": FORCE_SEND if force else "required",
             "max_tokens": max_tokens,
         },

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from contextvars import ContextVar
@@ -44,8 +45,10 @@ from .chat import (
     Line,
     UsageBook,
     build_messages,
+    context_parts,
     data_url,
     estimate_cost,
+    estimate_tokens,
     picture_url,
     split,
     summary_messages,
@@ -76,8 +79,8 @@ class PersonaChatConfig(BasicConfModel):
     )
     persona: str = ""
     """人设提示词；为空时用内置的“大肥鱼”。"""
-    context_tokens: int = 16000
-    """一次请求的输入超过这么多 token 后，把较早的聊天压缩成备忘，只留最近约三分之一原文。"""
+    context_tokens: int = 32000
+    """一次请求的输入超过这么多 token 后，把较早的聊天压缩成备忘，压回一半左右。"""
     batch_size: int = 8
     """没在聊天时，群里累计这么多条新消息后让模型自己判断要不要插话；0 关闭。"""
     follow_seconds: int = 180
@@ -91,8 +94,8 @@ class PersonaChatConfig(BasicConfModel):
     stamina: int = 15
     """精力：10 分钟内说这么多句、或 1 小时内说两倍这么多句就累了。用掉三分之二后不再主动开口，
     累了以后被叫到也由它决定理不理，到 1.5 倍完全不理；不说话就慢慢恢复。0 不限。"""
-    vision_images: int = 3
-    """把最近这么多张群友发的图片低清晰度发给模型看，每张约数百 token；0 只告诉模型“[图片]”。"""
+    vision_images: int = 5
+    """每次请求最多带这么多张新图，低清晰度发给模型看，每张约 190 token；0 只告诉模型“[图片]”。"""
     search_daily: int = 20
     """每个群或私聊每天最多上网搜几次，只在被叫到时能搜，每次约 0.005 元；0 关闭搜索。"""
     sticker_limit: int = 100
@@ -157,6 +160,9 @@ _MAX_TOKENS = 300
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 _MAX_GIF_BYTES = 8 * 1024 * 1024  # 动图要整个下下来才能抽帧
 _SUMMARY_TOKENS = 1000
+_KEEP_IMAGES = 6  # 压缩时只留最近这么多张看过的图
+_IMAGE_TOKENS = 190  # 一张低清图，实测大小图都差不多
+_TOOLS = json.dumps(llm.TOOLS, ensure_ascii=False)
 # 对方在 bot 刚说完几秒内又来叫，连续几轮后不再强制回复，再多就不理，防止和别的 bot 无限对聊。
 _QUICK_SECONDS = 10
 _STREAK_LOOSE = 3
@@ -421,6 +427,9 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     if user_id in self_ids:
         return
     key = _key(session)
+    # 今天的额度用完就整个不管这个群：不下图、不记消息，和没开一样，零点后照常。
+    if _over_budget(key):
+        return
     conversation = _conversation(key)
     conversation.place = _place(session, conversation)
     if in_sandbox():
@@ -646,15 +655,29 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
         line.shown = True
     persona = config.persona or PERSONA
 
-    catalog = sticker_book.catalog() if config.sticker_limit else ""
+    catalog = ""
+    if config.sticker_limit:
+        if conversation.stickers is None:
+            conversation.stickers = sticker_book.moods()
+        catalog = sticker_book.catalog(conversation.stickers)
+        # 目录在前缀里，收藏一变就从那里断缓存：变化先写在末尾提示里，压缩时才并进目录。
+        hint = "\n".join(filter(None, [hint, sticker_book.changes(conversation.stickers)]))
     # 眼前有表情包时第一轮不强制只能 send_message，模型才能顺手收藏；提示里仍要求它回复。
     force = force and (retry or not any(line.sticker and line.pictures for line in shown))
 
     async def ask(images: int):
         messages = build_messages(persona, conversation, hint, images, catalog)
-        return await llm.chat(
+        calls, usage = await llm.chat(
             client, model=config.model, messages=messages, force=force, max_tokens=_MAX_TOKENS
         )
+        # 给“上下文”命令校准：粗估的各部分按这次实际输入等比例折算。
+        pictures = sum(len(line.pictures or []) for line in shown) if images else 0
+        rough = sum(context_parts(persona, _TOOLS, conversation, catalog, hint).values())
+        text = usage.get("prompt_tokens", 0) - pictures * _IMAGE_TOKENS
+        if text > 0 and rough > 0:
+            conversation.scale = text / rough
+        conversation.hint = hint
+        return calls, usage
 
     try:
         return await ask(budget)
@@ -747,7 +770,7 @@ async def respond(
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
             logger.warning("AI群友请求失败：{!r}", error)
             return
-        usage = usages[-1]
+        usage = conversation.usage = usages[-1]
 
         saves = [c for c in calls if c.get("tool") == "save_sticker"]
         edits = [c for c in calls if c.get("tool") == "edit_sticker"]
@@ -832,7 +855,7 @@ async def respond(
         if target is None and sent and not follow:
             conversation.last_unprompted_at = time.monotonic()
         if not in_sandbox() and usage.get("prompt_tokens", 0) > config.context_tokens:
-            await _compress(key, conversation)
+            await _compress(key, conversation, usage["prompt_tokens"])
         _changed(key)
         _save()
 
@@ -859,7 +882,7 @@ async def _add_sticker(conversation: Conversation, calls: list[dict], key: str) 
             client,
             model=config.model,
             prompt=PICK_STICKER_PROMPT,
-            catalog=sticker_book.catalog(),
+            catalog=sticker_book.catalog(sticker_book.moods()),
             recent=recent,
             text=said,
         )
@@ -1031,10 +1054,18 @@ async def _search(key: str, query: str) -> str:
     return "\n".join(lines)
 
 
-async def _compress(key: str, conversation: Conversation) -> None:
-    """把较早的记录并进备忘。失败只记日志，下次超阈值时再试。"""
+async def _compress(key: str, conversation: Conversation, prompt_tokens: int) -> None:
+    """把较早的记录并进备忘，让输入回落到 ``context_tokens`` 的一半。
 
-    old = conversation.older_than(config.context_tokens // 3)
+    失败只记日志，下次超阈值时再试。
+    """
+
+    # 按实际输入量算要压掉多少：人设、表情包目录、昵称、图片都不在记录的估算里，只按记录留一截的话
+    # 压完可能还超，之后每次回复都改写备忘，前缀缓存全部失效，一早上就烧穿每日上限。
+    # 闲聊丢点旧细节无妨，一次压到一半，留足余量，备忘就很久才改写一次。
+    drop = prompt_tokens - config.context_tokens // 2
+    total = sum(estimate_tokens(line.text) for line in conversation.lines)
+    old = conversation.older_than(total - drop)
     if not old:
         return
     try:
@@ -1050,8 +1081,29 @@ async def _compress(key: str, conversation: Conversation) -> None:
     now = datetime.now()
     usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
     if summary:
+        before = conversation.summary
+        images = sum(len(line.images) for line in old if line.shown)
         conversation.forget(old[-1].number, summary)
-        logger.info("AI群友把 {} 的 {} 条旧消息压成了备忘", key, len(old))
+        # 备忘一改，后面的缓存反正要重算：顺手撤掉旧图、换新表情包目录，不多花钱。
+        retired = conversation.retire_images(_KEEP_IMAGES)
+        conversation.stickers = None
+        conversation.compressed_at = time.time()
+        # 压完的输入只能估：下次请求的 usage 才是准数，“上下文”命令里看得到。
+        after = (
+            prompt_tokens
+            - sum(estimate_tokens(line.text) for line in old)
+            - (images + retired) * _IMAGE_TOKENS
+            + estimate_tokens(summary)
+            - estimate_tokens(before)
+        )
+        logger.info(
+            "AI群友把 {} 的 {} 条旧消息压成了备忘，撤掉 {} 张旧图：输入 {:,} → 约 {:,} token",
+            key,
+            len(old),
+            images + retired,
+            prompt_tokens,
+            int(after),
+        )
 
 
 @plugin.listen(SendResponse)
@@ -1094,11 +1146,13 @@ def _plain(elements) -> str:
 
 persona_command = Alconna(
     "AI群友",
-    Args["action", "重置|用量|表情"]["op;?", "看|删"]["name;?", str],
+    Args["action", "重置|用量|上下文|表情"]["op;?", "看|删"]["name;?", str],
     meta=CommandMeta(
-        "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量，或管理它收藏的表情包",
-        usage="AI群友 重置 | 用量 | 表情 [看|删 名字]",
-        example="/AI群友 重置\n/AI群友 用量\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊",
+        "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量和上下文，或管理它收藏的表情包",
+        usage="AI群友 重置 | 用量 | 上下文 | 表情 [看|删 名字]",
+        example=(
+            "/AI群友 重置\n/AI群友 用量\n/AI群友 上下文\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊"
+        ),
     ),
 )
 
@@ -1120,6 +1174,13 @@ async def manage(
         _unsaved.discard(key)
         _save(forget=key)
         return "已经忘掉刚才聊的了"
+    if action.result == "上下文":
+        if session.event.guild is not None and not await require_perm(
+            session, Permission.GroupAdmin
+        ):
+            return "只有群管理员及以上能查看上下文"
+        key = _key(session)
+        return format_context(key, _conversation(key))
     if action.result == "表情":
         return await manage_stickers(session, op.result if op.available else None, name.result)
     if not await require_perm(session, Permission.BotAdmin):
@@ -1149,6 +1210,78 @@ async def manage_stickers(session: Session, op: str | None, name: str | None) ->
     lines = [f"表情包收藏 {len(index)}/{config.sticker_limit}："]
     lines += [f"{n}（{s['mood']}）用过 {s['used']} 次" for n, s in index.items()]
     return "\n".join(lines)
+
+
+def format_context(key: str, conversation: Conversation) -> str:
+    """本群/本私聊下次请求里各部分多大、记着什么，以及为什么可能不说话。"""
+
+    lines = conversation.lines
+    stickers = conversation.stickers
+    if stickers is None:
+        stickers = sticker_book.moods() if config.sticker_limit else {}
+    catalog = sticker_book.catalog(stickers) if config.sticker_limit else ""
+    parts = {
+        name: rough * conversation.scale
+        for name, rough in context_parts(
+            config.persona or PERSONA, _TOOLS, conversation, catalog, conversation.hint
+        ).items()
+    }
+    images = sum(len(line.images) for line in lines if line.shown)
+    parts["看过的图"] = images * _IMAGE_TOKENS
+    when = (
+        f"，上次压缩 {datetime.fromtimestamp(conversation.compressed_at):%H:%M}"
+        if conversation.compressed_at
+        else ""
+    )
+    changed = config.sticker_limit and sticker_book.changes(stickers)
+    notes = {
+        "表情包目录": f"{len(stickers)} 张" + ("，有变化，下次压缩时并进来" if changed else ""),
+        "备忘": f"{len(conversation.summary)} 字{when}",
+        "原文": f"{len(lines)} 条" + (f"，#{lines[0].number}–#{lines[-1].number}" if lines else ""),
+        "看过的图": f"{images} 张",
+    }
+    total = sum(parts.values())
+    filled = min(round(total / max(config.context_tokens, 1) * 10), 10)
+    out = [
+        f"上下文已用 {total * 100 // max(config.context_tokens, 1):.0f}%"
+        f"  {_k(total)} / {_k(config.context_tokens).lstrip('~')}",
+        "▰" * filled + "▱" * (10 - filled) + f"  超过后压到 {_k(config.context_tokens // 2)}",
+    ]
+    for name, tokens in parts.items():
+        note = notes.get(name)
+        out.append(f"· {name}  {_k(tokens)}" + (f"（{note}）" if note else ""))
+    usage = conversation.usage
+    tail = []
+    if usage:
+        prompt, hit = usage.get("prompt_tokens", 0), usage.get("prompt_cache_hit_tokens", 0)
+        tail.append(f"缓存命中 {hit * 100 // max(prompt, 1)}%")
+    else:
+        tail.append("重启后还没请求过，分项是粗估")
+    if key.startswith("group:") and config.group_daily_tokens:
+        used = usage_book.tokens(datetime.now().date(), key)
+        tail.append(
+            f"今天 {_k(used).lstrip('~')} / {_k(config.group_daily_tokens).lstrip('~')} token"
+        )
+    if _over_budget(key):
+        tail.append("额度已用完，零点前不理这个群的消息")
+    out.append(" · ".join(tail))
+    now = time.monotonic()
+    short, hour = conversation.fatigue(now, 600), conversation.fatigue(now, 3600)
+    out.append(
+        f"精力：10 分钟说了 {short} 句、1 小时 {hour} 句"
+        + ("，累了只在被叫到时说话" if _load(conversation, now) * 3 >= 2 else "")
+    )
+    return "\n".join(out)
+
+
+def _k(tokens: float) -> str:
+    """分项是按上次实际输入折算的约数，带“~”；整数位太长不好看，k/M 一位小数。"""
+
+    if tokens >= 1_000_000:
+        return f"~{tokens / 1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
+    if tokens >= 1000:
+        return f"~{tokens / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"~{int(tokens)}" if tokens else "0"
 
 
 def format_usage(periods: list[tuple[str, dict[str, list[float]]]]) -> str:

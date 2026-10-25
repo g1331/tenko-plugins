@@ -199,16 +199,16 @@ PNG = b"\x89PNG" + b"0" * 20
 
 def test_stickers_dedupe_rename_evict_and_list(module, tmp_path):
     stickers = type(module.sticker_book)(MemoryStore(tmp_path / "stickers.json"), limit=2)
-    assert stickers.catalog() == "你的表情包收藏还是空的。"
+    assert stickers.catalog(stickers.moods()) == "你的表情包收藏还是空的。"
     assert stickers.add(" 猫猫[震惊] ", "吃惊、无语", PNG, "a.png") == ("猫猫震惊", [])
     assert stickers.add("别的名字", "x", PNG, "b.png") is None  # 同一张图
     assert stickers.add("狗头", "x", b"GIF8" + b"1" * 20, "a.png") is None  # 同一个 QQ 文件
     assert stickers.add("猫猫震惊", "嘲讽", b"GIF8" + b"2" * 20, "c.gif") == ("猫猫震惊2", [])
     assert stickers.add("坏图", "x", b"not an image", "d") is None
     assert stickers.name_of("a.png") == "猫猫震惊" and stickers.name_of("") is None
-    assert stickers.catalog().endswith("猫猫震惊：吃惊、无语\n猫猫震惊2：嘲讽")
+    assert stickers.catalog(stickers.moods()).endswith("猫猫震惊：吃惊、无语\n猫猫震惊2：嘲讽")
 
-    assert stickers.catalog().startswith("收藏已经满了（2 张）")
+    assert stickers.catalog(stickers.moods()).startswith("收藏已经满了（2 张）")
     stickers.use("猫猫震惊")
     new = stickers.add("新来的", "开心", b"GIF8" + b"3" * 20, "e.gif", replace="没有这张")
     assert new == ("新来的", ["猫猫震惊2"])  # 满了没挑对：丢没用过的
@@ -232,3 +232,31 @@ def test_stickers_dedupe_rename_evict_and_list(module, tmp_path):
     assert stickers.index()["猫猫啊"]["mood"] == "猫瞪眼「啊？」；吃惊时发"
     assert stickers.path("猫猫啊").is_file() and "猫猫震惊" not in stickers.index()
     assert stickers.edit("猫猫啊", " ") is None and stickers.edit("没有", "x") is None
+
+
+def test_sticker_changes_since_snapshot(module, tmp_path):
+    stickers = type(module.sticker_book)(MemoryStore(tmp_path / "stickers.json"), limit=2)
+    stickers.add("猫猫震惊", "吃惊", PNG, "a.png")
+    snapshot = stickers.moods()
+    assert stickers.changes(snapshot) == ""
+
+    stickers.add("狗头", "嘲讽", b"GIF8" + b"1" * 20, "b.gif")
+    stickers.edit("猫猫震惊", "无语", "")
+    assert stickers.catalog(snapshot).endswith("猫猫震惊：吃惊")  # 快照不变
+    changes = stickers.changes(snapshot)
+    assert "猫猫震惊：无语\n狗头：嘲讽" in changes
+    assert changes.endswith("腾出位置。")  # 拍快照时没满，现在满了也要告诉她
+
+    stickers.remove("狗头")
+    assert stickers.changes(stickers.moods() | {"狗头": "嘲讽"}).startswith("这些已经不在收藏里")
+
+
+def test_retire_images_keeps_only_the_latest(chat):
+    conversation = chat.Conversation()
+    for i in range(4):
+        line = conversation.add(f"m{i}", "甲(1)", "[图片]", (f"u{i}a", f"u{i}b"))
+        line.shown = i > 0
+
+    assert conversation.retire_images(3) == 2  # 最近两条共 4 张够了，#2 的两张看过，撤掉
+    assert [line.images != () for line in conversation.lines] == [False, False, True, True]
+    assert not conversation.lines[1].shown and conversation.lines[1].pictures is None

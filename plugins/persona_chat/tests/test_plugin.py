@@ -352,6 +352,48 @@ async def test_long_context_is_compressed_after_reply(module, fake_llm, monkeypa
     assert module.usage_book.tokens(module.datetime.now().date(), "group:100") == 250
 
 
+async def test_compress_drops_enough_that_the_next_reply_stays_under(module, fake_llm, monkeypatch):
+    # 记录只占输入的一小部分（其余是人设、表情包目录、图片）：按实际输入压回三分之二，
+    # 不然压完还超，每次回复都改写备忘，前缀缓存全失效。
+    monkeypatch.setattr(module.config, "context_tokens", 1000)
+
+    async def chat(client, *, model, messages, force, max_tokens):
+        return [{"text": "嗯"}], {"prompt_tokens": 1001}
+
+    async def summarize(client, *, model, messages, max_tokens):
+        return "群友刷屏", {}
+
+    monkeypatch.setattr(module.llm, "chat", chat)
+    monkeypatch.setattr(module.llm, "summarize", summarize)
+    for i in range(30):
+        await feed(module, session([Text(f"刷屏{i}")], user=str(i + 10), message_id=f"m{i}"))
+    await feed(module, session([At("42"), Text(" 你看")], message_id="call"))
+
+    conversation = module.conversations["group:100"]
+    lines = conversation.lines
+    assert sum(module.estimate_tokens(line.text) for line in lines) <= 1001 - 1000 // 2
+    assert conversation.stickers is None  # 下次请求换新的表情包目录
+
+    status = module.format_context("group:100", conversation).splitlines()
+    assert status[0].startswith("上下文已用 ") and " / 1k" in status[0]
+    assert status[1].endswith("超过后压到 ~500")
+    assert any(line.startswith("· 原文  ~") and f"（{len(lines)} 条，#" in line for line in status)
+    assert any("4 字，上次压缩" in line for line in status)
+    assert status[-2].startswith("缓存命中 0%")
+
+
+async def test_group_over_budget_is_ignored_entirely(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "group_daily_tokens", 100)
+    usage = {"prompt_cache_miss_tokens": 100}
+    module.usage_book.add(module.datetime.now().date(), "group:100", usage, 0.0)
+
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="m1"))
+    assert fake_llm.requests == []
+    assert "group:100" not in module.conversations  # 消息也不记
+    status = module.format_context("group:100", module._conversation("group:100"))
+    assert "额度已用完，零点前不理这个群的消息" in status
+
+
 async def test_wake_word_only_counts_in_typed_text(module, fake_llm):
     # 群友里也有人叫“大肥鱼”：@ 它或引用它的消息不是在叫 bot
     await feed(module, session([At("77", name="大肥鱼"), Text(" 抱起来")], message_id="m1"))
@@ -527,7 +569,9 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     # 眼前有表情包时不强制只能说话，模型才能顺手收藏
     assert not first and second
     assert module.sticker_book.name_of("abc.gif") == "猫猫震惊"
-    assert "猫猫震惊：吃惊" in messages[3]["content"]
+    # 目录是第一次请求时拍的快照，不跟着变，免得打断前缀缓存；新收藏的写在末尾提示里
+    assert messages[3]["content"] == "你的表情包收藏还是空的。"
+    assert "猫猫震惊：吃惊" in messages[-1]["content"]
 
     # 同一张再出现，模型直接认得，不再看图
     onebot.images["13"] = [{"file": "abc.gif", "sub_type": 1}]
@@ -753,3 +797,16 @@ async def test_tenko_replies_are_context_but_her_own_are_not_doubled(module, fak
     assert [line.speaker for line in conversation.lines] == ["群友1(1)", "Tenko 功能"]
     assert tenko.text.startswith("题目：两个字，") and len(tenko.text) == 101
     assert conversation.unseen == 1  # 功能的回复不催她插话
+
+
+async def test_context_parts_add_up_to_the_last_real_prompt(module, fake_llm, monkeypatch):
+    async def chat(client, *, model, messages, force, max_tokens):
+        return [{"text": "嗯"}], {"prompt_tokens": 5000, "prompt_cache_hit_tokens": 4500}
+
+    monkeypatch.setattr(module.llm, "chat", chat)
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="m1"))
+
+    status = module.format_context("group:100", module.conversations["group:100"])
+    # 分项按这次实际输入折算，加起来还是 5000，只多了她刚回的那句“嗯”
+    assert status.startswith("上下文已用 15%  ~5k / 32k\n▰▰▱▱▱▱▱▱▱▱")
+    assert "缓存命中 90%" in status

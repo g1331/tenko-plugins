@@ -124,17 +124,38 @@ class Stickers:
             index[name]["last"] = time.time()
             self.store.save(index)
 
-    def catalog(self) -> str:
-        """给模型看的收藏目录：只在收藏增删时变，不影响前缀缓存。"""
+    def moods(self) -> dict[str, str]:
+        """名字 → 备注，会话拿它当目录快照。"""
 
-        index = self.index()
-        if not index:
+        return {name: s["mood"] for name, s in self.index().items()}
+
+    def catalog(self, moods: dict[str, str]) -> str:
+        """给模型看的收藏目录，按会话的快照 ``moods`` 写，收藏变了也不跟着变，不打断前缀缓存。"""
+
+        if not moods:
             return "你的表情包收藏还是空的。"
-        items = "\n".join(f"{name}：{s['mood']}" for name, s in index.items())
-        full = (
+        items = "\n".join(f"{name}：{mood}" for name, mood in moods.items())
+        return f"{self._full(moods)}你收藏的表情包（名字：图上的字、梗和什么时候发）：\n{items}"
+
+    def changes(self, moods: dict[str, str]) -> str:
+        """快照之后收藏的变化，写进每次都变的末尾提示；下次压缩时会话换新快照，这里就清空了。"""
+
+        now = self.moods()
+        added = [f"{name}：{mood}" for name, mood in now.items() if moods.get(name) != mood]
+        gone = [name for name in moods if name not in now]
+        parts = []
+        if added:
+            parts.append("目录之后新收藏或改了备注的表情包：\n" + "\n".join(added))
+        if gone:
+            parts.append(f"这些已经不在收藏里，别再发：{'、'.join(gone)}")
+        if parts and not self._full(moods):
+            parts.append(self._full(now).rstrip())
+        return "\n".join(p for p in parts if p)
+
+    def _full(self, moods: dict[str, str]) -> str:
+        if len(moods) < self.limit:
+            return ""
+        return (
             f"收藏已经满了（{self.limit} 张）：再收新的要在 save_sticker 的 replace 里"
             "填一张你最不想要的，腾出位置。\n"
-            if len(index) >= self.limit
-            else ""
         )
-        return f"{full}你收藏的表情包（名字：图上的字、梗和什么时候发）：\n{items}"
