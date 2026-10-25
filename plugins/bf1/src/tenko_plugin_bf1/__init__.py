@@ -300,12 +300,17 @@ def format_server(detail: dict[str, Any], players: dict[str, Any] | None) -> str
     for team in (players or {}).get("teams") or []:
         names = "、".join(p.get("display_name") or "-" for p in team.get("players") or [])
         lines.append(f"{team.get('faction') or '-'}（{len(team.get('players') or [])}）：{names}")
+    for label, key in [("排队", "queued"), ("观战", "spectators")]:
+        if waiting := (players or {}).get(key):
+            names = "、".join(p.get("display_name") or "-" for p in waiting)
+            lines.append(f"{label}（{len(waiting)}）：{names}")
     return "\n".join(lines)
 
 
 async def server_reply(keyword: str, service) -> MessageChain | str:
     note = ""
-    if keyword.isdigit():
+    # gameId 是十几位数；短数字（比如服名里的 3090）按名字搜
+    if keyword.isdigit() and len(keyword) >= 10:
         game_id = int(keyword)
     else:
         servers, total = await _search_servers(keyword)
@@ -313,7 +318,7 @@ async def server_reply(keyword: str, service) -> MessageChain | str:
             raise Bf1Error(f"没找到名字含「{keyword}」的服务器（空服不在列表里）")
         game_id = servers[0]["game_id"]
         if total > 1:
-            note = f"「{keyword}」匹配 {total} 个服务器，这是人最多的；要看别的用 /bf1ds gameId"
+            note = f"「{keyword}」匹配 {total} 个服务器，这是人最多的；要看别的用 /bf1pl gameId"
     detail, players = await asyncio.gather(
         _get(f"/servers/{game_id}"), _optional(f"/servers/{game_id}/players")
     )
@@ -340,7 +345,8 @@ async def overview_reply(service) -> MessageChain | str:
     if not overview.get("available"):
         raise Bf1Error("全服概况暂时没有数据，稍后再试")
     context = pages.overview_page(overview, _source())
-    return await _reply(service, "overview.html", context, format_overview(overview))
+    link = f"{config.base_url.rstrip('/')}/stats"
+    return await _reply(service, "overview.html", context, format_overview(overview), link)
 
 
 async def _answer(query) -> MessageChain | str:
@@ -396,19 +402,27 @@ async def bf1v(
     return await _answer(items_reply("vehicles", _name(name), render_service, session.user.id))
 
 
-bind_command = Alconna(
-    "bf1绑定",
-    Args["name?", str],
-    meta=CommandMeta(
-        "把自己的 EA 名字记下来，之后查战绩可以不带名字；不带名字查看当前绑定",
-        usage="bf1绑定 [EA 名字]",
-        example="/bf1绑定 SHlSAN13",
-    ),
-)
+def _bind_command(name: str) -> Alconna:
+    return Alconna(
+        name,
+        Args["name?", str],
+        meta=CommandMeta(
+            "把自己的 EA 名字记下来，之后查战绩可以不带名字；不带名字查看当前绑定",
+            usage=f"{name} [EA 名字]",
+            example=f"/{name} SHlSAN13",
+        ),
+    )
 
 
-@command.on(bind_command)
+@command.on(_bind_command("bf1绑定"))
 async def bf1bind(session: Session, name: Query[str] = Query("name")):  # noqa: B008
+    return await _answer(bind_reply(_name(name), session.user.id))
+
+
+# bf1b 是 bf1绑定 的简写。不用 Alconna shortcut：entari 先按命令名前缀派发，
+# "bf1b …" 只会命中 /bf1，到不了 bf1绑定 的 shortcut，所以单独注册一条
+@command.on(_bind_command("bf1b"))
+async def bf1b(session: Session, name: Query[str] = Query("name")):  # noqa: B008
     return await _answer(bind_reply(_name(name), session.user.id))
 
 
@@ -438,25 +452,25 @@ async def bf1ss(
 
 
 detail_command = Alconna(
-    "bf1ds",
+    "bf1pl",
     Args["keyword", AllParam],
     meta=CommandMeta(
-        "查看战地一服务器详情和玩家名单；关键字匹配多个时显示人最多的",
-        usage="bf1ds <服务器名关键字 | gameId>",
-        example="/bf1ds pigu",
+        "查看战地一服务器的玩家列表；关键字匹配多个时显示人最多的",
+        usage="bf1pl <服务器名关键字 | gameId>",
+        example="/bf1pl pigu",
     ),
 )
 
 
 @command.on(detail_command)
-async def bf1ds(
+async def bf1pl(
     session: Session,
     keyword: Query[list] = Query("keyword"),  # noqa: B008
     *,
     render_service: RenderService,
 ):
     if not (text := _keyword(keyword)):
-        return "用法：/bf1ds <服务器名关键字 | gameId>"
+        return "用法：/bf1pl <服务器名关键字 | gameId>"
     return await _answer(server_reply(text, render_service))
 
 

@@ -271,6 +271,8 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
                 ],
             }
         ],
+        "queued": [{"display_name": "wait", "rank": 91}],
+        "spectators": [],
         "operation": {
             "maps": [
                 {"name": "法欧堡", "sectors": 3},
@@ -298,13 +300,15 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
     op = ctx["operation"]
     assert [m["sectors"] for m in op["track"]] == [[True] * 3, [True, False, False, False], []]
     assert (op["where"], op["next"], op["defender"]) == ("区域 2/4 · 第 2/3 张图", "西奈沙漠", None)
-    assert "美国（2）：low、top" in reply and reply.endswith("用 /bf1ds gameId")
+    assert "美国（2）：low、top" in reply and reply.endswith("用 /bf1pl gameId")
+    assert ctx["waiting"] == [("排队", "#34d399", [("wait", 91)])] and "排队（1）：wait" in reply
 
     def down(**_):
         raise module.Bf1Error("x")
 
     api["/servers/7/players"] = down
-    await module.server_reply("7", None)
+    # 服名里的短数字按名字搜，不当 gameId
+    assert "「3090」匹配 2 个服务器" in await module.server_reply("3090", None)
     assert rendered["context"]["players_missing"]
 
 
@@ -324,5 +328,6 @@ async def test_overview(module, api, rendered):
     assert ctx["players"] == "10,708" and ctx["modes"][0] == ("征服", "3", 75)
     assert ctx["trend"]["line"] == "0.0,150.0 900.0,0.0"
     assert reply.startswith("战地一当前在线 10708 人，274 个服务器")
+    assert reply.endswith("\nhttps://bfm.umrbotech.com/stats")
     api["/overview"] = {"available": False}
     assert await module._answer(module.overview_reply(None)) == "全服概况暂时没有数据，稍后再试"

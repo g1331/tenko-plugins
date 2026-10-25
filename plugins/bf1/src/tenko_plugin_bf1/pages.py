@@ -399,22 +399,6 @@ def _team(team: dict[str, Any], first: int) -> dict[str, Any]:
     }
 
 
-def _rotation(maps: list[dict[str, Any]]) -> dict[str, Any]:
-    """轮换里模式都一样时（常见），模式只在标题写一次。"""
-
-    modes = {m.get("mode_display_name") or "-" for m in maps}
-    single = modes.pop() if len(modes) == 1 else None
-    return {
-        "rotation_mode": single,
-        "rotation": [
-            m.get("map_display_name") or "-"
-            if single
-            else f"{m.get('mode_display_name') or '-'} · {m.get('map_display_name') or '-'}"
-            for m in maps
-        ],
-    }
-
-
 def _operation(op: dict[str, Any] | None) -> dict[str, Any] | None:
     """行动进度，照网页的区域链：攻方旗 → 每张图缩略图 + 区域箭头（拿下蓝、没拿下红）→ 守方旗。"""
 
@@ -469,8 +453,15 @@ def server_page(
             (label, len(extras.get(key) or []))
             for label, key in [("管理", "admins"), ("VIP", "vips"), ("封禁", "banned")]
         ],
-        **_rotation(detail.get("map_rotation") or []),
         "teams": teams,
+        "waiting": [
+            (label, color, [(p.get("display_name") or "-", p.get("rank") or 0) for p in people])
+            for label, color, key in [
+                ("排队", "#34d399", "queued"),
+                ("观战", "#f87171", "spectators"),
+            ]
+            if (people := (players or {}).get(key))
+        ],
         "players_missing": players is None,
         "online": [
             ("管理", sum(p["admin"] for t in teams for p in t["players"])),
