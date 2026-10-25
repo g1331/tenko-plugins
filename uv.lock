@@ -1257,11 +1257,12 @@ source = { git = "https://github.com/g1331/tenko?subdirectory=packages%2Ftenko-a
 
 [[package]]
 name = "tenko-plugin-bf1"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "plugins/bf1" }
 dependencies = [
     { name = "httpx" },
     { name = "jinja2" },
+    { name = "sqlalchemy" },
     { name = "tenko-api" },
     { name = "zhconv" },
 ]
@@ -1270,13 +1271,14 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "tenko-api", specifier = ">=0.4,<0.5" },
     { name = "zhconv", specifier = ">=1.4" },
 ]
 
 [[package]]
 name = "tenko-plugin-persona-chat"
-version = "0.1.30"
+version = "0.1.31"
 source = { editable = "plugins/persona_chat" }
 dependencies = [
     { name = "httpx" },
