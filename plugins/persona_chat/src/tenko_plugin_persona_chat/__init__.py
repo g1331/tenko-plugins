@@ -941,7 +941,8 @@ async def respond(
         # 被叫到时可以先搜、先用功能再回：第一轮不强制只能说话，没搜也没说话再强制一次。
         # 搜完那轮也不强制，她才能照结果改表情包备注；没说话再强制补一句。
         searching = target is not None and _search_left(key)
-        running = target is not None and bool(_commands())
+        # 紧跟着她问“为啥我不能用”这类接话也能直接查，不然她只会学别的 bot 打“@Tenko 指令”。
+        running = (target or answer) is not None and bool(_commands())
         try:
             calls = await ask(hint, force and not (searching or running))
             query = next((str(c.get("query", "")) for c in calls if c.get("tool") == "search"), "")

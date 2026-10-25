@@ -1073,3 +1073,15 @@ async def test_unlisted_command_is_not_run(module, fake_llm, commands):
 
     assert commands == []
     assert "没出结果" in fake_llm.requests[1][0][-1]["content"]
+
+
+async def test_reply_right_after_her_can_run_a_command(module, fake_llm, commands):
+    fake_llm.replies.append([{"text": "你想查啥"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="m0"))
+    fake_llm.replies += [
+        [{"tool": "run_command", "command": "bf1s 4zpxyycf"}],
+        [{"text": "查到了"}],
+    ]
+    await feed(module, session([Text("查下4zpxyycf的bf1战绩")], message_id="m1"))
+    await module._waiters["group:100"]
+    assert commands == ["/bf1s 4zpxyycf"]
