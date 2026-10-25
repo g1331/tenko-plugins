@@ -1,95 +1,86 @@
 {% extends "_base.html" %}
 {% from "_macros.html" import icon, avatar %}
-{#- 对照 bf-manager 网页的 PlayerHeroBanner 与 CareerOverview。 -#}
+{#- 内容对照 bf-manager 网页的 PlayerHeroBanner 与 CareerOverview，排版改成整宽纵向，方便手机看。 -#}
 {% block style %}
-  .hero { position: relative; overflow: hidden; min-height: 330px; background: rgba(0,0,0,.5); backdrop-filter: blur(4px);
-    clip-path: polygon(0 28px, 28px 0, 100% 0, 100% calc(100% - 28px), calc(100% - 28px) 100%, 0 100%); }
-  .hero::before { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(0,0,0,.75), rgba(0,0,0,.35) 55%, transparent); }
-  .hero::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px;
-    background: linear-gradient(90deg, rgba(245,158,11,.7), rgba(245,158,11,.2) 50%, transparent); }
-  .hero.banned::after { background: linear-gradient(90deg, rgba(239,68,68,.8), rgba(239,68,68,.3) 50%, transparent); }
-  .portrait { position: absolute; right: 30px; bottom: 0; height: 340px; filter: drop-shadow(0 8px 18px rgba(0,0,0,.9)); }
+  .hero { position: relative; overflow: hidden; min-height: 400px; background: var(--panel);
+    clip-path: polygon(0 26px, 26px 0, 100% 0, 100% calc(100% - 26px), calc(100% - 26px) 100%, 0 100%); }
+  .hero::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+    background: linear-gradient(90deg, var(--amber-deep), rgba(245,158,11,.2) 60%, transparent); }
+  .hero.banned::after { background: linear-gradient(90deg, var(--red), rgba(239,68,68,.3) 60%, transparent); }
+  .portrait { position: absolute; right: 10px; bottom: 0; height: 400px; opacity: .95; }
   .hero.banned .portrait, .hero.banned .who { filter: grayscale(1); }
-  .best { position: absolute; right: 36px; bottom: 22px; z-index: 1; text-align: right; }
-  .best .t { font-size: 11px; letter-spacing: .25em; color: rgba(255,255,255,.55); }
-  .best .v { font-size: 28px; font-weight: 700; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
-  .hero-body { position: relative; z-index: 1; padding: 28px 300px 30px 32px; }
-  .warn { margin-bottom: 16px; padding: 7px 16px; background: rgba(220,38,38,.9); font-weight: 700; font-size: 14px;
-    box-shadow: 0 0 18px rgba(239,68,68,.5); clip-path: polygon(8px 0, 100% 0, calc(100% - 8px) 100%, 0 100%); }
-  .status { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
-  .chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; border: 1px solid rgba(255,255,255,.15);
-    background: rgba(0,0,0,.3); color: rgba(255,255,255,.6); }
-  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: #71717a; }
-  .chip.on { border-color: rgba(52,211,153,.4); background: rgba(16,185,129,.1); color: #6ee7b7; }
-  .chip.on .dot { background: #34d399; box-shadow: 0 0 0 3px rgba(52,211,153,.25); }
-  .ban { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 14px 0 6px; font-weight: 700; letter-spacing: .05em;
-    background: rgba(0,0,0,.6); clip-path: polygon(8px 0, 100% 0, calc(100% - 8px) 100%, 0 100%); }
-  .ban img { width: 20px; height: 20px; border-radius: 50%; }
-  .ban.clean .src { color: #6ee7b7; } .ban.unknown .src { color: #d4d4d8; }
-  .ban .st { font-weight: 500; color: #a1a1aa; }
-  .ban.hit { background: rgba(60,0,0,.75); }
-  .ban.hit .st { color: var(--red); font-weight: 900; text-shadow: 0 0 8px rgba(239,68,68,.95); }
-  .who { display: flex; align-items: center; gap: 22px; margin-top: 20px; }
-  .platoon { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; font-size: 13px; color: var(--w55); }
-  .platoon img { width: 24px; height: 24px; object-fit: contain; }
-  .platoon .ok { color: rgba(252,211,77,.9); font-size: 12px; }
-  h1 { margin: 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 42px; line-height: 1.2; font-weight: 700;
-    letter-spacing: .02em; word-break: break-all; }
-  h1 .tag { color: var(--w45); margin-right: 12px; }
-  .meta { display: flex; align-items: center; gap: 16px; margin-top: 6px; font-size: 12px; color: var(--w55); }
+  .best { position: absolute; right: 28px; bottom: 22px; z-index: 1; text-align: right;
+    padding: 8px 14px; background: rgba(0,0,0,.65); }
+  .best .t { font-size: 17px; color: var(--muted); }
+  .best .v { font-size: 30px; font-weight: 700; }
+  .hero-body { position: relative; z-index: 1; padding: 28px 330px 30px 30px; }
+  .warn { margin-bottom: 16px; padding: 8px 16px; background: #b91c1c; font-weight: 700; font-size: 20px; }
+  .status { display: flex; flex-wrap: wrap; gap: 10px; font-size: 18px; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; background: rgba(255,255,255,.1); color: var(--soft); }
+  .chip .dot { width: 10px; height: 10px; border-radius: 50%; background: #a1a1aa; }
+  .chip.on { background: rgba(16,185,129,.22); color: #a7f3d0; }
+  .chip.on .dot { background: #34d399; }
+  .ban { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px 0 6px; font-weight: 700; background: rgba(255,255,255,.1); }
+  .ban img { width: 26px; height: 26px; border-radius: 50%; }
+  .ban.clean .src { color: #6ee7b7; }
+  .ban .st { font-weight: 400; color: var(--muted); }
+  .ban.hit { background: rgba(185,28,28,.55); }
+  .ban.hit .st { color: #fecaca; font-weight: 900; }
+  .who { display: flex; align-items: center; gap: 22px; margin-top: 22px; }
+  .platoon { display: flex; align-items: center; gap: 10px; font-size: 19px; color: var(--soft); }
+  .platoon img { width: 32px; height: 32px; object-fit: contain; }
+  .platoon .ok { color: var(--amber); font-size: 17px; }
+  h1 { margin: 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 50px; line-height: 1.15; font-weight: 700; word-break: break-all; }
+  h1 .tag { color: var(--muted); margin-right: 12px; }
+  .meta { display: flex; align-items: center; gap: 18px; margin-top: 6px; font-size: 19px; color: var(--soft); }
   .meta span { display: inline-flex; align-items: center; gap: 6px; }
-  .lv { font-family: "Oswald", sans-serif; font-size: 14px; font-weight: 700; padding: 0 6px; border: 1px solid; }
-  .core { display: flex; align-items: flex-end; gap: 40px; margin-top: 26px; }
-  .core .kd-t { font-size: 11px; letter-spacing: .25em; color: rgba(251,191,36,.9); }
-  .core .kd { font-family: "Oswald", sans-serif; font-size: 92px; line-height: .95; font-weight: 700; color: var(--amber);
-    text-shadow: 0 0 28px rgba(245,158,11,.35); margin-top: 4px; }
-  .kpis { display: grid; grid-template-columns: repeat(4, auto); gap: 0 30px; padding-bottom: 6px; }
-  .kpis .v { font-family: "Oswald", sans-serif; font-size: 28px; font-weight: 700; margin-top: 2px; }
-  .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 20px; margin-top: 20px; }
-  .splits { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-  .split .track { display: flex; gap: 3px; height: 10px; margin-top: 8px; }
+  .lv { font-family: "Oswald", sans-serif; font-size: 20px; font-weight: 700; padding: 0 8px; border: 2px solid; }
+  .core { display: flex; align-items: flex-end; gap: 36px; margin-top: 24px; }
+  .core .kd-t { font-size: 18px; color: var(--amber); letter-spacing: .1em; }
+  .core .kd { font-family: "Oswald", sans-serif; font-size: 104px; line-height: .95; font-weight: 700; color: var(--amber); margin-top: 4px; }
+  .kpis { display: grid; grid-template-columns: repeat(2, auto); gap: 10px 36px; padding-bottom: 4px; }
+  .kpis .v { font-family: "Oswald", sans-serif; font-size: 36px; font-weight: 700; line-height: 1.15; }
+  section.panel { margin-top: 18px; }
+  .splits { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; }
+  .split .track { display: flex; gap: 4px; height: 14px; margin-top: 10px; }
   .split .track i { display: block; }
-  .split .ends { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--w80); }
-  .split .ends em { font-style: normal; color: var(--w40); margin: 0 4px; }
-  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px 22px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
-  .tiles .label { display: flex; align-items: center; gap: 6px; }
-  .tiles .label .icon { color: var(--w40); }
-  .tiles .v { font-family: "Oswald", sans-serif; font-size: 25px; font-weight: 700; margin-top: 2px; }
+  .split .ends { display: flex; justify-content: space-between; margin-top: 8px; font-size: 19px; color: var(--soft); }
+  .split .ends b { font-family: "Oswald", sans-serif; font-size: 22px; margin-left: 4px; }
+  .split .ends em { font-style: normal; color: var(--muted); margin: 0 6px; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px 24px; margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--line); }
+  .tiles .label { display: flex; align-items: center; gap: 8px; }
+  .tiles .v { font-family: "Oswald", sans-serif; font-size: 36px; font-weight: 700; line-height: 1.2; }
   .tiles .v.hot { color: var(--amber-soft); }
-  .team-item { display: flex; align-items: center; gap: 16px; }
-  .team-item + .team-item { margin-top: 26px; }
-  .team-item .box { width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; flex: none;
-    border: 1px solid rgba(255,255,255,.15); background: rgba(255,255,255,.04); color: rgba(255,255,255,.7); }
-  .team-item .v { font-family: "Oswald", sans-serif; font-size: 25px; font-weight: 700; }
-  .team-item .rate { margin-left: auto; font-size: 12px; color: var(--w45); }
-  .cls-head, .cls { display: grid; grid-template-columns: 44px minmax(0, 1fr) 70px 60px 42px 42px; gap: 0 12px; align-items: center; }
-  .cls-head { padding: 0 6px 8px; font-size: 11px; color: var(--w40); }
-  .cls-head span:nth-child(n+3), .cls .n { text-align: right; }
-  .cls { padding: 6px; font-size: 13px; }
-  .cls.best-row { background: rgba(245,158,11,.07); }
-  .cls .pic { width: 44px; height: 44px; overflow: hidden; border: 1px solid var(--line); background: rgba(255,255,255,.04); }
+  .tiles .rate { font-size: 17px; color: var(--muted); margin-left: 8px; font-family: "SC", sans-serif; font-weight: 400; }
+  .cls { display: grid; grid-template-columns: 60px minmax(0, 1fr) 128px 104px 70px 70px; gap: 0 16px; align-items: center; }
+  .cls.head { padding: 0 8px 10px; font-size: 17px; color: var(--muted); }
+  .cls.head span:nth-child(n+3), .cls .n { text-align: right; }
+  .cls.row { padding: 8px; border-top: 1px solid var(--line); }
+  .cls.best-row { background: rgba(245,158,11,.12); }
+  .cls .pic { width: 60px; height: 60px; overflow: hidden; background: rgba(255,255,255,.08); }
   .cls .pic img { display: block; width: 100%; height: 180%; object-fit: cover; object-position: top; }
-  .cls .top { display: flex; align-items: center; gap: 8px; }
-  .cls .cname { font-weight: 600; font-size: 14px; }
+  .cls .top { display: flex; align-items: center; gap: 10px; }
+  .cls .cname { font-size: 22px; font-weight: 700; }
   .cls.best-row .cname { color: var(--amber-soft); }
-  .cls .badge { background: var(--amber); color: #000; font-size: 10px; font-weight: 700; line-height: 16px; padding: 0 4px; }
-  .cls .share { margin-left: auto; font-size: 12px; color: rgba(255,255,255,.5); }
-  .cls .bar { margin-top: 6px; }
-  .cls .bar i { background: rgba(255,255,255,.45); }
+  .cls .badge { background: var(--amber); color: #000; font-size: 15px; font-weight: 700; line-height: 22px; padding: 0 6px; }
+  .cls .share { margin-left: auto; font-size: 18px; color: var(--muted); }
+  .cls .bar { margin-top: 8px; }
+  .cls .bar i { background: rgba(255,255,255,.55); }
   .cls.best-row .bar i { background: var(--amber); }
-  .cls .n { color: rgba(255,255,255,.85); font-family: "Oswald", sans-serif; font-variant-numeric: tabular-nums; }
-  .gear + .gear { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
-  .gear-item { display: flex; align-items: center; gap: 12px; }
-  .gear-item + .gear-item { margin-top: 12px; }
-  .gear-item .img { width: 84px; height: 42px; flex: none; display: flex; align-items: center; justify-content: center;
-    background: linear-gradient(135deg, rgba(255,255,255,.07), rgba(255,255,255,.02)); }
-  .gear-item .img img { max-width: 100%; max-height: 100%; object-fit: contain; padding: 2px; }
+  .cls .n { font-family: "Oswald", sans-serif; font-size: 22px; color: var(--soft); }
+  .gear-row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
+  .gear-row .panel { margin: 0; }
+  .gear-item + .gear-item { margin-top: 16px; }
+  .gear-item .line { display: flex; align-items: center; gap: 14px; }
+  .gear-item .img { width: 176px; height: 78px; flex: none; display: flex; align-items: center; justify-content: center;
+    background: #7e7e84; }
+  .gear-item .img img { max-width: 100%; max-height: 100%; object-fit: contain; padding: 4px; }
   .gear-item .body { flex: 1; min-width: 0; }
-  .gear-item .line { display: flex; align-items: baseline; gap: 8px; }
-  .gear-item .name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .gear-item .k { margin-left: auto; font-size: 13px; color: var(--w80); font-family: "Oswald", sans-serif; }
-  .gear-item .bar { margin-top: 6px; }
-  .empty { padding: 14px 0; text-align: center; font-size: 12px; color: var(--w40); }
+  .gear-item .name { font-size: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gear-item .k { font-family: "Oswald", sans-serif; font-size: 24px; font-weight: 700; color: var(--amber); }
+  .gear-item .k small { font-family: "SC", sans-serif; font-size: 17px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .gear-item .bar { margin-top: 6px; height: 6px; }
+  .empty { padding: 18px 0; text-align: center; font-size: 18px; color: var(--muted); }
 {% endblock %}
 {% block body %}
 <section class="hero{{ ' banned' if banned }}">
@@ -107,8 +98,8 @@
       {% endfor %}
     </div>
     <div class="who">
-      {{ avatar(avatar_url, online, 96) }}
-      <div>
+      {{ avatar(avatar_url, online, 108) }}
+      <div style="min-width: 0">
         {% if platoon %}
         <div class="platoon">
           {% if platoon.emblem_url %}<img src="{{ platoon.emblem_url }}">{% endif %}
@@ -120,7 +111,6 @@
         <div class="meta">
           <span class="lv" style="color: {{ rank_color }}; border-color: {{ rank_color }}">Lv. {{ rank }}</span>
           <span>{{ icon("clock") }}{{ hours }}</span>
-          <span class="d">PID {{ pid }}</span>
         </div>
       </div>
     </div>
@@ -133,69 +123,62 @@
   </div>
 </section>
 
-<div class="row">
-  <section class="panel">
-    <div class="sh">战斗</div>
-    <div class="splits">
-      {% for s in splits %}
-      <div class="split">
-        <div class="label">{{ s.title }}</div>
-        <div class="track"><i style="width: {{ s.pct }}%; background: {{ s.left_color }}"></i><i style="flex: 1; background: {{ s.right_color }}"></i></div>
-        <div class="ends">
-          <span>{{ s.left_label }} <b class="d">{{ s.left }}</b><em>{{ s.pct }}%</em></span>
-          <span><em>{{ 100 - s.pct }}%</em>{{ s.right_label }} <b class="d">{{ s.right }}</b></span>
-        </div>
+<section class="panel">
+  <div class="sh">战斗<span class="aside d">PID {{ pid }}</span></div>
+  <div class="splits">
+    {% for s in splits %}
+    <div class="split">
+      <div class="label">{{ s.title }}</div>
+      <div class="track"><i style="width: {{ s.pct }}%; background: {{ s.left_color }}"></i><i style="flex: 1; background: {{ s.right_color }}"></i></div>
+      <div class="ends">
+        <span>{{ s.left_label }}<b>{{ s.left }}</b><em>{{ s.pct }}%</em></span>
+        <span><em>{{ 100 - s.pct }}%</em>{{ s.right_label }}<b>{{ s.right }}</b></span>
       </div>
-      {% endfor %}
     </div>
-    <div class="tiles">
-      {% for label, value, ico, hot in tiles %}
-      <div><div class="label">{{ icon(ico) }}{{ label }}</div><div class="v{{ ' hot' if hot }}">{{ value }}</div></div>
-      {% endfor %}
-    </div>
-  </section>
-  <section class="panel">
-    <div class="sh">团队贡献</div>
+    {% endfor %}
+  </div>
+  <div class="tiles">
+    {% for label, value, ico, hot in tiles %}
+    <div><div class="label">{{ icon(ico) }}{{ label }}</div><div class="v{{ ' hot' if hot }}">{{ value }}</div></div>
+    {% endfor %}
     {% for label, value, ico, rate in team %}
-    <div class="team-item">
-      <span class="box">{{ icon(ico, 20) }}</span>
-      <div><div class="label">{{ label }}</div><div class="v">{{ value }}</div></div>
-      <span class="rate">{{ rate }} / 小时</span>
-    </div>
+    <div><div class="label">{{ icon(ico) }}{{ label }}</div><div class="v">{{ value }}<span class="rate">{{ rate }}/时</span></div></div>
     {% endfor %}
-  </section>
-</div>
+  </div>
+</section>
 
-<div class="row">
-  <section class="panel">
-    <div class="sh">兵种<span class="aside">按游玩时长排序</span></div>
-    <div class="cls-head"><span></span><span>兵种 · 时长占比</span><span>时长</span><span>击杀</span><span>KPM</span><span>SPM</span></div>
-    {% for c in classes %}
-    <div class="cls{{ ' best-row' if c.best }}">
-      <div class="pic"><img src="{{ c.portrait }}"></div>
-      <div>
-        <div class="top"><span class="cname">{{ c.name }}</span>{% if c.best %}<span class="badge">最佳</span>{% endif %}<span class="share">{{ c.share }}</span></div>
-        <div class="bar"><i style="width: {{ c.ratio }}%"></i></div>
-      </div>
-      <span class="n">{{ c.time }}</span><span class="n">{{ c.kills }}</span><span class="n">{{ c.kpm }}</span><span class="n">{{ c.spm }}</span>
+<section class="panel">
+  <div class="sh">兵种<span class="aside">按游玩时长排序</span></div>
+  <div class="cls head"><span></span><span>兵种 · 时长占比</span><span>时长</span><span>击杀</span><span>KPM</span><span>SPM</span></div>
+  {% for c in classes %}
+  <div class="cls row{{ ' best-row' if c.best }}">
+    <div class="pic"><img src="{{ c.portrait }}"></div>
+    <div>
+      <div class="top"><span class="cname">{{ c.name }}</span>{% if c.best %}<span class="badge">最佳</span>{% endif %}<span class="share">{{ c.share }}</span></div>
+      <div class="bar"><i style="width: {{ c.ratio }}%"></i></div>
     </div>
-    {% endfor %}
-  </section>
+    <span class="n">{{ c.time }}</span><span class="n">{{ c.kills }}</span><span class="n">{{ c.kpm }}</span><span class="n">{{ c.spm }}</span>
+  </div>
+  {% endfor %}
+</section>
+
+<div class="gear-row">
+  {% for title, items in gear %}
   <section class="panel">
-    {% for title, items in gear %}
-    <div class="gear">
-      <div class="sh">{{ title }}</div>
-      {% for g in items %}
-      <div class="gear-item">
+    <div class="sh">{{ title }}</div>
+    {% for g in items %}
+    <div class="gear-item">
+      <div class="line">
         <div class="img">{% if g.image %}<img src="{{ g.image }}">{% endif %}</div>
         <div class="body">
-          <div class="line"><span class="name">{{ g.name }}</span><span class="k">{{ g.kills }}</span></div>
-          <div class="bar"><i style="width: {{ g.ratio }}%"></i></div>
+          <div class="name">{{ g.name }}</div>
+          <div class="k">{{ g.kills }}<small>击杀</small></div>
         </div>
       </div>
-      {% else %}<div class="empty">暂无记录</div>{% endfor %}
+      <div class="bar"><i style="width: {{ g.ratio }}%"></i></div>
     </div>
-    {% endfor %}
+    {% else %}<div class="empty">暂无记录</div>{% endfor %}
   </section>
+  {% endfor %}
 </div>
 {% endblock %}

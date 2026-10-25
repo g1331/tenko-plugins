@@ -2,29 +2,28 @@
 {% from "_macros.html" import icon %}
 {#- 对照 bf-manager 网页服务器列表的 ServerRow。 -#}
 {% block style %}
-  .top { margin-bottom: 20px; }
-  .top h1 { margin: 4px 0 0; font-size: 34px; line-height: 1.2; word-break: break-all; }
-  .top .summary { margin-top: 6px; font-size: 13px; color: var(--w55); }
-  .server { display: grid; grid-template-columns: 112px minmax(0, 1fr) 110px; gap: 0 16px; align-items: center;
-    padding: 12px 8px; border-bottom: 1px solid rgba(255,255,255,.06); }
-  .server:last-child { border-bottom: 0; }
-  .map { width: 112px; height: 63px; overflow: hidden; background: rgba(255,255,255,.05); }
+  .top { margin-bottom: 18px; padding: 18px 22px; background: var(--panel); }
+  .top h1 { margin: 4px 0 0; font-size: 40px; line-height: 1.2; word-break: break-all; }
+  .top .summary { margin-top: 6px; font-size: 19px; color: var(--soft); }
+  .server { display: grid; grid-template-columns: 128px minmax(0, 1fr) 150px; gap: 0 18px; align-items: center;
+    padding: 14px 4px; border-top: 1px solid var(--line); }
+  .server:first-child { border-top: 0; padding-top: 0; }
+  .map { width: 128px; height: 72px; overflow: hidden; background: rgba(255,255,255,.08); }
   .map img { width: 100%; height: 100%; object-fit: cover; }
-  .sname { display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; line-height: 1.35;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sname .icon { color: var(--amber); }
-  .smeta { margin-top: 4px; font-size: 12px; color: var(--w55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .smeta .d { color: var(--w80); }
+  .sname { font-size: 22px; font-weight: 700; line-height: 1.3; word-break: break-all;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .sname .icon { color: var(--amber); width: 20px; height: 20px; margin-right: 4px; vertical-align: -2px; }
+  .smeta { margin-top: 6px; font-size: 18px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .smeta .gid { color: var(--muted); }
   .count { text-align: right; }
-  .count .p { display: inline-flex; align-items: center; gap: 6px; font-family: "Oswald", sans-serif; font-size: 20px; font-weight: 700; }
-  .count .p .icon { color: var(--w40); }
+  .count .p { font-family: "Oswald", sans-serif; font-size: 34px; font-weight: 700; line-height: 1.1; }
   .count .p.full { color: var(--amber); }
-  .count .p small { font-size: 14px; color: var(--w45); font-weight: 400; }
-  .count .q { font-size: 12px; color: var(--w45); margin-top: 2px; }
+  .count .p small { font-size: 20px; color: var(--muted); font-weight: 400; }
+  .count .q { font-size: 17px; color: var(--soft); margin-top: 2px; min-height: 22px; }
   .count .bar { margin-top: 6px; }
   .count .bar i { background: var(--green); }
   .count .bar i.full { background: var(--amber); }
-  .empty { padding: 30px 0; text-align: center; color: var(--w40); }
+  .empty { padding: 30px 0; text-align: center; color: var(--muted); }
 {% endblock %}
 {% block body %}
 <div class="top">
@@ -38,10 +37,11 @@
     <div class="map">{% if s.map_image %}<img src="{{ s.map_image }}">{% endif %}</div>
     <div style="min-width: 0">
       <div class="sname">{% if s.locked %}{{ icon("lock") }}{% endif %}{{ s.name }}</div>
-      <div class="smeta">{{ s.mode }} · {{ s.map }}{% if s.tick %} · <span class="d">{{ s.tick }}HZ</span>{% endif %} · {{ s.region }}{% if s.country %} {{ s.country }}{% endif %} · gameId <span class="d">{{ s.game_id }}</span></div>
+      <div class="smeta">{{ s.mode }} · {{ s.map }} · {{ s.region }}{% if s.country %} {{ s.country }}{% endif %}{% if s.tick %} · <span class="d">{{ s.tick }}Hz</span>{% endif %}</div>
+      <div class="smeta gid">gameId <span class="d">{{ s.game_id }}</span></div>
     </div>
     <div class="count">
-      <div class="p{{ ' full' if s.full }}">{{ icon("users") }}{{ s.players }}<small>/ {{ s.max }}</small></div>
+      <div class="p{{ ' full' if s.full }}">{{ s.players }}<small> / {{ s.max }}</small></div>
       <div class="q">{% if s.queue %}排队 {{ s.queue }}{% endif %}{% if s.queue and s.spectators %} · {% endif %}{% if s.spectators %}观战 {{ s.spectators }}{% endif %}</div>
       <div class="bar"><i class="{{ 'full' if s.full }}" style="width: {{ s.ratio }}%"></i></div>
     </div>

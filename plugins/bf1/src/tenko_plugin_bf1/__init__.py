@@ -45,7 +45,7 @@ declare(scope="group", default_enabled=True)
 config = plugin.get_config(Bf1Config)
 
 TOP = 10
-ITEM_CARDS = 12
+ITEM_CARDS = 10
 
 
 class Bf1Error(Exception):
