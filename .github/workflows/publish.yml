@@ -15,6 +15,9 @@ jobs:
   build:
     name: Build distributions
     runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.plugin.outputs.package }}
+      version: ${{ steps.plugin.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,11 +35,16 @@ jobs:
             exit 1
           fi
           version=$(python3 -c "import tomllib, sys; print(tomllib.load(open(sys.argv[1], 'rb'))['project']['version'])" "${path}/pyproject.toml")
+          package=$(python3 -c "import tomllib, sys; print(tomllib.load(open(sys.argv[1], 'rb'))['project']['name'])" "${path}/pyproject.toml")
           if [ "$version" != "$tag_version" ]; then
             echo "::error::标签 ${GITHUB_REF_NAME} 与 ${path} 的版本 ${version} 不一致"
             exit 1
           fi
-          echo "path=${path}" >> "$GITHUB_OUTPUT"
+          {
+            echo "path=${path}"
+            echo "package=${package}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build sdist and wheel
         run: uv build "${{ steps.plugin.outputs.path }}" --out-dir dist
@@ -64,9 +72,24 @@ jobs:
 
   notify-registry:
     name: Notify the registry
-    needs: publish
+    needs: [build, publish]
     runs-on: ubuntu-latest
     steps:
+      # 刚上传时 PyPI 的 JSON 接口已经有新版本，安装用的索引要晚一会儿：目录这时安装会失败，
+      # 把版本记成测试未通过，之后每小时的检查不再重测它，要等每天的全量重测。
+      - name: Wait until PyPI can install it
+        env:
+          PACKAGE: ${{ needs.build.outputs.package }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          for _ in $(seq 60); do
+            if pip download --no-deps --no-cache-dir -q -d /tmp/probe "${PACKAGE}==${VERSION}"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::10 分钟内 PyPI 仍装不到 ${PACKAGE}==${VERSION}，照常通知目录"
+
       # 让目录马上发现并测试这个版本，不用等它每小时的检查。
       # REGISTRY_TOKEN：对 g1331/tenko-registry 有 Contents 读写权限的 fine-grained 令牌；没配置就跳过。
       - name: Dispatch plugin-released
