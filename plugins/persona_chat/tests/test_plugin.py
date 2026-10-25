@@ -59,6 +59,7 @@ def fake_llm(module, monkeypatch):
     module.sticker_book.store.save({})
     module.chat_store.save({})
     module.day_store.save({})
+    module.memory_store.save({})
     module._unsaved.clear()
     return fake
 
@@ -1123,3 +1124,41 @@ async def test_quote_of_a_quote_drops_the_inner_note(module, fake_llm):
     await feed(module, session([Quote("m1"), Text("哈哈")], user="6", message_id="m2"))
     await feed(module, session([Quote("m2"), Text("笑啥")], user="7", message_id="m3"))
     assert module.conversations["group:100"].lines[-1].text == "回复#2（群友6说的“哈哈”） 笑啥"
+
+
+async def test_memory_is_digested_in_the_background_and_recalled(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "batch_size", 0)
+    asked = []
+
+    async def digest(client, *, model, prompt, text):
+        asked.append(text)
+        people = {"1": "玩bf1，EA名 YueMaT", "999": "记录里没有的号"}
+        return {"group": "打bf1的群", "people": people}, {}
+
+    monkeypatch.setattr(module.llm, "digest", digest)
+    module.memory_store.save({"people": {"2": {"name": "群友2", "note": "老熟人"}}})
+    for n in range(59):
+        await feed(module, session([Text(f"闲聊{n}")], user="1", message_id=f"m{n}"))
+    assert not module._digests
+    await feed(module, session([Text("我也来")], user="2", message_id="m59"))
+    await module._digests["group:100"]  # 第 60 条触发
+
+    assert "群友2(2)：老熟人" in asked[0] and "#60 [群友2(2)] 我也来" in asked[0]
+    memory = module.memory_store.load()
+    assert memory["groups"]["group:100"] == {"note": "打bf1的群", "upto": 60}
+    assert memory["people"]["1"] == {"name": "群友1", "note": "玩bf1，EA名 YueMaT"}
+    assert "999" not in memory["people"]  # 模型编的号不收
+
+    await feed(module, session([At("42"), Text(" 我EA名是啥")], user="1", message_id="m60"))
+    hint = fake_llm.requests[-1][0][-1]["content"]
+    assert "这个群：打bf1的群" in hint
+    assert "群友1(1)：玩bf1，EA名 YueMaT" in hint and "群友2(2)：老熟人" in hint
+
+    assert module._forget("1") and not module._forget("1")
+    assert "群友1(1)" not in module._recall("group:100", module.conversations["group:100"])
+
+
+async def test_reset_chat_digests_from_the_start_again(module, fake_llm):
+    module.memory_store.save({"groups": {"group:100": {"note": "", "upto": 500}}})
+    conversation = module._conversation("group:100")
+    assert module._upto("group:100", conversation) == 0  # 重置过，编号从头来了

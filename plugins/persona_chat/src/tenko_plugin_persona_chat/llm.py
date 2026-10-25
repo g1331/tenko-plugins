@@ -226,6 +226,33 @@ async def chat(
     return calls, data.get("usage") or {}
 
 
+async def digest(
+    client: httpx.AsyncClient, *, model: str, prompt: str, text: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """整理档案：返回模型给的 JSON（解析不了是空字典）和 usage。"""
+
+    response = await client.post(
+        "/chat/completions",
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text},
+            ],
+            "thinking": {"type": "disabled"},
+            "response_format": {"type": "json_object"},
+            "max_tokens": 1500,
+        },
+    )
+    response.raise_for_status()
+    data = response.json()
+    try:
+        result = json.loads(data["choices"][0]["message"].get("content") or "{}")
+    except ValueError:
+        result = {}
+    return result if isinstance(result, dict) else {}, data.get("usage") or {}
+
+
 async def pick_sticker(
     client: httpx.AsyncClient, *, model: str, prompt: str, catalog: str, recent: str, text: str
 ) -> tuple[str, int, dict[str, Any]]:

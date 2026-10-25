@@ -62,6 +62,7 @@ from .chat import (
 from .persona import (
     CATCHPHRASES,
     DAY_PROMPT,
+    DIGEST_PROMPT,
     FOLLOW_HINT,
     LONG_HINT,
     PERSONA,
@@ -72,6 +73,7 @@ from .persona import (
     boss_hint,
     command_hint,
     day_hint,
+    memory_hint,
     mention_hint,
     repeat_hint,
     search_hint,
@@ -161,6 +163,16 @@ _LONG_ROUNDS = 4  # 每聊满 4 轮提醒一次她别在一个梗上打转，每
 day_store = Store("days", version=1)
 _day_lock = asyncio.Lock()
 _waiters: dict[str, asyncio.Task[None]] = {}
+# 她攒下的档案：{"people": {QQ号: {"name", "note"}}, "groups": {会话: {"note", "upto"}}}。
+# 人所有群共用，群各一份；群里比上次整理多出 _DIGEST_EVERY 条就在后台让模型整理一次，
+# upto 是整理到的编号。私聊不整理，只看对方的档案。
+memory_store = Store("memory", version=1)
+_digests: dict[str, asyncio.Task[None]] = {}
+_DIGEST_EVERY = 60
+_DIGEST_LINES = 300  # 第一次整理时最多读最近这么多条，旧的靠备忘
+_PERSON_CHARS = 200  # 要求 80 字，超出太多就截断
+_GROUP_CHARS = 600
+_MEMORY_LINES = 40  # 最近这么多条里说过话的人才带上档案
 _reported: set[int] = set()
 # shortcut: 搜索次数只记在内存里，重启清零；要严格限额时改存 Store。
 _searches: dict[tuple[str, str], int] = {}
@@ -214,7 +226,7 @@ if not config.api_key:
 
 
 async def _dispose() -> None:
-    for task in _waiters.values():
+    for task in [*_waiters.values(), *_digests.values()]:
         task.cancel()
     _save()
     await client.aclose()
@@ -538,6 +550,10 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         ):
             old.sharp = True
     _changed(key)
+    if not private and not in_sandbox() and key not in _digests:
+        upto = _upto(key, conversation)
+        if line.number - upto >= _DIGEST_EVERY:
+            _digests[key] = asyncio.create_task(_digest(key, conversation, upto))
     # 命令也记进上下文（群里别的 bot 的游戏、群友的示范都靠它看懂），但不算在叫 bot。
     # 只看亲手打的字：引用一条再 @ 她发“/撤回”，记录里开头是“回复#…”，也是命令。
     if spoken.lstrip().startswith(_command_prefixes()):
@@ -936,7 +952,7 @@ async def respond(
         weekday = "一二三四五六日"[now.weekday()]
         hint = (
             f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{day_hint(await _today(key))}"
-            f"{hint}{repeat_hint(said, phrases)}{SHORT_HINT}"
+            f"{_recall(key, conversation)}{hint}{repeat_hint(said, phrases)}{SHORT_HINT}"
         )
         conversation.unseen = 0
         usages: list[dict] = []
@@ -1377,6 +1393,93 @@ async def _compress(key: str, conversation: Conversation, prompt_tokens: int) ->
         )
 
 
+def _upto(key: str, conversation: Conversation) -> int:
+    """上次整理到的编号；重置过聊天、编号从头来了时算 0。"""
+
+    upto = memory_store.load(default={}).get("groups", {}).get(key, {}).get("upto", 0)
+    return upto if upto < conversation.next_number else 0
+
+
+def _qq(speaker: str) -> tuple[str, str]:
+    name, _, user = speaker.rpartition("(")
+    return name, user.rstrip(")")
+
+
+async def _digest(key: str, conversation: Conversation, upto: int) -> None:
+    """把 ``upto`` 之后的记录交给模型，更新群档案和说过话的人的档案；失败下次再试。"""
+
+    try:
+        memory = memory_store.load(default={})
+        people = memory.get("people", {})
+        group = memory.get("groups", {}).get(key, {}).get("note", "")
+        lines = [line for line in conversation.lines if line.number > upto][-_DIGEST_LINES:]
+        if not lines:
+            return
+        speakers = (line.speaker for line in lines if line.speaker not in (None, _TENKO))
+        names = dict(_qq(speaker)[::-1] for speaker in speakers)
+        known = [
+            f"- {name}({qq})：{people[qq]['note']}" for qq, name in names.items() if qq in people
+        ]
+        record = "\n".join(
+            f"#{line.number} [{'你' if line.speaker is None else line.who}] {line.text}"
+            for line in lines
+        )
+        parts = [
+            f"群档案：{group or '（还没有）'}",
+            "这些人现在的档案：\n" + ("\n".join(known) or "（都还没有）"),
+            *([f"更早的聊天备忘：\n{conversation.summary}"] if conversation.summary else []),
+            f"新的聊天记录：\n{record}",
+        ]
+        try:
+            result, usage = await llm.digest(
+                client, model=config.model, prompt=DIGEST_PROMPT, text="\n\n".join(parts)
+            )
+        except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
+            logger.warning("AI群友整理 {} 的档案失败：{!r}", key, error)
+            return
+        now = datetime.now()
+        usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+        # 整理期间别的群可能也写了，重新读一次再改。
+        memory = memory_store.load(default={})
+        groups = memory.setdefault("groups", {})
+        people = memory.setdefault("people", {})
+        entry = groups.setdefault(key, {"note": ""})
+        entry["upto"] = lines[-1].number
+        if isinstance(note := result.get("group"), str) and note.strip():
+            entry["note"] = note.strip()[:_GROUP_CHARS]
+        changed = []
+        numbers = {name: qq for qq, name in names.items()}
+        for qq, note in (result.get("people") or {}).items():
+            # 只认这段记录里说过话的人，模型编出来的号不收；它偶尔拿昵称当键，换回 QQ 号。
+            qq = str(qq) if str(qq) in names else numbers.get(str(qq))
+            if qq and isinstance(note, str) and note.strip():
+                people[qq] = {"name": names[qq], "note": note.strip()[:_PERSON_CHARS]}
+                changed.append(names[qq])
+        memory_store.save(memory)
+        logger.info("AI群友整理了 {} 的 {} 条记录，更新了 {} 的档案", key, len(lines), changed)
+    finally:
+        _digests.pop(key, None)
+
+
+def _recall(key: str, conversation: Conversation) -> str:
+    """末尾提示里的档案：本群的，和最近说过话的人的。
+
+    放在末尾而不是规则后面：说话的人一换就变，放前面整段聊天记录的缓存都会失效。
+    """
+
+    memory = memory_store.load(default={})
+    people = memory.get("people", {})
+    present: dict[str, str] = {}
+    for line in islice(reversed(conversation.lines), _MEMORY_LINES):
+        if line.speaker in (None, _TENKO):
+            continue
+        qq = _qq(line.speaker)[1]
+        if qq in people and qq not in present:
+            present[qq] = f"{line.speaker}：{people[qq]['note']}"
+    group = memory.get("groups", {}).get(key, {}).get("note", "")
+    return memory_hint(group, list(present.values()))
+
+
 @plugin.listen(SendResponse)
 async def on_sent(event: SendResponse) -> None:
     """Tenko 功能从这些号发出的回复（游戏出题、查询结果等）也记进群聊记录，她才看得懂前后文。
@@ -1417,13 +1520,16 @@ def _plain(elements) -> str:
 
 persona_command = Alconna(
     "AI群友",
-    Args["action", "重置|重置用量|用量|上下文|表情"]["op;?", "看|删"]["name;?", str],
+    Args["action", "重置|重置用量|用量|上下文|表情|记忆|忘记我"]["op;?", "看|删"]["name;?", str],
     meta=CommandMeta(
-        "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量和上下文，或管理它收藏的表情包",
-        usage="AI群友 重置 | 重置用量 | 用量 | 上下文 | 表情 [看|删 名字]",
+        "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量和上下文、查看或删掉它对人和群的印象，"
+        "或管理它收藏的表情包",
+        usage=(
+            "AI群友 重置 | 重置用量 | 用量 | 上下文 | 记忆 [删 QQ号] | 忘记我 | 表情 [看|删 名字]"
+        ),
         example=(
             "/AI群友 重置\n/AI群友 重置用量\n/AI群友 用量\n/AI群友 上下文\n"
-            "/AI群友 表情\n/AI群友 表情 看 猫猫震惊"
+            "/AI群友 记忆\n/AI群友 忘记我\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊"
         ),
     ),
 )
@@ -1453,6 +1559,21 @@ async def manage(
             return "只有群管理员及以上能查看上下文"
         key = _key(session)
         return format_context(key, _conversation(key))
+    if action.result == "忘记我":
+        return "已经忘掉对你的印象了" if _forget(session.user.id) else "本来就没记着你什么"
+    if action.result == "记忆":
+        if op.result == "删":
+            if not await require_perm(session, Permission.BotAdmin):
+                return "印象是所有群共用的，只有 BOT 管理员及以上能删别人的"
+            if not _forget(name.result or ""):
+                return "没记着这个人"
+            return f"已经忘掉对 {name.result} 的印象了"
+        if session.event.guild is not None and not await require_perm(
+            session, Permission.GroupAdmin
+        ):
+            return "只有群管理员及以上能查看记忆"
+        key = _key(session)
+        return _recall(key, _conversation(key)) or "还没攒下什么印象"
     if action.result == "表情":
         return await manage_stickers(session, op.result if op.available else None, name.result)
     if not await require_perm(session, Permission.BotAdmin):
@@ -1468,6 +1589,14 @@ async def manage(
     return format_usage(
         usage_book.summary(today), only=key if session.event.guild is not None else None
     )
+
+
+def _forget(qq: str) -> bool:
+    memory = memory_store.load(default={})
+    if memory.get("people", {}).pop(qq, None) is None:
+        return False
+    memory_store.save(memory)
+    return True
 
 
 async def manage_stickers(session: Session, op: str | None, name: str | None) -> str | None:
