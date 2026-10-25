@@ -15,7 +15,7 @@ from arclet.alconna import Alconna, AllParam, Args, CommandMeta
 from arclet.entari import BasicConfModel, MessageChain, Session, command, plugin
 from arclet.entari.command import Query
 from loguru import logger
-from satori import Image
+from satori import Image, Text
 from tenko_api.features import declare
 from tenko_api.render import RenderService
 
@@ -180,9 +180,20 @@ async def _optional(path: str) -> Any:
         return None
 
 
-async def _reply(service, template: str, context, fallback: str) -> MessageChain | str:
+def _player_link(pid: int, tab: str = "") -> str:
+    """bf-manager 网页的玩家页，分区记在 # 后面。"""
+
+    return f"{config.base_url.rstrip('/')}/bf1/player/{pid}{tab and '#' + tab}"
+
+
+async def _reply(
+    service, template: str, context, fallback: str, link: str | None = None
+) -> MessageChain | str:
     image = await pages.render(service, template, context)
-    return MessageChain(Image.of(raw=image, mime="image/jpeg")) if image else fallback
+    if not image:
+        return f"{fallback}\n{link}" if link else fallback
+    chain = MessageChain(Image.of(raw=image, mime="image/jpeg"))
+    return chain + Text(link) if link else chain
 
 
 async def stats_reply(name: str, service) -> MessageChain | str:
@@ -207,7 +218,11 @@ async def stats_reply(name: str, service) -> MessageChain | str:
         _source(),
     )
     return await _reply(
-        service, "stats.html", context, format_stats(persona["display_name"], stats)
+        service,
+        "stats.html",
+        context,
+        format_stats(persona["display_name"], stats),
+        _player_link(pid),
     )
 
 
@@ -222,7 +237,7 @@ async def items_reply(kind: str, name: str, service) -> MessageChain | str:
     text = (format_weapons if kind == "weapons" else format_vehicles)(
         persona["display_name"], items
     )
-    return await _reply(service, "items.html", context, text)
+    return await _reply(service, "items.html", context, text, _player_link(pid, kind))
 
 
 async def servers_reply(keyword: str, service) -> MessageChain | str:

@@ -1,5 +1,5 @@
 import pytest
-from satori import Image
+from satori import Image, Text
 
 PERSONA = {"persona_id": 2, "display_name": "abc", "avatar_url": None}
 STATS = {
@@ -117,6 +117,7 @@ async def test_stats_renders_the_real_account_as_an_image(module, player, render
     rendered["result"] = b"jpeg"
     reply = await module.stats_reply("abc", object())
     assert isinstance(reply[0], Image)
+    assert reply[1] == Text("https://bfm.umrbotech.com/bf1/player/2")
     ctx = rendered["context"]
     assert rendered["template"] == "stats.html"
     assert ctx["kd"] == "2.43"
@@ -154,6 +155,7 @@ async def test_stats_falls_back_to_text_and_survives_missing_extras(module, play
     player["/stats/2/online"] = down
     reply = await module.stats_reply("abc", None)
     assert reply.startswith("abc 的战地一战绩")
+    assert reply.endswith("\nhttps://bfm.umrbotech.com/bf1/player/2")
     assert "最佳兵种 突击兵" in reply
     ctx = rendered["context"]
     assert [b["state"] for b in ctx["bans"]] == ["unknown", "unknown"]
@@ -170,6 +172,7 @@ async def test_weapon_rows_sorted_with_rarity(module, player, rendered):
     assert (rows[0]["skin"], rows[0]["rarity"]) == ("克伦斯基", "gold")
     assert rows[0]["stats"][3] == "0.1%"
     assert "1. 费德洛夫自动步枪 · 半自动步枪" in reply
+    assert reply.endswith("/bf1/player/2#weapons")
 
 
 async def test_vehicle_rows(module, player, rendered):
