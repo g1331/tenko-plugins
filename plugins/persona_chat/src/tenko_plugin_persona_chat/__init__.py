@@ -373,10 +373,13 @@ def render(
             if quoted:
                 # 引用她发的表情包多半在说那张图：点明是哪张，不然她回头翻编号常翻错、不认账。
                 mine = quoted.speaker is None and re.fullmatch(r"\[表情:[^\]]+\]", quoted.text)
+                # 只给编号她得自己回头翻是谁说的，常翻错人：把谁说的、说了啥带上。
+                who = "你" if quoted.speaker is None else quoted.speaker.rpartition("(")[0]
+                said = quoted.text if len(quoted.text) <= 20 else quoted.text[:20] + "…"
                 parts.append(
                     f"回复#{quoted.number}（你发的{quoted.text}） "
                     if mine
-                    else f"回复#{quoted.number} "
+                    else f"回复#{quoted.number}（{who or quoted.speaker}说的“{said}”） "
                 )
             elif forward := next(filter(None, map(_forward, element.children)), None):
                 # 引用转发多半是要她看这段记录，整段给她，不截成开头 40 字。
@@ -656,7 +659,9 @@ def _fresh(session: Session, text: str) -> Session:
     return Session(session.account, type(session.event)(session.account, origin))
 
 
-async def _run_command(session: Session, conversation: Conversation, text: str) -> str:
+async def _run_command(
+    session: Session, conversation: Conversation, text: str, asker: str | None
+) -> str:
     """以叫她的人的身份执行，宿主的开关、限流和权限照常生效；结果发到群里、记进记录。
 
     返回给模型的提示。
@@ -676,7 +681,7 @@ async def _run_command(session: Session, conversation: Conversation, text: str) 
         result = None  # 编出来的或没列出来的命令不执行
     logger.info("AI群友执行命令“{}”：{}", text, "有结果" if result else "没结果")
     if not result:
-        return command_hint(text, False)
+        return command_hint(text, False, asker)
     token = _speaking.set(True)  # 自己记，带上图给她看，不走 on_sent 的截断和“[图片]”
     try:
         receipts = await session.send(result)
@@ -697,7 +702,7 @@ async def _run_command(session: Session, conversation: Conversation, text: str) 
         line.pictures = [
             p for src in images if (p := picture_url(base64.b64decode(src.partition(",")[2])))
         ]
-    return command_hint(text, True)
+    return command_hint(text, True, asker)
 
 
 def _lookalike(speaker: str | None) -> bool:
@@ -953,7 +958,8 @@ async def respond(
             if searching and query.strip():
                 found.append(search_hint(query, await _search(key, query)))
             if running and ran.strip():
-                found.append(await _run_command(session, conversation, ran))
+                asker = (target or answer).speaker  # running 时两者必有其一
+                found.append(await _run_command(session, conversation, ran, asker))
             searched = bool(found)
             again = None
             if searched:

@@ -150,7 +150,7 @@ async def test_replying_to_bot_triggers_and_cooldown_holds(module, fake_llm):
     assert len(fake_llm.requests) == 1
     await feed(module, session([Quote("bot-m1"), Text("没吃")], user="2", message_id="m3"))
     assert len(fake_llm.requests) == 2
-    assert fake_llm.requests[1][0][-2]["content"].endswith("[群友2(2)] 回复#2 没吃")
+    assert fake_llm.requests[1][0][-2]["content"].endswith("[群友2(2)] 回复#2（你说的“咕噜”） 没吃")
 
 
 async def test_batch_lets_model_stay_silent_and_commands_are_context_only(module, fake_llm):
@@ -252,7 +252,7 @@ async def test_quote_of_her_line_counts_even_when_the_id_differs(module, fake_ll
     await feed(module, session([quote, Text("0.78%")], user="5", message_id="m2"))
 
     lines = module.conversations["group:100"].lines
-    assert lines[-2].text == f"回复#{lines[-3].number} 0.78%"
+    assert lines[-2].text == f"回复#{lines[-3].number}（你说的“/海洋”） 0.78%"
     assert lines[-1].text == "/水"  # 算在回她，被叫到照样回
 
 
@@ -1059,6 +1059,7 @@ async def test_called_bot_runs_a_listed_command_and_answers_from_the_result(
     (first, first_force), (second, _) = fake_llm.requests
     assert not first_force and "bf1s <EA 名字>" in first[2]["content"]
     assert "你刚用了“bf1s SHlSAN13”，结果已经发到群里" in second[-1]["content"]
+    assert "这是 群友1(1) 叫你查的" in second[-1]["content"]  # 帮别人查时别说成是对方的
     # 结果原样发到群里、带着图记进记录，她回话在后面
     assert [call.args[0] for call in s.send.await_args_list][0][0].text.startswith("SHlSAN13")
     result = module.conversations["group:100"].lines[1]
@@ -1085,3 +1086,13 @@ async def test_reply_right_after_her_can_run_a_command(module, fake_llm, command
     await feed(module, session([Text("查下4zpxyycf的bf1战绩")], message_id="m1"))
     await module._waiters["group:100"]
     assert commands == ["/bf1s 4zpxyycf"]
+
+
+async def test_quote_of_someone_else_says_who_and_what(module, fake_llm):
+    await feed(module, session([Text("图太糊了看不清是这样的")], user="13", message_id="m1"))
+    await feed(module, session([Quote("m1"), Text("不是")], user="7", message_id="m2"))
+    # 只给编号她常翻错人：带上是谁说的、说了啥（长的截到 20 字）
+    assert (
+        module.conversations["group:100"].lines[-1].text
+        == "回复#1（群友13说的“图太糊了看不清是这样的”） 不是"
+    )
