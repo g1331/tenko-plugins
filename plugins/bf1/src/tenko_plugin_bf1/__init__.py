@@ -613,6 +613,13 @@ async def review_request(
     return [Text(head), *(card or []), Text(f"\n{_REVIEW_HINT}")], persona
 
 
+def _claim(group_id: str, applicant: str) -> bool:
+    """同一份申请每个号各收到一次；几秒内已经有号接手的就不再处理。重复申请照常处理。"""
+
+    pending = _pending.get((group_id, applicant))
+    return pending is None or pending.deadline - REVIEW_SECONDS < time.monotonic() - 30
+
+
 async def _review_on(group_id: str) -> bool:
     async with get_session() as db:
         return await db.get(JoinReview, group_id) is not None
@@ -630,11 +637,13 @@ async def on_join_request(
     group, applicant = session.guild.id, session.user.id
     if not feature_enabled("bf1", group) or not await _review_on(group):
         return
-    message, persona = await review_request(
+    # QQ 把申请推给群里每个管理员号，宿主也都放行，第一个收到的处理
+    if not _claim(group, applicant):
+        return
+    pending = _Pending(session.account, request.id, None, time.monotonic() + REVIEW_SECONDS)
+    _pending[(group, applicant)] = pending
+    message, pending.persona = await review_request(
         applicant, session.user.name or applicant, request.content, render_service
-    )
-    _pending[(group, applicant)] = _Pending(
-        session.account, request.id, persona, time.monotonic() + REVIEW_SECONDS
     )
     await session.send(message)
 

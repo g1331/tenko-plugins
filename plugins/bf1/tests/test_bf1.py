@@ -430,3 +430,17 @@ async def test_approval_failure_is_reported(module, db):
     account = SimpleNamespace(protocol=SimpleNamespace(guild_member_approve=approve))
     module._pending[("g", "10")] = module._Pending(account, "f", None, module.time.monotonic() + 9)
     assert await module.decide("g", "10", "y") == "处理 10 的入群申请失败：不是管理员"
+
+
+def test_the_first_admin_account_claims_the_request(module):
+    now = module.time.monotonic()
+    module._pending.pop(("g", "10"), None)
+    assert module._claim("g", "10")
+    module._pending[("g", "10")] = module._Pending(None, "f", None, now + module.REVIEW_SECONDS)
+    assert not module._claim("g", "10")
+    # 一分钟前的申请没审完、又申请了一次：照常处理新的
+    module._pending[("g", "10")] = module._Pending(
+        None, "f", None, now + module.REVIEW_SECONDS - 60
+    )
+    assert module._claim("g", "10")
+    del module._pending[("g", "10")]
