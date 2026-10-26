@@ -60,6 +60,7 @@ def fake_llm(module, monkeypatch):
     module.chat_store.save({})
     module.day_store.save({})
     module.memory_store.save({})
+    module.persona_store.save({})
     module._unsaved.clear()
     return fake
 
@@ -448,7 +449,7 @@ async def test_wake_word_only_counts_in_typed_text(module, fake_llm):
     assert len(fake_llm.requests) == 1
     # 只提到名字不强制回：很多人自己部署了大肥鱼，“我的大肥鱼”不一定在说她
     ((messages, force),) = fake_llm.requests
-    assert not force and "部署了一个同名的 AI" in messages[-1]["content"]
+    assert not force and "部署的同名 AI" in messages[-1]["content"]
 
 
 async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm, monkeypatch):
@@ -941,7 +942,7 @@ async def test_her_day_is_made_once_from_the_persona(module, fake_llm, monkeypat
     fake_llm.replies.append([{"text": "嗯"}])
     await feed(module, session([At("42"), Text(" 然后呢")], user="2", message_id="m2"))
 
-    assert len(asked) == 1 and asked[0][0]["content"] == module.PERSONA
+    assert len(asked) == 1 and asked[0][0]["content"] == module.PRESETS["大肥鱼"][0]
     assert "很久以前的事" in asked[0][1]["content"]  # 避开前几天的
     hint = fake_llm.requests[-1][0][-1]["content"]
     assert "你今天：上午被用户拉着改周报；下午睡了一觉。" in hint
@@ -1162,3 +1163,62 @@ async def test_reset_chat_digests_from_the_start_again(module, fake_llm):
     module.memory_store.save({"groups": {"group:100": {"note": "", "upto": 500}}})
     conversation = module._conversation("group:100")
     assert module._upto("group:100", conversation) == 0  # 重置过，编号从头来了
+
+
+async def test_switching_persona_changes_prompt_and_wake_word(module, fake_llm, monkeypatch):
+    async def allowed(session, level):
+        return True
+
+    monkeypatch.setattr(module, "require_perm", allowed)
+    s = session([])
+    assert "预置人设：大肥鱼、小埋" in await module.manage_persona(s, None, None, "")
+    assert "换成小埋了" in await module.manage_persona(s, "换", "小埋", "")
+
+    await feed(module, session([Text("小埋在吗")], message_id="m1"))
+    await feed(module, session([Text("大肥鱼在吗")], message_id="m2", user="2"))
+    ((messages, _),) = fake_llm.requests  # 换了人设，旧名字不再算叫她
+    assert messages[0]["content"] == module.PRESETS["小埋"][0]
+    assert "可乐" in module._persona()[2]
+
+    await module.manage_persona(s, "改", "阿呆", "你是阿呆。")
+    assert module._persona() == ("阿呆", "你是阿呆。", [])
+    assert "没有叫「阿呆」的预置人设" in await module.manage_persona(s, "换", "阿呆", "")
+    await module.manage_persona(s, "换", "默认", "")
+    assert module._persona()[0] == "大肥鱼"
+
+
+async def test_old_pictures_go_before_the_chat_is_compressed(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "context_tokens", 20000)
+    summarized = []
+
+    async def summarize(client, *, model, messages, max_tokens):
+        summarized.append(messages)
+        return "备忘", {}
+
+    monkeypatch.setattr(module.llm, "summarize", summarize)
+    conversation = module._conversation("group:100")
+    for i in range(30):  # 30 张看过的低清图约 5700 token，聊天只有几十 token
+        line = conversation.add(f"m{i}", "群友1(1)", "[图片]", images=(f"u{i}",))
+        line.shown = True
+    await module._compress("group:100", conversation, 16000)
+
+    assert summarized == []  # 撤掉旧图就降到四分之三以下，不压聊天
+    assert sum(line.shown for line in conversation.lines) == 22  # 留最近约 4000 token
+    assert len(conversation.lines) == 30 and conversation.summary == ""
+
+
+async def test_reset_everything_forgets_all_chats(module, fake_llm, monkeypatch):
+    async def allowed(session, level):
+        return True
+
+    monkeypatch.setattr(module, "require_perm", allowed)
+    await feed(module, session([Text("在吗")], message_id="m1"))
+    await feed(module, session([Text("在吗")], message_id="m2", group="200"))
+    module._save()
+    reset = module.manage.callable_target
+    s = session([])
+    ok = SimpleNamespace(available=True, result="全部")
+    nothing = SimpleNamespace(available=False, result=None)
+    said = await reset(s, SimpleNamespace(result="重置"), ok, nothing, nothing)
+    assert said.startswith("所有群和私聊的聊天都忘掉了（2 个）")
+    assert module.conversations == {} and module.chat_store.load(default={}) == {}

@@ -21,7 +21,7 @@ from importlib.metadata import entry_points
 from itertools import islice, pairwise
 
 import httpx
-from arclet.alconna import Alconna, Args, CommandMeta, command_manager
+from arclet.alconna import Alconna, AllParam, Args, CommandMeta, command_manager
 from arclet.entari import (
     BasicConfModel,
     MessageCreatedEvent,
@@ -60,13 +60,12 @@ from .chat import (
     summary_messages,
 )
 from .persona import (
-    CATCHPHRASES,
     DAY_PROMPT,
     DIGEST_PROMPT,
     FOLLOW_HINT,
     LONG_HINT,
-    PERSONA,
     PICK_STICKER_PROMPT,
+    PRESETS,
     SHORT_HINT,
     UNPROMPTED_HINT,
     answer_hint,
@@ -90,10 +89,11 @@ class PersonaChatConfig(BasicConfModel):
     """接口密钥；为空时插件不应答。只写在本机配置里，不要提交到仓库。"""
     model: str = "deepseek-flash"
     wake_words: list[str] = model_field(
-        default_factory=lambda: ["大肥鱼"], description="消息里含这些词时当作在叫 bot。"
+        default_factory=list, description="除了人设的名字，消息里含这些词时也当作在叫 bot。"
     )
     persona: str = ""
     """人设提示词：她是谁、来历、口味、语气和示例对话；为空时用内置的“大肥鱼”。
+    用 ``/AI群友 人设`` 换的预置人设或改的自定义人设优先于这里。
     怎么当群友（接话、关心人、有立场、少用梗）是通用规则，换人设也照样生效，不用写进来。"""
     catchphrases: list[str] = model_field(
         default_factory=list,
@@ -132,7 +132,7 @@ plugin.metadata(
     "AI群友",
     author=["13"],
     version="0.1.31",
-    description="接入 DeepSeek，用人设口吻陪群友聊天，内置“大肥鱼”。",
+    description="接入 DeepSeek，用人设口吻陪群友聊天，预置“大肥鱼”“小埋”。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/persona_chat",
         "repository": "https://github.com/g1331/tenko-plugins",
@@ -167,6 +167,9 @@ _waiters: dict[str, asyncio.Task[None]] = {}
 # 人所有群共用，群各一份；群里比上次整理多出 _DIGEST_EVERY 条就在后台让模型整理一次，
 # upto 是整理到的编号。私聊不整理，只看对方的档案。
 memory_store = Store("memory", version=1)
+# 用命令换的人设，所有群共用：{"name": 预置人设名} 或 {"name": 名字, "text": 自定义人设}；
+# 空的用配置里的。
+persona_store = Store("persona", version=1)
 _digests: dict[str, asyncio.Task[None]] = {}
 _DIGEST_EVERY = 60
 _DIGEST_LINES = 300  # 第一次整理时最多读最近这么多条，旧的靠备忘
@@ -529,10 +532,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     calling = (
         private
         or at_me
-        or (
-            not lookalike
-            and (reply_me or is_reply_me or any(w in spoken for w in config.wake_words))
-        )
+        or (not lookalike and (reply_me or is_reply_me or any(w in spoken for w in _wake_words())))
     )
     # 叫她时带的收藏表情包也给她看图：多半是要她看这张，光凭备注会认错。
     if calling:
@@ -725,10 +725,29 @@ async def _run_command(
     return command_hint(text, True, asker)
 
 
+def _persona() -> tuple[str, str, list[str]]:
+    """当前人设：(名字, 人设, 梗和口头禅)。名字为空时只靠配置里的唤醒词。"""
+
+    chosen = persona_store.load(default={})
+    name = chosen.get("name", "")
+    if chosen.get("text"):
+        return name, chosen["text"], []
+    if name in PRESETS:
+        return name, *PRESETS[name]
+    if config.persona:
+        return "", config.persona, config.catchphrases
+    return "大肥鱼", *PRESETS["大肥鱼"]
+
+
+def _wake_words() -> list[str]:
+    name = _persona()[0]
+    return [name, *config.wake_words] if name else config.wake_words
+
+
 def _lookalike(speaker: str | None) -> bool:
     """昵称里带唤醒词的别人的号，比如另一个叫“大肥鱼bot”的 AI。"""
 
-    return bool(speaker) and any(w and w in speaker.rpartition("(")[0] for w in config.wake_words)
+    return bool(speaker) and any(w and w in speaker.rpartition("(")[0] for w in _wake_words())
 
 
 def _account_label(account) -> str:
@@ -777,7 +796,7 @@ async def _today(key: str) -> str:
                 client,
                 model=config.model,
                 messages=[
-                    {"role": "system", "content": config.persona or PERSONA},
+                    {"role": "system", "content": _persona()[1]},
                     {"role": "user", "content": DAY_PROMPT.format(date=date, before=before)},
                 ],
                 max_tokens=200,
@@ -872,7 +891,7 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
     await _fetch_pictures(shown)
     for line in shown:
         line.shown = True
-    persona = config.persona or PERSONA
+    persona = _persona()[1]
 
     catalog = ""
     if config.sticker_limit:
@@ -947,7 +966,7 @@ async def respond(
         if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
             hint += LONG_HINT
         said = [line.text for line in conversation.lines if line.speaker is None][-30:]
-        phrases = config.catchphrases or ([] if config.persona else CATCHPHRASES)
+        phrases = _persona()[2]
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
         hint = (
@@ -1340,11 +1359,25 @@ async def _search(key: str, query: str) -> str:
 
 
 async def _compress(key: str, conversation: Conversation, prompt_tokens: int) -> None:
-    """把较早的记录并进备忘，让输入回落到 ``context_tokens`` 的一半。
+    """先撤旧图；还超的话把较早的记录并进备忘，让输入回落到 ``context_tokens`` 的一半。
 
     失败只记日志，下次超阈值时再试。
     """
 
+    # 超阈值多半是看过的图撑的（实测 30k 里图占近 2 万，聊天原文才 3k）：先撤旧图，
+    # 撤完降到四分之三以下就不动聊天和备忘。撤图从那条起断缓存，和压缩一样是一次性的，
+    # 顺手换新表情包目录。
+    retired = conversation.retire_images(_KEEP_IMAGE_TOKENS)
+    conversation.stickers = None
+    prompt_tokens -= retired
+    if prompt_tokens <= config.context_tokens * 3 // 4:
+        logger.info(
+            "AI群友撤掉了 {} 约 {:,} token 的旧图，输入降到约 {:,} token，不用压缩聊天",
+            key,
+            retired,
+            prompt_tokens,
+        )
+        return
     # 按实际输入量算要压掉多少：人设、表情包目录、昵称、图片都不在记录的估算里，只按记录留一截的话
     # 压完可能还超，之后每次回复都改写备忘，前缀缓存全部失效，一早上就烧穿每日上限。
     # 闲聊丢点旧细节无妨，一次压到一半，留足余量，备忘就很久才改写一次。
@@ -1369,16 +1402,12 @@ async def _compress(key: str, conversation: Conversation, prompt_tokens: int) ->
         before = conversation.summary
         images = sum(line.image_tokens for line in old if line.shown)
         conversation.forget(old[-1].number, summary)
-        # 备忘一改，后面的缓存反正要重算：顺手撤掉旧图、换新表情包目录，不多花钱。
-        retired = conversation.retire_images(_KEEP_IMAGE_TOKENS)
-        conversation.stickers = None
         conversation.compressed_at = time.time()
         # 压完的输入只能估：下次请求的 usage 才是准数，“上下文”命令里看得到。
         after = (
             prompt_tokens
             - sum(estimate_tokens(line.text) for line in old)
             - images
-            - retired
             + estimate_tokens(summary)
             - estimate_tokens(before)
         )
@@ -1520,16 +1549,20 @@ def _plain(elements) -> str:
 
 persona_command = Alconna(
     "AI群友",
-    Args["action", "重置|重置用量|用量|上下文|表情|记忆|忘记我"]["op;?", "看|删"]["name;?", str],
+    Args["action", "重置|重置用量|用量|上下文|表情|记忆|忘记我|人设"]["op;?", "看|删|换|改|全部"][
+        "name;?", str
+    ]["text;?", AllParam],
     meta=CommandMeta(
         "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量和上下文、查看或删掉它对人和群的印象，"
         "或管理它收藏的表情包",
         usage=(
-            "AI群友 重置 | 重置用量 | 用量 | 上下文 | 记忆 [删 QQ号] | 忘记我 | 表情 [看|删 名字]"
+            "AI群友 重置 [全部] | 重置用量 | 用量 | 上下文 | 记忆 [删 QQ号] | 忘记我"
+            " | 表情 [看|删 名字] | 人设 [看 [名字]|换 名字|改 名字 人设]"
         ),
         example=(
-            "/AI群友 重置\n/AI群友 重置用量\n/AI群友 用量\n/AI群友 上下文\n"
-            "/AI群友 记忆\n/AI群友 忘记我\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊"
+            "/AI群友 重置\n/AI群友 重置 全部\n/AI群友 重置用量\n/AI群友 用量\n/AI群友 上下文\n"
+            "/AI群友 记忆\n/AI群友 忘记我\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊\n"
+            "/AI群友 人设\n/AI群友 人设 换 小埋\n/AI群友 人设 改 阿呆 你是阿呆，……"
         ),
     ),
 )
@@ -1541,7 +1574,22 @@ async def manage(
     action: Query[str] = Query("action"),  # noqa: B008
     op: Query[str] = Query("op"),  # noqa: B008
     name: Query[str] = Query("name"),  # noqa: B008
+    text: Query[list] = Query("text"),  # noqa: B008
 ):
+    if action.result == "人设":
+        content = " ".join(map(str, text.result)).strip() if text.available else ""
+        return await manage_persona(
+            session, op.result if op.available else None, name.result, content
+        )
+    if action.result == "重置" and op.available and op.result == "全部":
+        if not await require_perm(session, Permission.BotAdmin):
+            return "只有 BOT 管理员及以上能一次重置所有群"
+        count = len(chat_store.load(default={}).keys() | conversations.keys())
+        conversations.clear()
+        _unsaved.clear()
+        if not in_sandbox():
+            chat_store.save({})
+        return f"所有群和私聊的聊天都忘掉了（{count} 个），对人和群的印象保留"
     if action.result == "重置":
         if session.event.guild is not None and not await require_perm(
             session, Permission.GroupAdmin
@@ -1599,6 +1647,44 @@ def _forget(qq: str) -> bool:
     return True
 
 
+async def manage_persona(
+    session: Session, op: str | None, name: str | None, text: str
+) -> str | None:
+    """人设所有群共用：看归群管理，换、改只给 BOT 管理员。"""
+
+    if op in ("换", "改"):
+        if not await require_perm(session, Permission.BotAdmin):
+            return "人设是所有群共用的，只有 BOT 管理员及以上能换"
+        if op == "换" and name == "默认":
+            persona_store.save({})
+        elif op == "换" and name in PRESETS:
+            persona_store.save({"name": name})
+        elif op == "换":
+            return f"没有叫「{name}」的预置人设，有：{'、'.join(PRESETS)}"
+        elif not name or not text:
+            return "要写名字和人设，例如：/AI群友 人设 改 阿呆 你是阿呆，……"
+        else:
+            persona_store.save({"name": name, "text": text})
+        day_store.save({})  # 今天的小事是按旧人设编的，换了就重新编
+        now = _persona()[0] or "配置里的人设"
+        return (
+            f"换成{now}了，所有群都生效，叫“{now}”也算叫她。各群之前的聊天还是旧人设说的，"
+            "想让她马上换个样子可以发 /AI群友 重置 全部"
+        )
+    if session.event.guild is not None and not await require_perm(session, Permission.GroupAdmin):
+        return "只有群管理员及以上能查看人设"
+    if op == "看":
+        if name and name not in PRESETS:
+            return f"没有叫「{name}」的预置人设"
+        return PRESETS[name][0] if name else _persona()[1]
+    current = _persona()[0] or "配置里的人设"
+    return (
+        f"现在的人设：{current}\n预置人设：{'、'.join(PRESETS)}\n"
+        "看内容：/AI群友 人设 看 [名字]\n换预置：/AI群友 人设 换 名字（“默认”回到配置里的）\n"
+        "自定义：/AI群友 人设 改 名字 人设内容"
+    )
+
+
 async def manage_stickers(session: Session, op: str | None, name: str | None) -> str | None:
     # 收藏所有群共用：看归群管理，删会影响别的群，只给 BOT 管理员。
     if op == "删":
@@ -1634,7 +1720,7 @@ def format_context(key: str, conversation: Conversation) -> str:
     parts = {
         name: rough * conversation.scale
         for name, rough in context_parts(
-            config.persona or PERSONA, _TOOLS, conversation, catalog, conversation.hint
+            _persona()[1], _TOOLS, conversation, catalog, conversation.hint
         ).items()
     }
     seen = [line for line in lines if line.shown]
