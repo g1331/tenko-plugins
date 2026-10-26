@@ -75,7 +75,8 @@ jobs:
     needs: [build, publish]
     runs-on: ubuntu-latest
     steps:
-      # 刚上传时 PyPI 的 JSON 接口已经有新版本，安装用的索引要晚一会儿：目录这时安装会失败，
+      # 刚上传时 PyPI 的 JSON 接口和安装用的索引谁先更新都不一定，两个都要等到：
+      # JSON 还是旧的，目录发现不了新版本，要等整点检查；索引还是旧的，目录安装会失败，
       # 把版本记成测试未通过，之后每小时的检查不再重测它，要等每天的全量重测。
       - name: Wait until PyPI can install it
         env:
@@ -83,12 +84,14 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           for _ in $(seq 60); do
-            if pip download --no-deps --no-cache-dir -q -d /tmp/probe "${PACKAGE}==${VERSION}"; then
+            if curl -fsS "https://pypi.org/pypi/${PACKAGE}/json" \
+                | python3 -c "import json, sys; sys.exit(sys.argv[1] not in json.load(sys.stdin)['releases'])" "$VERSION" \
+              && pip download --no-deps --no-cache-dir -q -d /tmp/probe "${PACKAGE}==${VERSION}"; then
               exit 0
             fi
             sleep 10
           done
-          echo "::warning::10 分钟内 PyPI 仍装不到 ${PACKAGE}==${VERSION}，照常通知目录"
+          echo "::warning::10 分钟内 PyPI 仍查不到或装不到 ${PACKAGE}==${VERSION}，照常通知目录"
 
       # 让目录马上发现并测试这个版本，不用等它每小时的检查。
       # REGISTRY_TOKEN：对 g1331/tenko-registry 有 Contents 读写权限的 fine-grained 令牌；没配置就跳过。
