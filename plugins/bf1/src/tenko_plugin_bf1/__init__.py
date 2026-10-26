@@ -1,4 +1,4 @@
-"""战地一查询：战绩、武器、载具和服务器。
+"""战地一查询：战绩、武器、载具和服务器，以及入群审核。
 
 数据全部来自 bf-manager 的公开查询接口；这里解析命令、取数据，图片排版在 :mod:`.pages`，
 渲染不了时回文字。
@@ -7,18 +7,32 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from arclet.alconna import Alconna, AllParam, Args, CommandMeta
-from arclet.entari import BasicConfModel, MessageChain, Session, command, plugin
+from arclet.entari import (
+    Account,
+    BasicConfModel,
+    MessageChain,
+    MessageCreatedEvent,
+    Session,
+    command,
+    plugin,
+)
 from arclet.entari.command import Query
+from arclet.entari.event.base import GuildMemberAddedEvent
 from loguru import logger
-from satori import Image, Text
+from satori import Author, Element, Image, Quote, Text
 from sqlalchemy import BigInteger, String, select
 from sqlalchemy.orm import Mapped, mapped_column
-from tenko_api.features import declare
+from tenko_api.accounts import online_accounts
+from tenko_api.features import declare, feature_enabled, feature_required
+from tenko_api.perm import Permission, require_perm
 from tenko_api.render import RenderService
 from tenko_api.storage import Model, Store, get_session
 
@@ -36,7 +50,7 @@ plugin.metadata(
     "战地一查询",
     author=["13"],
     version="0.1.6",
-    description="经 bf-manager 查询战地一玩家战绩、武器、载具和服务器。",
+    description="经 bf-manager 查询战地一玩家战绩、武器、载具和服务器，带入群审核。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/bf1",
         "repository": "https://github.com/g1331/tenko-plugins",
@@ -250,7 +264,13 @@ async def _player(name: str | None, user_id: str) -> dict[str, Any]:
 
 
 async def stats_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
-    persona = await _player(name, user_id)
+    reply, _, _ = await _stats_card(await _player(name, user_id), service)
+    return reply
+
+
+async def _stats_card(persona: dict[str, Any], service) -> tuple[MessageChain | str, Any, Any]:
+    """战绩卡片，连同取到的生涯数据和封禁状态（入群审核要用）。"""
+
     pid = persona["persona_id"]
     stats, weapons, vehicles, ban, platoon, online = await asyncio.gather(
         _get(f"/stats/{pid}"),
@@ -270,13 +290,14 @@ async def stats_reply(name: str | None, service, user_id: str = "") -> MessageCh
         online,
         _source(),
     )
-    return await _reply(
+    reply = await _reply(
         service,
         "stats.html",
         context,
         format_stats(persona["display_name"], stats),
         _player_link(pid),
     )
+    return reply, stats, ban
 
 
 async def items_reply(
@@ -295,6 +316,15 @@ async def items_reply(
     return await _reply(service, "items.html", context, text, _player_link(pid, kind))
 
 
+async def _bind(user_id: str, persona: dict[str, Any]) -> None:
+    await _import_legacy()
+    async with get_session() as db:
+        await db.merge(
+            Binding(user_id=user_id, pid=persona["persona_id"], name=persona["display_name"])
+        )
+        await db.commit()
+
+
 async def bind_reply(name: str | None, user_id: str) -> str:
     if not name:
         bound = await _bound(user_id)
@@ -302,12 +332,7 @@ async def bind_reply(name: str | None, user_id: str) -> str:
             return "用法：/bf1绑定 <EA 名字>"
         return f"当前绑定：{bound.name or '名字未知'}（PID {bound.pid}）"
     persona = await _persona(name)
-    await _import_legacy()
-    async with get_session() as db:
-        await db.merge(
-            Binding(user_id=user_id, pid=persona["persona_id"], name=persona["display_name"])
-        )
-        await db.commit()
+    await _bind(user_id, persona)
     return (
         f"已绑定 {persona['display_name']}（PID {persona['persona_id']}），"
         "之后 /bf1s /bf1w /bf1v 不带名字就查这个号"
@@ -518,3 +543,182 @@ async def bf1pl(
 @command.on(Alconna("bf1", meta=CommandMeta("战地一全服在线人数、地区分布和热门地图", usage="bf1")))
 async def bf1(session: Session, *, render_service: RenderService):
     return await _answer(overview_reply(render_service))
+
+
+# —— 入群审核：申请时把申请者填的 EA 名字查一遍发到群里，管理员回复这条消息同意或拒绝 ——
+
+REVIEW_SECONDS = 20 * 60
+_REVIEW_HINT = "回复本消息「y」同意，回复其他文字作为理由拒绝，20 分钟内有效"
+
+
+class JoinReview(Model):
+    """开了入群审核的群。"""
+
+    group_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
+@dataclass
+class _Pending:
+    account: Account
+    flag: str
+    persona: dict[str, Any] | None
+    deadline: float
+
+
+# shortcut: 待审申请只在内存里，重启后没审的要去 QQ 里手动处理；审核量大了再落库
+_pending: dict[tuple[str, str], _Pending] = {}
+
+
+def _join_answer(comment: str) -> str:
+    """QQ 把入群问题拼成「问题：…\\n答案：…」；没设问题时整段附言就是答案。"""
+
+    return comment.rpartition("答案：")[2].strip()
+
+
+async def _verdict(applicant: str, persona: dict[str, Any], stats: Any, ban: Any) -> str:
+    if not stats["summary"].get("time_played_seconds"):
+        return "有这个 EA 账号，但没玩过战地一"
+    ban = ban or {}
+    notes = [
+        f"{source.upper()} 实锤 {ban.get(f'{source}_url') or ''}".rstrip()
+        for source in ("bfeac", "bfban")
+        if ban.get(source) == "hit"
+    ]
+    bound = await _bound(applicant)
+    if bound and bound.pid != persona["persona_id"]:
+        notes.append(f"这个 QQ 绑定的是 {bound.name or f'PID {bound.pid}'}，不是同一个号")
+    return "；".join(notes) or "有效 ID"
+
+
+async def review_request(
+    applicant: str, nickname: str, comment: str, service
+) -> tuple[list[Element], dict[str, Any] | None]:
+    """审核消息和查到的玩家。审核消息第一行带申请者 QQ，管理员回复时靠它找回申请。"""
+
+    answer = _join_answer(comment)
+    persona = card = None
+    if not answer:
+        verdict = "没填 EA 名字"
+    else:
+        try:
+            persona = await _persona(answer)
+            card, stats, ban = await _stats_card(persona, service)
+        except Bf1Error as error:
+            verdict = str(error)
+        else:
+            verdict = await _verdict(applicant, persona, stats, ban)
+    head = f"收到 {nickname}({applicant}) 的入群申请\n答案：{answer or '-'}\n检查：{verdict}\n"
+    if isinstance(card, str):
+        card = MessageChain(Text(card))
+    return [Text(head), *(card or []), Text(f"\n{_REVIEW_HINT}")], persona
+
+
+async def _review_on(group_id: str) -> bool:
+    async with get_session() as db:
+        return await db.get(JoinReview, group_id) is not None
+
+
+@plugin.listen(GuildMemberAddedEvent)
+async def on_join_request(
+    session: Session[GuildMemberAddedEvent], *, render_service: RenderService
+):
+    # shortcut: satori 的 onebot11 适配器把加群申请（request.group.add）也报成 GUILD_MEMBER_ADDED，
+    # 只能靠带不带 message（flag 和附言）区分真入群；上游改成 GUILD_MEMBER_REQUEST 后改听那个事件
+    request = getattr(session.event._origin, "message", None)
+    if request is None:
+        return
+    group, applicant = session.guild.id, session.user.id
+    if not feature_enabled("bf1", group) or not await _review_on(group):
+        return
+    message, persona = await review_request(
+        applicant, session.user.name or applicant, request.content, render_service
+    )
+    _pending[(group, applicant)] = _Pending(
+        session.account, request.id, persona, time.monotonic() + REVIEW_SECONDS
+    )
+    await session.send(message)
+
+
+def _quoted_applicant(elements: list[Element], self_ids: set[str]) -> str | None:
+    """回复的是 bot 发的审核消息时，取出申请者 QQ。
+
+    每个 NapCat 各编各的消息号，事件可能由另一个号收到，所以不比消息号，看引用里的原文。
+    """
+
+    quote = next((e for e in elements if isinstance(e, Quote)), None)
+    if quote is None:
+        return None
+    author = next((c for c in quote.children if isinstance(c, Author)), None)
+    if author is None or author.id not in self_ids:
+        return None
+    said = "".join(c.text for c in quote.children if isinstance(c, Text))
+    found = re.match(r"收到 .*\((\d+)\) 的入群申请", said)
+    return found[1] if found else None
+
+
+async def decide(group: str, applicant: str, said: str) -> str:
+    """管理员的回复：y 同意，其他文字作为理由拒绝。"""
+
+    pending = _pending.pop((group, applicant), None)
+    if pending is None or pending.deadline < time.monotonic():
+        return f"{applicant} 的入群申请已经处理过或超时了"
+    approve = said.casefold() == "y"
+    try:
+        await pending.account.protocol.guild_member_approve(
+            pending.flag, approve, "" if approve else said
+        )
+    except Exception as error:  # NapCat 的报错（不是管理员、申请已被别人处理）原样告诉管理员
+        logger.warning("处理入群申请失败：{!r}", error)
+        return f"处理 {applicant} 的入群申请失败：{error}"
+    if not approve:
+        return f"已拒绝 {applicant} 的入群申请，理由：{said}"
+    if pending.persona and not await _bound(applicant):
+        await _bind(applicant, pending.persona)
+    return f"已同意 {applicant} 的入群申请"
+
+
+@plugin.listen(MessageCreatedEvent)
+@feature_required()
+async def on_review_reply(session: Session[MessageCreatedEvent]):
+    if session.event.guild is None or not _pending:
+        return
+    elements = list(session.event.message.message)
+    self_ids = {str(a.self_id) for a in online_accounts()} | {str(session.account.self_id)}
+    applicant = _quoted_applicant(elements, self_ids)
+    if applicant is None or (session.guild.id, applicant) not in _pending:
+        return
+    said = "".join(e.text for e in elements if isinstance(e, Text)).strip()
+    if not said or not await require_perm(session, Permission.GroupAdmin):
+        return
+    await session.send(await decide(session.guild.id, applicant, said))
+
+
+review_command = Alconna(
+    "bf1审核",
+    Args["switch?", ["开", "关"]],
+    meta=CommandMeta(
+        "入群审核：有人申请入群时查他填的 EA 名字并发到群里，管理员回复同意或拒绝；"
+        "需要 bot 是群管理员，入群问题让申请者填 EA 名字",
+        usage="bf1审核 [开|关]",
+        example="/bf1审核 开",
+    ),
+)
+
+
+@command.on(review_command)
+async def bf1review(session: Session, switch: Query[str] = Query("switch")):  # noqa: B008
+    if session.event.guild is None:
+        return "入群审核只能在群里开关"
+    group = session.guild.id
+    if not switch.available:
+        return f"本群入群审核：{'开' if await _review_on(group) else '关'}"
+    if not await require_perm(session, Permission.GroupAdmin):
+        return "只有群管理员及以上能开关入群审核"
+    async with get_session() as db:
+        row = await db.get(JoinReview, group)
+        if switch.result == "开" and row is None:
+            db.add(JoinReview(group_id=group))
+        elif switch.result == "关" and row is not None:
+            await db.delete(row)
+        await db.commit()
+    return f"本群入群审核已{switch.result}"

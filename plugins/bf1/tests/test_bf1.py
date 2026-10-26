@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
-from satori import Image, Text
+from satori import Author, Image, Quote, Text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -236,6 +238,7 @@ async def db(module, monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
     async with engine.begin() as conn:
         await conn.run_sync(module.Binding.__table__.create)
+        await conn.run_sync(module.JoinReview.__table__.create)
     monkeypatch.setattr(module, "get_session", lambda: AsyncSession(engine))
     yield
     await engine.dispose()
@@ -354,3 +357,76 @@ async def test_overview(module, api, rendered):
     assert reply.endswith("\nhttps://bfm.umrbotech.com/stats")
     api["/overview"] = {"available": False}
     assert await module._answer(module.overview_reply(None)) == "全服概况暂时没有数据，稍后再试"
+
+
+async def test_join_request_shows_the_card_and_flags_problems(module, player, rendered, db):
+    rendered["result"] = b"jpeg"
+    message, persona = await module.review_request("10", "新人", "问题：EA名字\n答案：abc", None)
+    assert message[0] == Text("收到 新人(10) 的入群申请\n答案：abc\n检查：BFBAN 实锤\n")
+    assert isinstance(message[1], Image)
+    assert message[-1].text.endswith("20 分钟内有效")
+    assert persona["persona_id"] == 2
+    await module.bind_reply("abc", "10")
+    player["/stats/2/ban"] = {"bfban": "unknown", "bfeac": "unknown"}
+    message, _ = await module.review_request("10", "新人", "abc", None)
+    assert "检查：有效 ID" in message[0].text
+
+
+async def test_join_request_without_a_usable_name(module, player, rendered, db):
+    message, persona = await module.review_request("10", "新人", "问题：EA名字\n答案：", None)
+    assert "答案：-\n检查：没填 EA 名字" in message[0].text and persona is None
+    player["/players/search"] = {"personas": []}
+    message, persona = await module.review_request("10", "新人", "nobody", None)
+    assert "检查：没找到玩家 nobody" in message[0].text and persona is None
+    assert len(message) == 2
+
+
+async def test_join_request_flags_a_mismatched_binding_and_unplayed_account(
+    module, player, rendered, db
+):
+    player["/players/2"] = PERSONA
+    await module._bind("10", {"persona_id": 9, "display_name": "other"})
+    message, _ = await module.review_request("10", "新人", "abc", None)
+    assert "这个 QQ 绑定的是 other，不是同一个号" in message[0].text
+    player["/stats/2"] = {**STATS, "summary": {**STATS["summary"], "time_played_seconds": 0}}
+    message, _ = await module.review_request("10", "新人", "abc", None)
+    assert "检查：有这个 EA 账号，但没玩过战地一" in message[0].text
+
+
+def test_reply_to_the_review_message_finds_the_applicant(module):
+    said = Text("收到 新人(10) 的入群申请\n答案：abc\n")
+    quote = Quote("1")(Author("bot"), said)
+    assert module._quoted_applicant([quote, Text("y")], {"bot"}) == "10"
+    assert module._quoted_applicant([quote, Text("y")], {"other"}) is None
+    other = Quote("1")(Author("bot"), Text("随便说的"))
+    assert module._quoted_applicant([other], {"bot"}) is None
+    assert module._quoted_applicant([Text("y")], {"bot"}) is None
+
+
+async def test_admin_decides_and_approval_binds_the_name(module, db):
+    calls = []
+
+    async def approve(flag, ok, comment):
+        calls.append((flag, ok, comment))
+
+    account = SimpleNamespace(protocol=SimpleNamespace(guild_member_approve=approve))
+    far = module.time.monotonic() + 60
+    module._pending[("g", "10")] = module._Pending(account, "f1", PERSONA, far)
+    assert await module.decide("g", "10", "Y") == "已同意 10 的入群申请"
+    assert await module.bind_reply(None, "10") == "当前绑定：abc（PID 2）"
+    module._pending[("g", "11")] = module._Pending(account, "f2", PERSONA, far)
+    assert await module.decide("g", "11", "ID 不对") == "已拒绝 11 的入群申请，理由：ID 不对"
+    assert calls == [("f1", True, ""), ("f2", False, "ID 不对")]
+    assert await module.bind_reply(None, "11") == "用法：/bf1绑定 <EA 名字>"
+    assert await module.decide("g", "11", "y") == "11 的入群申请已经处理过或超时了"
+    module._pending[("g", "12")] = module._Pending(account, "f3", None, 0)
+    assert await module.decide("g", "12", "y") == "12 的入群申请已经处理过或超时了"
+
+
+async def test_approval_failure_is_reported(module, db):
+    async def approve(flag, ok, comment):
+        raise RuntimeError("不是管理员")
+
+    account = SimpleNamespace(protocol=SimpleNamespace(guild_member_approve=approve))
+    module._pending[("g", "10")] = module._Pending(account, "f", None, module.time.monotonic() + 9)
+    assert await module.decide("g", "10", "y") == "处理 10 的入群申请失败：不是管理员"
