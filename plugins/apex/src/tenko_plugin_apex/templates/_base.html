@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+{#- 视觉取 Apex 游戏内界面：深色斜切面板、Apex 红强调、Oswald 数字。
+    图要在手机上看：最小字号 17px，面板接近不透明。 -#}
+<style>
+  @font-face { font-family: "Oswald"; src: url({{ asset("Oswald.ttf") }}) format("truetype"); font-weight: 200 700; }
+  {% if sc_font %}@font-face { font-family: "SC"; src: url({{ sc_font }}) format("woff2"); font-weight: 100 900; }{% endif %}
+  :root {
+    --red: #da292a; --red-deep: #9e1b1c; --text: #fff; --soft: rgba(255,255,255,.88);
+    --muted: rgba(255,255,255,.62); --line: rgba(255,255,255,.14); --panel: rgba(18,18,22,.92);
+    --green: #3aca6b; --gold: #f2c14e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #0b0b0d; }
+  body { width: 1000px; color: var(--text); font-family: "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 20px;
+    -webkit-font-smoothing: antialiased; }
+  .d { font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-variant-numeric: tabular-nums; }
+  .page { position: relative; padding: 28px 28px 18px; overflow: hidden;
+    background: radial-gradient(120% 80% at 100% 0%, rgba(218,41,42,.28), transparent 60%),
+                linear-gradient(160deg, #1a1a20 0%, #0b0b0d 70%); }
+  .bg { position: absolute; inset: 0; z-index: 0; }
+  .bg i { position: absolute; inset: -14px; background-size: cover; background-position: center; filter: blur(12px) brightness(.45); }
+  .page > *:not(.bg) { position: relative; z-index: 2; }
+  .panel { background: var(--panel); padding: 22px 26px; border-left: 4px solid var(--red);
+    clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); }
+  .panel + .panel { margin-top: 16px; }
+  .title { display: flex; align-items: baseline; gap: 16px; margin-bottom: 20px; }
+  .title h1 { margin: 0; font-family: "Oswald", "SC", sans-serif; font-size: 44px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .title .sub { font-size: 18px; color: var(--muted); }
+  .tag { display: inline-block; padding: 3px 12px; background: var(--red); font-family: "Oswald", "SC", sans-serif;
+    font-size: 17px; letter-spacing: .12em; transform: skewX(-12deg); }
+  .tag > span { display: inline-block; transform: skewX(12deg); }
+  .label { font-size: 17px; color: var(--muted); }
+  .bar { height: 8px; background: rgba(255,255,255,.14); }
+  .bar i { display: block; height: 100%; background: var(--red); }
+  footer { margin-top: 16px; text-align: center; font-size: 16px; color: var(--muted); letter-spacing: .05em; }
+  {% block style %}{% endblock %}
+</style>
+</head>
+<body>
+<div class="page">
+  {% block background %}{% endblock %}
+  {% block body %}{% endblock %}
+  <footer>{% block source %}数据来自 apexlegendsstatus.com{% endblock %} · <span class="d">{{ now }}</span></footer>
+</div>
+</body>
+</html>

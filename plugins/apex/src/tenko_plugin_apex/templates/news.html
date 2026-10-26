@@ -1,0 +1,38 @@
+{% extends "_base.html" %}
+{#- 资讯：最新一条大图，其余缩略图列表。 -#}
+{% block style %}
+  .lead { padding: 0; overflow: hidden; }
+  .lead .cover { height: 300px; background: #222 center / cover; }
+  .lead .in { padding: 20px 26px 22px; }
+  .lead h2 { margin: 10px 0 8px; font-size: 32px; line-height: 1.25; }
+  .item { display: flex; gap: 20px; align-items: center; }
+  .item .cover { width: 240px; height: 112px; flex: none; background: #26262c center / cover; }
+  .item h2 { margin: 0 0 6px; font-size: 24px; line-height: 1.3; }
+  .when { font-family: "Oswald", sans-serif; font-size: 17px; color: var(--muted); letter-spacing: .05em; }
+  .sum { font-size: 18px; color: var(--soft); line-height: 1.5; }
+{% endblock %}
+{% block body %}
+<div class="title"><h1>最新资讯</h1><span class="sub">Apex 英雄官方新闻</span></div>
+{% for n in items %}
+{% if loop.first %}
+<section class="panel lead">
+  {% if n.cover %}<div class="cover" style="background-image: url('{{ n.cover }}')"></div>{% endif %}
+  <div class="in">
+    <span class="tag"><span>最新</span></span> <span class="when">{{ n.date }}</span>
+    <h2>{{ n.title }}</h2>
+    {% if n.summary %}<div class="sum">{{ n.summary }}</div>{% endif %}
+  </div>
+</section>
+{% else %}
+<section class="panel item">
+  <div class="cover" {% if n.cover %}style="background-image: url('{{ n.cover }}')"{% endif %}></div>
+  <div>
+    <div class="when">{{ n.date }}</div>
+    <h2>{{ n.title }}</h2>
+    {% if n.summary %}<div class="sum">{{ n.summary }}</div>{% endif %}
+  </div>
+</section>
+{% endif %}
+{% endfor %}
+{% endblock %}
+{% block source %}资讯来自 EA 官网{% endblock %}

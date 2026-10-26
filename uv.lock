@@ -4,6 +4,7 @@ requires-python = ">=3.11, <3.14"
 
 [manifest]
 members = [
+    "tenko-plugin-apex",
     "tenko-plugin-bf1",
     "tenko-plugin-persona-chat",
     "tenko-plugin-repeater",
@@ -1254,6 +1255,25 @@ dependencies = [
 name = "tenko-api"
 version = "0.4.2"
 source = { git = "https://github.com/g1331/tenko?subdirectory=packages%2Ftenko-api&rev=f16d5dbfa63e8d3230a7f83b2a0bf28fbb39f9d1#f16d5dbfa63e8d3230a7f83b2a0bf28fbb39f9d1" }
+
+[[package]]
+name = "tenko-plugin-apex"
+version = "0.1.0"
+source = { editable = "plugins/apex" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "tenko-api" },
+    { name = "zhconv" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3" },
+    { name = "tenko-api", specifier = ">=0.4,<0.5" },
+    { name = "zhconv", specifier = ">=1.4" },
+]
 
 [[package]]
 name = "tenko-plugin-bf1"

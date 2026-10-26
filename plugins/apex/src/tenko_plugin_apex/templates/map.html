@@ -1,0 +1,35 @@
+{% extends "_base.html" %}
+{#- 地图轮换：每个模式一张地图横幅，剩余时间和本轮进度，右下角写下一张。 -#}
+{% block style %}
+  .mode { position: relative; height: 210px; overflow: hidden; background: #222 center / cover;
+    clip-path: polygon(0 0, calc(100% - 26px) 0, 100% 26px, 100% 100%, 0 100%); }
+  .mode + .mode { margin-top: 16px; }
+  .mode::before { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(0,0,0,.88) 0%, rgba(0,0,0,.55) 55%, rgba(0,0,0,.2) 100%); }
+  .mode > * { position: relative; }
+  .mode .in { padding: 22px 28px; height: 100%; display: flex; flex-direction: column; }
+  .mode .name { margin-top: 10px; font-size: 46px; font-weight: 700; line-height: 1.1; }
+  .mode .event { font-size: 20px; color: var(--gold); margin-top: 4px; }
+  .mode .foot { margin-top: auto; display: flex; align-items: flex-end; gap: 24px; }
+  .mode .left { font-family: "Oswald", sans-serif; font-size: 38px; font-weight: 700; line-height: 1; }
+  .mode .left small { font-family: "SC", sans-serif; font-size: 17px; color: var(--muted); margin-right: 8px; font-weight: 400; }
+  .mode .bar { flex: 1; margin-bottom: 8px; }
+  .mode .next { font-size: 18px; color: var(--soft); white-space: nowrap; margin-bottom: 2px; }
+  .mode .next b { color: #fff; }
+{% endblock %}
+{% block body %}
+<div class="title"><h1>地图轮换</h1><span class="sub">Apex 英雄</span></div>
+{% for m in modes %}
+<section class="mode" {% if m.image %}style="background-image: url('{{ m.image }}')"{% endif %}>
+  <div class="in">
+    <span class="tag" style="align-self: flex-start"><span>{{ m.label }}</span></span>
+    <div class="name">{{ m.map }}</div>
+    {% if m.event %}<div class="event">{{ m.event }}</div>{% endif %}
+    <div class="foot">
+      {% if m.remaining %}<div class="left"><small>剩余</small>{{ m.remaining }}</div>
+      <div class="bar"><i style="width: {{ m.elapsed }}%"></i></div>{% else %}<div style="flex: 1"></div>{% endif %}
+      {% if m.next %}<div class="next">下一张 <b>{{ m.next }}</b>{% if m.next_at %} · {{ m.next_at }} 开始{% endif %}</div>{% endif %}
+    </div>
+  </div>
+</section>
+{% endfor %}
+{% endblock %}

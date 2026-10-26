@@ -1,0 +1,97 @@
+{% extends "_base.html" %}
+{#- 猎杀线：每个平台一行，平台图标、猎杀分数线（主角）、比上次的变化、高出大师门槛多少，
+    以及大师和猎杀者的人数对比。平台图标取自 lucide（ISC 许可），猎杀者徽章是游戏素材（取自 apexlegendsstatus 的段位图）。 -#}
+{% macro platform_icon(code) -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+{%- if code == "PC" -%}<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>
+{%- else -%}<line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/>
+{%- endif -%}
+</svg>
+{%- endmacro %}
+{% block style %}
+  .crest { position: relative; display: flex; align-items: center; gap: 30px; margin: 0 0 22px; padding: 10px 0 6px; }
+  .crest::before { content: ""; position: absolute; left: -60px; top: -70px; width: 520px; height: 420px;
+    background: radial-gradient(closest-side, rgba(218,41,42,.55), rgba(218,41,42,.18) 55%, transparent); }
+  .crest .emblem { position: relative; flex: none; }
+  .crest .emblem span { position: absolute; left: 22%; right: 22%; top: 79%; height: 11%; display: flex; align-items: center; justify-content: center;
+    font-size: 22px; font-weight: 700; letter-spacing: .3em; padding-left: .3em; color: #ffd2c4; text-shadow: 0 0 10px rgba(255,70,40,.9); }
+  .crest img { display: block; width: 250px; flex: none; filter: drop-shadow(0 0 26px rgba(255,60,40,.55)) drop-shadow(0 10px 18px rgba(0,0,0,.7)); }
+  .crest .in { position: relative; }
+  .crest h1 { margin: 12px 0 8px; font-size: 64px; font-weight: 700; line-height: 1; letter-spacing: .06em; }
+  .crest .sub { font-size: 19px; color: var(--soft); line-height: 1.6; }
+  .crest .sub b { color: var(--gold); font-family: "Oswald", "SC", sans-serif; }
+  .line { display: grid; grid-template-columns: 130px 1fr 130px; align-items: start; padding: 4px 0; }
+  .line .node { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; }
+  .line .node img { width: 104px; height: 104px; object-fit: contain; filter: drop-shadow(0 4px 10px rgba(0,0,0,.8)); }
+  .line .name { margin-top: 4px; font-size: 21px; font-weight: 700; }
+  .line .floor { font-family: "Oswald", "SC", sans-serif; font-size: 20px; color: var(--soft); }
+  .line .master .name { color: #b25cff; } .line .pred .name { color: #ff3b3b; }
+  .track { position: relative; height: 150px; margin-top: -23px; }
+  .track .in { position: absolute; inset: 0 70px; }
+  .track .bar, .track .glow { position: absolute; left: -60px; right: -60px; top: 50%; height: 8px; margin-top: -4px; border-radius: 4px;
+    background: linear-gradient(90deg, #b25cff, #ff2a2a); }
+  .track .glow { filter: blur(10px); opacity: .8; height: 14px; margin-top: -7px; }
+  .mark { position: absolute; top: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; }
+  .mark i { width: 16px; height: 16px; margin-top: -11px; border-radius: 50%; background: #fff; border: 3px solid #0b0b0d; box-shadow: 0 0 10px rgba(255,255,255,.7); }
+  .mark span { white-space: nowrap; font-size: 17px; color: var(--soft); line-height: 1.2; text-align: center; }
+  .mark b { display: block; font-family: "Oswald", sans-serif; font-size: 22px; color: #fff; }
+  .mark.up { flex-direction: column-reverse; top: auto; bottom: 50%; }
+  .mark.up i { margin: 0 0 -11px; }
+  .row { display: grid; grid-template-columns: 120px 1fr 250px; gap: 26px; align-items: center; }
+  .plat { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 0; background: rgba(255,255,255,.06); }
+  .plat svg { width: 52px; height: 52px; color: #fff; }
+  .plat span { font-size: 17px; font-weight: 700; }
+  .cut .label { font-size: 16px; }
+  .cut .v { font-family: "Oswald", sans-serif; font-size: 66px; font-weight: 700; line-height: 1.05; color: var(--red); }
+  .cut .v small { font-family: "SC", sans-serif; font-size: 20px; color: var(--muted); margin-left: 6px; font-weight: 400; }
+  .cut .sub { display: flex; gap: 16px; align-items: baseline; font-size: 17px; color: var(--soft); margin-top: 2px; }
+  .cut .sub b { font-family: "Oswald", sans-serif; font-size: 20px; }
+  .up { color: var(--green); } .down { color: #ff6b6b; } .same { color: var(--soft); }
+  .pop .label { display: flex; justify-content: space-between; font-size: 16px; }
+  .pop .v { font-family: "Oswald", sans-serif; font-size: 34px; font-weight: 700; line-height: 1.2; }
+  .pop .v small { font-family: "SC", sans-serif; font-size: 17px; color: var(--muted); margin-left: 4px; font-weight: 400; }
+  .pop .bar { height: 8px; margin-top: 6px; }
+  .pop .bar i { background: var(--gold); }
+  .note { margin-top: 16px; font-size: 17px; color: var(--muted); }
+{% endblock %}
+{% block body %}
+<div class="crest">
+  <div class="emblem"><img src="{{ asset('ranks/predator.webp') }}"><span>猎杀者</span></div>
+  <div class="in">
+    <span class="tag"><span>Apex 英雄 · 排位赛</span></span>
+    <h1>猎杀线</h1>
+    <div class="sub">各平台排进前 <b>750</b> 名才能拿到猎杀者<br>大师门槛 <b>{{ master }}</b> 分</div>
+  </div>
+</div>
+<section class="panel">
+  <div class="line">
+    <div class="node master"><img src="{{ asset('ranks/master.webp') }}"><div class="name">大师</div><div class="floor">{{ master }}</div></div>
+    <div class="track">
+      <div class="glow"></div><div class="bar"></div>
+      {#- 各平台猎杀线按分数落在线上，上下交替放标签免得挤在一起 -#}
+      <div class="in">{% for p in platforms if p.pos is not none %}<div class="mark{{ ' up' if loop.index is odd }}" style="left: {{ p.pos }}%"><i></i><span>{{ p.label }}<b>{{ p.score }}</b></span></div>{% endfor %}</div>
+    </div>
+    <div class="node pred"><img src="{{ asset('ranks/predator.webp') }}"><div class="name">猎杀者</div><div class="floor">前 750 名</div></div>
+  </div>
+</section>
+{% for p in platforms %}
+<section class="panel">
+  <div class="row">
+    <div class="plat">{{ platform_icon(p.code) }}<span>{{ p.label }}</span></div>
+    <div class="cut">
+      <div class="label">猎杀线</div>
+      <div class="v">{{ p.score }}<small>分</small></div>
+      <div class="sub">
+        {% if p.above %}<span>高出大师门槛 <b>{{ p.above }}</b></span>{% endif %}
+        {% if p.delta %}<span class="{{ p.delta.css }}">比 {{ p.delta.ago }} <b>{{ p.delta.text }}</b></span>{% endif %}
+      </div>
+    </div>
+    <div class="pop">
+      <div class="label"><span>大师及猎杀者</span>{% if p.updated %}<span>{{ p.updated }} 更新</span>{% endif %}</div>
+      <div class="v">{{ p.masters }}<small>人</small></div>
+      <div class="bar"><i style="width: {{ p.masters_pct }}%"></i></div>
+    </div>
+  </div>
+</section>
+{% endfor %}
+{% endblock %}

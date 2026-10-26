@@ -1,0 +1,135 @@
+{% extends "_base.html" %}
+{#- 玩家卡：英雄横幅作头图，段位是主角（徽章、分数、距下一段、比上次的变化），
+    其下是生涯核心数据、赛季击杀趋势和英雄击杀排行。 -#}
+{% block style %}
+  .page { padding-top: 0; }
+  .hero { position: relative; margin: 0 -28px; height: 300px; background: #222 right center / cover; }
+  .hero::before { content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, #0b0b0d 0%, rgba(11,11,13,.92) 38%, rgba(11,11,13,.35) 70%, rgba(11,11,13,.1) 100%),
+                linear-gradient(0deg, #0b0b0d 0%, transparent 35%); }
+  .hero .in { position: absolute; left: 28px; right: 28px; bottom: 26px; display: flex; gap: 22px; align-items: flex-end; }
+  .hero .icon { width: 112px; height: 112px; flex: none; background: rgba(255,255,255,.08) center / cover;
+    clip-path: polygon(0 0, 100% 0, 100% 80%, 80% 100%, 0 100%); border-bottom: 4px solid var(--red); }
+  .hero h1 { margin: 8px 0 6px; font-family: "Oswald", "SC", sans-serif; font-size: 58px; font-weight: 700; line-height: 1; word-break: break-all; }
+  .hero .meta { display: flex; gap: 10px; align-items: center; font-size: 18px; color: var(--soft); }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #6b6b72; display: inline-block; margin-right: 6px; }
+  .dot.on { background: var(--green); box-shadow: 0 0 10px var(--green); }
+  .hero .lv { margin-left: auto; text-align: right; flex: none; }
+  .hero .lv .v { font-family: "Oswald", sans-serif; font-size: 52px; font-weight: 700; line-height: 1; }
+  .hero .lv .p { color: var(--gold); font-size: 18px; margin-left: 6px; }
+  .hero .lv .bar { width: 200px; margin-top: 8px; height: 6px; }
+
+  .rank { display: grid; grid-template-columns: 190px 1fr 230px; gap: 26px; align-items: center; margin-top: 6px; }
+  .rank img { width: 190px; height: 190px; object-fit: contain; filter: drop-shadow(0 6px 18px rgba(0,0,0,.6)); }
+  .rank .tier { font-size: 30px; font-weight: 700; }
+  .rank .rp { font-family: "Oswald", sans-serif; font-size: 84px; font-weight: 700; line-height: 1; color: var(--gold); margin: 4px 0 14px; }
+  .rank .rp small { font-family: "SC", sans-serif; font-size: 22px; color: var(--muted); margin-left: 8px; font-weight: 400; }
+  .rank .next { display: flex; justify-content: space-between; font-size: 17px; color: var(--soft); margin-bottom: 8px; }
+  .rank .next b { color: #fff; font-family: "Oswald", "SC", sans-serif; font-size: 20px; }
+  .rank .bar { height: 12px; }
+  .rank .bar i { background: linear-gradient(90deg, var(--red-deep), var(--red)); }
+  .rank .side { display: flex; flex-direction: column; gap: 12px; }
+  .chip { padding: 12px 16px; background: rgba(255,255,255,.07); border-left: 3px solid var(--line); }
+  .chip .label { font-size: 16px; }
+  .chip .v { font-family: "Oswald", "SC", sans-serif; font-size: 28px; font-weight: 700; line-height: 1.2; }
+  .chip.up { border-color: var(--green); } .chip.up .v { color: var(--green); }
+  .chip.down { border-color: var(--red); } .chip.down .v { color: #ff6b6b; }
+  .chip.same .v { color: var(--soft); }
+
+  .core { display: grid; grid-template-columns: repeat({{ core|length or 1 }}, 1fr); }
+  .core div { padding: 4px 22px; border-left: 1px solid var(--line); }
+  .core div:first-child { border-left: none; padding-left: 0; }
+  .core .v { font-family: "Oswald", sans-serif; font-size: 44px; font-weight: 700; line-height: 1.15; }
+  .h2 { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
+  .h2 b { font-size: 26px; }
+  .h2 span { font-size: 17px; color: var(--muted); }
+  .trend { display: flex; align-items: flex-end; gap: 14px; height: 190px; }
+  .trend .col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+  .trend .n { font-family: "Oswald", sans-serif; font-size: 18px; margin-bottom: 6px; }
+  .trend .b { width: 100%; background: linear-gradient(180deg, var(--red), var(--red-deep)); }
+  .trend .col:last-child .b { background: linear-gradient(180deg, var(--gold), #b8871f); }
+  .trend .s { font-family: "Oswald", sans-serif; font-size: 17px; color: var(--muted); margin-top: 8px; }
+  .legends { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; }
+  .lg { display: flex; gap: 14px; align-items: center; }
+  .lg .icon { width: 60px; height: 60px; flex: none; background: rgba(255,255,255,.08) center / cover; border-bottom: 3px solid var(--red); }
+  .lg .body { flex: 1; min-width: 0; }
+  .lg .line { display: flex; align-items: baseline; gap: 10px; }
+  .lg .name { font-size: 21px; font-weight: 700; }
+  .lg .k { margin-left: auto; font-family: "Oswald", sans-serif; font-size: 26px; font-weight: 700; }
+  .lg .k small { font-family: "SC", sans-serif; font-size: 16px; color: var(--muted); margin-left: 4px; font-weight: 400; }
+  .lg .top { font-size: 16px; color: var(--gold); }
+  .lg .bar { margin-top: 6px; height: 6px; }
+  .empty { color: var(--muted); font-size: 18px; }
+  .ban { margin-top: 18px; padding: 12px 18px; background: var(--red-deep); font-size: 20px; font-weight: 700; }
+{% endblock %}
+{% block body %}
+<section class="hero" {% if banner %}style="background-image: url('{{ banner }}')"{% endif %}>
+  <div class="in">
+    <div class="icon" {% if legend_icon %}style="background-image: url('{{ legend_icon }}')"{% endif %}></div>
+    <div>
+      <span class="tag"><span>Apex 英雄 · {{ platform }}</span></span>
+      <h1>{{ name }}</h1>
+      <div class="meta"><span><i class="dot{{ ' on' if online }}"></i>{{ state }}</span><span>·</span><span>当前英雄 <b>{{ legend }}</b></span>{% if party %}<span>·</span><span>{{ party }}</span>{% endif %}</div>
+    </div>
+    <div class="lv">
+      <div class="label">等级{% if prestige %}<span class="p">{{ prestige }} 转</span>{% endif %}</div>
+      <div class="v">{{ level }}</div>
+      <div class="bar"><i style="width: {{ progress }}%"></i></div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="rank">
+    <div>{% if rank_image %}<img src="{{ rank_image }}">{% endif %}</div>
+    <div>
+      <div class="tier">{{ tier }}</div>
+      <div class="rp">{{ rank_score }}<small>分</small></div>
+      {% if rank_progress %}
+      <div class="next"><span>距 <b>{{ rank_progress.next }}</b> 还差 <b>{{ rank_progress.need }}</b> 分</span><span>{{ rank_progress.pct }}%</span></div>
+      <div class="bar"><i style="width: {{ rank_progress.pct }}%"></i></div>
+      {% endif %}
+    </div>
+    <div class="side">
+      {% if rank_delta %}<div class="chip {{ rank_delta.css }}"><div class="label">比 {{ rank_delta.ago }}</div><div class="v">{{ rank_delta.text }}{% if rank_delta.css != 'same' %} 分{% endif %}</div></div>
+      {% else %}<div class="chip same"><div class="label">分数变化</div><div class="v" style="font-size: 20px">首次查询，下次可比</div></div>{% endif %}
+      {% if rank_position %}<div class="chip"><div class="label">排名</div><div class="v" style="font-size: 22px">{{ rank_position }}</div></div>{% endif %}
+    </div>
+  </div>
+  {% if ban %}<div class="ban">⚠ 排位禁赛：{{ ban }}</div>{% endif %}
+</section>
+
+<section class="panel">
+  <div class="h2"><b>生涯数据</b><span>只算横幅上装过追踪器的部分</span></div>
+  {% if core %}
+  <div class="core">{% for label, value in core %}<div><div class="label">{{ label }}</div><div class="v">{{ value }}</div></div>{% endfor %}</div>
+  {% else %}<div class="empty">这名玩家没有装击杀、胜场、伤害之类的追踪器</div>{% endif %}
+</section>
+
+{% if trend %}
+<section class="panel">
+  <div class="h2"><b>赛季{{ trend.label }}</b><span>最近 {{ trend.bars|length }} 个有记录的赛季</span></div>
+  <div class="trend">
+    {% for b in trend.bars %}<div class="col"><div class="n">{{ b.value }}</div><div class="b" style="height: calc({{ b.pct }} * 1.3px)"></div><div class="s">{{ b.season }}</div></div>{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if legends %}
+<section class="panel">
+  <div class="h2"><b>英雄击杀排行</b><span>全球排名来自 apexlegendsstatus.com 收录的玩家</span></div>
+  <div class="legends">
+    {% for l in legends %}
+    <div class="lg">
+      <div class="icon" {% if l.icon %}style="background-image: url('{{ l.icon }}')"{% endif %}></div>
+      <div class="body">
+        <div class="line"><span class="name">{{ l.name }}</span><span class="k">{{ l.kills }}<small>击杀</small></span></div>
+        {% if l.top %}<div class="top">{{ l.top }}</div>{% endif %}
+        <div class="bar"><i style="width: {{ l.ratio }}%"></i></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

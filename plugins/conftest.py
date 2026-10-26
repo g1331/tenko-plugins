@@ -18,7 +18,9 @@ def host(tmp_path_factory):
     os.chdir(root)
     EntariConfig(root / "entari.yml")
     Entari(ignore_self_message=True)
-    (root / "state.json").write_text(json.dumps({"enabled": ["repeater", "persona_chat", "bf1"]}))
+    (root / "state.json").write_text(
+        json.dumps({"enabled": ["repeater", "persona_chat", "bf1", "apex"]})
+    )
     yield SimpleNamespace(root=root)
     os.chdir(previous)
 
@@ -31,8 +33,9 @@ async def runtime(host):
             "repeater": {"cooldown_seconds": 60},
             # 不调用真实接口：测试里替换 llm.chat。
             "persona_chat": {"api_key": "test", "batch_size": 3, "quiet_seconds": 0},
+            "apex": {"api_key": "test"},
         }
     )
     yield runtime
-    for plugin_id in ("repeater", "persona_chat", "bf1"):
+    for plugin_id in ("repeater", "persona_chat", "bf1", "apex"):
         runtime.unload(plugin_id)

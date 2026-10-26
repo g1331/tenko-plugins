@@ -1,0 +1,36 @@
+{% extends "_base.html" %}
+{#- 服务器状态：EA 各项服务在各地区的状态和延迟，再加主机平台的网络。 -#}
+{% block style %}
+  .summary { font-size: 22px; font-weight: 700; }
+  .summary.ok { color: var(--green); } .summary.bad { color: var(--gold); }
+  table { width: 100%; border-collapse: collapse; }
+  th { font-size: 17px; font-weight: 400; color: var(--muted); padding: 0 0 12px; text-align: center; }
+  th:first-child { text-align: left; }
+  td { padding: 12px 4px; border-top: 1px solid var(--line); text-align: center; }
+  td:first-child { text-align: left; font-size: 19px; font-weight: 700; white-space: nowrap; padding-left: 0; }
+  .st { font-size: 18px; font-weight: 700; }
+  .st::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: 2px; background: #6b6b72; }
+  .up { color: var(--green); } .up::before { background: var(--green); }
+  .slow { color: var(--gold); } .slow::before { background: var(--gold); }
+  .down { color: var(--red); } .down::before { background: var(--red); }
+  .unknown { color: var(--muted); }
+  .ms { display: block; font-family: "Oswald", sans-serif; font-size: 16px; color: var(--muted); margin-top: 2px; }
+  .platforms { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .platform { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; background: rgba(255,255,255,.07); font-size: 20px; }
+{% endblock %}
+{% block body %}
+<div class="title"><h1>服务器状态</h1><span class="summary {{ 'ok' if healthy else 'bad' }}">{{ summary }}</span></div>
+<section class="panel">
+  <table>
+    <tr><th>服务</th>{% for r in regions %}<th>{{ r }}</th>{% endfor %}</tr>
+    {% for s in sections %}
+    <tr><td>{{ s.label }}</td>{% for c in s.cells %}<td><span class="st {{ c.css }}">{{ c.status }}</span>{% if c.ms %}<span class="ms">{{ c.ms }}</span>{% endif %}</td>{% endfor %}</tr>
+    {% endfor %}
+  </table>
+</section>
+<section class="panel">
+  <div class="platforms">
+    {% for p in platforms %}<div class="platform"><span>{{ p.label }}</span><span class="st {{ p.css }}">{{ p.status }}</span></div>{% endfor %}
+  </div>
+</section>
+{% endblock %}

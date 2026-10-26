@@ -8,6 +8,7 @@ PyPI 的包，并收录在 [Tenko 插件目录](https://github.com/g1331/tenko-r
 | [复读机](plugins/repeater) | `tenko-plugin-repeater` | 群友复读时偶尔跟一句，偶尔打断一下 |
 | [AI群友](plugins/persona_chat) | `tenko-plugin-persona-chat` | 接入 DeepSeek，用人设口吻陪群友聊天，内置“大肥鱼” |
 | [战地一查询](plugins/bf1) | `tenko-plugin-bf1` | 经 bf-manager 查询战地一战绩、武器、载具和服务器 |
+| [Apex 查询](plugins/apex) | `tenko-plugin-apex` | Apex 英雄玩家战绩、地图轮换、猎杀线、服务器状态和官方资讯 |
 
 ## 安装
 
