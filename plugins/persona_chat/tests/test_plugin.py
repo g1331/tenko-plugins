@@ -555,6 +555,36 @@ async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm)
     assert "group:100" not in module._waiters and len(fake_llm.requests) == 2
 
 
+async def test_config_changes_apply_in_place_unless_they_need_a_reload(module, monkeypatch):
+    import dataclasses
+
+    config = module.config
+    for name in ("banned_words", "model"):
+        monkeypatch.setattr(config, name, getattr(config, name))  # 测完还原
+    current = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+
+    def reload(**changes):
+        event = module.ConfigReload("plugin", module._PLUGIN_ID, {**current, **changes})
+        return module._reload_config(event)
+
+    # 违禁词、模型这类用到时才读的项就地换上，不重载插件（内存里的冷却、精力都还在）
+    assert await reload(banned_words=["蓝银"], model="m2") is True
+    assert config.banned_words == ["蓝银"] and config.model == "m2"
+    # 换密钥要重建 HTTP 客户端：交给宿主整个重载
+    assert await reload(api_key="new-key") is None
+    assert config.api_key == current["api_key"]
+    # 别的插件的配置不管
+    other = module.ConfigReload("plugin", "tenko_plugin_bf1", {"model": "x"})
+    assert await module._reload_config(other) is None and config.model == "m2"
+
+
+def test_host_config_events_reach_her_under_her_plugin_id(runtime, module):
+    # 宿主面板保存配置时发的 ConfigReload 用 qualified_name 当 key，要和她认的 ID 对上，
+    # 不然每次都落到整个重载。（事件分发绑在宿主自己的事件循环上，测试里只核对 key。）
+    info = next(i for i in runtime.discover() if i.name == "persona_chat")
+    assert info.qualified_name == module._PLUGIN_ID
+
+
 async def test_answering_a_buried_follow_up_quotes_it(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "quiet_seconds", 0.05)
     fake_llm.replies.append([{"text": "你追到哪了"}])

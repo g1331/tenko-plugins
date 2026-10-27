@@ -25,6 +25,7 @@ import httpx
 from arclet.alconna import Alconna, AllParam, Args, CommandMeta, command_manager
 from arclet.entari import (
     BasicConfModel,
+    ConfigReload,
     MessageCreatedEvent,
     SendResponse,
     Session,
@@ -32,7 +33,7 @@ from arclet.entari import (
     plugin,
 )
 from arclet.entari.command import Query, execute
-from arclet.entari.config import EntariConfig, model_field
+from arclet.entari.config import EntariConfig, config_model_validate, model_field
 from arclet.entari.plugin import collect_disposes, get_plugin_commands, get_plugins
 from loguru import logger
 from satori import At, Author, Emoji, Image, Quote, Text
@@ -266,6 +267,32 @@ async def _dispose() -> None:
 
 
 collect_disposes(_dispose)
+
+# 这几项导入时就用掉了（HTTP 客户端的地址和密钥、表情包收藏的上限），改了只能重载整个插件。
+_RELOAD_KEYS = frozenset({"base_url", "api_key", "sticker_limit"})
+# 宿主发给插件的 ConfigReload 用插件 ID（模块路径）当 key；只有导入时拿得到当前插件。
+_PLUGIN_ID = plugin.get_plugin().id
+
+
+@plugin.listen(ConfigReload)
+async def _reload_config(event: ConfigReload) -> bool | None:
+    """面板改了别的配置（违禁词、唤醒词、模型……）就地换上，不重载插件。
+
+    重载会清掉内存里的搜索次数、冷却、精力和正在等的跟聊；这些项本来就是用到时才读。
+    """
+
+    if event.scope != "plugin" or event.key != _PLUGIN_ID or not isinstance(event.value, dict):
+        return None
+    new = config_model_validate(PersonaChatConfig, event.value)
+    changed = [
+        f.name for f in dataclasses.fields(new) if getattr(new, f.name) != getattr(config, f.name)
+    ]
+    if _RELOAD_KEYS.intersection(changed):
+        return None
+    for name in changed:
+        setattr(config, name, getattr(new, name))
+    logger.info("AI群友配置已更新，不用重载：{}", changed)
+    return True
 
 
 def _conversation(key: str) -> Conversation:
