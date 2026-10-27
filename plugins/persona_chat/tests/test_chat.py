@@ -97,6 +97,19 @@ def test_long_banned_words_also_match_by_sound(chat):
     assert chat.banned("去西安玩", words) == "西安"
 
 
+def test_only_pictures(chat):
+    assert chat.only_pictures("[图片]") and chat.only_pictures("[表情包:吃瓜] [图片]")
+    assert not chat.only_pictures("[图片] 这是啥") and not chat.only_pictures("哈哈")
+
+
+def test_lines_with_links_are_not_sent(chat):
+    text = (
+        "bfm.umrbotech.com 就这站\n战地一查战绩用的\n看 https://x.cn/a?b=1\n图是 Nymph 240706.jpg"
+    )
+    # 带网址、域名的整条不发；文件名不是链接
+    assert chat.split(text, 50) == ["战地一查战绩用的", "图是 Nymph 240706.jpg"]
+
+
 def test_cost_doubles_in_weekday_peak_hours(chat):
     usage = {
         "prompt_cache_miss_tokens": 1_000_000,

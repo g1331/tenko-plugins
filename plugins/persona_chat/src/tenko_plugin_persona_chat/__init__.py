@@ -56,6 +56,7 @@ from .chat import (
     data_url,
     estimate_cost,
     estimate_tokens,
+    only_pictures,
     picture_url,
     split,
     summary_messages,
@@ -65,6 +66,7 @@ from .persona import (
     FOLLOW_HINT,
     LONG_HINT,
     PICK_STICKER_PROMPT,
+    PICTURE_HINT,
     PRESETS,
     SHORT_HINT,
     UNPROMPTED_HINT,
@@ -965,6 +967,13 @@ async def respond(
                 if follow
                 else UNPROMPTED_HINT
             )
+        # 没人叫她、最新一条只是图：只许回表情包。
+        trigger = next(
+            (x for x in reversed(conversation.lines) if x.speaker not in (None, _TENKO)), None
+        )
+        pictured = target is None and trigger is not None and only_pictures(trigger.text)
+        if pictured:
+            hint += PICTURE_HINT
         if target is not None and target.role.endswith(_TRUSTED):
             hint += boss_hint(target.number, target.role.split()[-1])
         if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
@@ -1058,6 +1067,13 @@ async def respond(
             logger.info("AI群友在 {} 想说的话含违禁词“{}”，没有发：{}", key, word, said)
             calls = []
         await _add_sticker(conversation, calls[:_MAX_SENDS], key)
+        if pictured:
+            # 她想说的话先拿去挑了表情包，字不发：看图说话总在描述画面。
+            for c in calls:
+                c["text"] = "\n".join(f"[表情:{name}]" for name in TOKEN.findall(c["text"]))
+            if dropped := [c for c in calls if not c["text"]]:
+                logger.info("AI群友在 {} 回图只发表情包，丢掉了 {} 段字", key, len(dropped))
+            calls = [c for c in calls if c["text"]]
         first = next((c["text"] for c in calls[:_MAX_SENDS] if c["text"].strip()), "")
         if target is not None and first:
             # 被叫到也别秒回：从那条消息到发出去，留出看消息、打字的时间。

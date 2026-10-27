@@ -792,6 +792,31 @@ async def test_a_fitting_sticker_is_picked_after_she_speaks(module, fake_llm):
     assert len(fake_llm.picked) == 2
 
 
+async def test_unasked_reply_to_a_picture_is_a_sticker_only(module, fake_llm, monkeypatch):
+    async def download(http, url):
+        return b"\x89PNG" + url.encode()
+
+    monkeypatch.setattr(module, "_download", download)
+    module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
+    onebot = OneBot()
+    # 看了图总想描述画面：先按她想说的挑一张表情包，字不发
+    fake_llm.replies.append([{"text": "这猫眼睛瞪得比我还圆"}])
+    fake_llm.picks.append(("猫猫震惊", 5))
+    for i in range(2):
+        await feed(module, session([Text(f"闲聊{i}")], user=str(i), message_id=f"m{i}"))
+    s = session([Image(src="cat")], user="9", message_id="pic", internal=onebot)
+    for i in range(5):
+        await feed(module, session([Text(f"又聊{i}")], user=str(i), message_id=f"n{i}"))
+    await feed(module, s)
+    await module._waiters["group:100"]
+
+    ((messages, force),) = fake_llm.requests
+    assert not force and module.PICTURE_HINT in messages[-1]["content"]
+    assert fake_llm.picked == ["这猫眼睛瞪得比我还圆"]
+    lines = module.conversations["group:100"].lines
+    assert lines[-1].text == "[表情:猫猫震惊]" and lines[-2].speaker is not None
+
+
 async def test_sticker_is_sent_as_a_sticker_once_in_a_while(module, fake_llm):
     module.sticker_book.add("猫猫震惊", "吃惊", GIF, "abc.gif")
     onebot = OneBot()
