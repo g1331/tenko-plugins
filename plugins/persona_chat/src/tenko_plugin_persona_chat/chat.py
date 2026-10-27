@@ -470,14 +470,6 @@ def _contact_sheet(gif: Image.Image, count: int, most: int) -> bytes:
     return buffer.getvalue()
 
 
-# 网址和裸域名：群主不让 bot 在群里发链接，规则里写了她还是会照着功能结果把域名打出来。
-_LINK = re.compile(
-    r"(?:https?://\S+)|(?:\b(?:[a-z0-9-]+\.)+"
-    r"(?:com|cn|net|org|io|me|cc|tv|top|xyz|gg|co|app|dev|site|info|link)\b(?:/\S*)?)",
-    re.I,
-)
-
-
 _PICTURE = re.compile(r"\[(?:图片|表情包(?::[^\[\]]*)?|表情(?::[^\[\]]*)?)\]")
 
 
@@ -488,16 +480,9 @@ def only_pictures(text: str) -> bool:
 
 
 def split(text: str, limit: int, most: int = 3) -> list[str]:
-    """按换行拆成至多 ``most`` 条分开发，多出来的并进最后一条；每条各自整形。
+    """按换行拆成至多 ``most`` 条分开发，多出来的并进最后一条；每条各自整形。"""
 
-    带链接的那条整条不发：只抠掉网址，剩下的“就这站”没头没尾。
-    """
-
-    pieces = [
-        piece
-        for part in text.splitlines()
-        if (piece := shape(part, limit)) and not _LINK.search(piece)
-    ]
+    pieces = [piece for part in text.splitlines() if (piece := shape(part, limit))]
     if len(pieces) > most:
         pieces[most - 1 :] = [shape(" ".join(pieces[most - 1 :]), limit)]
     return pieces
