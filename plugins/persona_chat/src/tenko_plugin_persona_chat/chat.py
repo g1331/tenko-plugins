@@ -8,7 +8,8 @@ import io
 import re
 import time
 import unicodedata
-from collections import deque
+from collections import Counter, deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -225,6 +226,16 @@ class Conversation:
         return any(
             line.speaker is None and text in line.text and now - line.at < window
             for line in self.lines
+        )
+
+    def repeated(self, line: Line) -> bool:
+        """``line`` 是在跟着复读：紧挨着的前一条是别人发的、一字不差的同一句。"""
+
+        before = next((x for x in reversed(self.lines) if x.number < line.number), None)
+        return (
+            before is not None
+            and before.speaker not in (None, line.speaker)
+            and before.text.strip() == line.text.strip()
         )
 
     def buried(self, line: Line) -> bool:
@@ -471,6 +482,40 @@ def _contact_sheet(gif: Image.Image, count: int, most: int) -> bytes:
 
 
 _PICTURE = re.compile(r"\[(?:图片|表情包(?::[^\[\]]*)?|表情(?::[^\[\]]*)?)\]")
+
+
+# 记录里加在原话前面的引用和 @：“回复#12（群友说的“…”） ”“@你 ”。
+_ADDRESS = re.compile(r"^(?:回复#\d+（.*?）\s*)?(?:@\S+\s*)*")
+_NUMBER = re.compile(r"[\d\s]+")
+
+
+def slang(lines: Iterable[Line], top: int = 5, least: int = 3, longest: int = 6) -> list[str]:
+    """这个群的群友常发的短说法（“hyw”“草”“6”“绷不住了”）：一整条不超过 ``longest`` 个字，
+    至少 ``least`` 次、两个人以上发过，按次数取前 ``top`` 个。
+
+    她只会说完整的句子，群友却有三分之一的消息是一两个字的反应；不调模型，按频率数，
+    像 MaiBot 挖群里的黑话那样，告诉她这个群怎么说话。一串接龙复读只算一次，
+    命令（带前缀的、后面紧跟着 Tenko 功能回复的）、带 @ 的和纯数字不算：
+    不然数出来的是“听见你说～”“#sl”“今日老婆”“001”。
+    """
+
+    counts: Counter[str] = Counter()
+    people: dict[str, set[str]] = {}
+    lines, last = list(lines), None
+    for line, after in zip(lines, [*lines[1:], None], strict=True):
+        if line.speaker in (None, "Tenko 功能"):
+            continue
+        text = _ADDRESS.sub("", line.text).strip()
+        key = text.casefold()
+        repeat, last = key == last, key
+        number = _NUMBER.fullmatch(text) and set(text) != {"6"}
+        command = text.startswith(("/", "#")) or after is not None and after.speaker == "Tenko 功能"
+        odd = not text or len(text) > longest or "[" in text or "@" in text
+        if repeat or number or command or odd:
+            continue
+        counts[key] += 1
+        people.setdefault(key, set()).add(line.speaker)
+    return [p for p, n in counts.most_common() if n >= least and len(people[p]) > 1][:top]
 
 
 def only_pictures(text: str) -> bool:

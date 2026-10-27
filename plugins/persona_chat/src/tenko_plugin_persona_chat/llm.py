@@ -20,7 +20,7 @@ SEND_MESSAGE = {
                 "text": {
                     "type": "string",
                     "description": (
-                        "要发的话；想分几条连着发就换行，每行一条，最多三条；"
+                        "要发的话；默认一条，真有两件事要说才换行分两条；"
                         "发收藏的表情包就写“[表情:名字]”"
                     ),
                 },
@@ -260,9 +260,23 @@ async def digest(
 
 
 async def pick_sticker(
-    client: httpx.AsyncClient, *, model: str, prompt: str, catalog: str, recent: str, text: str
-) -> tuple[str, int, dict[str, Any]]:
-    """给要发的话挑一张收藏的表情包：返回 (名字, 贴切程度 1-5, usage)；没挑出来名字为空。"""
+    client: httpx.AsyncClient,
+    *,
+    model: str,
+    prompt: str,
+    catalog: str,
+    recent: str,
+    text: str,
+    avoid: list[str] | None = None,
+) -> tuple[list[tuple[str, int]], dict[str, Any]]:
+    """给要发的话挑几张候选的收藏表情包：返回 ([(名字, 贴切程度 1-5)], usage)。
+
+    ``avoid`` 是最近刚发过的，写进每次都变的那条里，不打断目录的前缀缓存。
+    """
+
+    ask = f"最近几条：\n{recent}\n\n你要发的话：\n{text}"
+    if avoid:
+        ask += f"\n\n这几张你刚发过，这次别挑：{'、'.join(avoid)}"
 
     response = await client.post(
         "/chat/completions",
@@ -272,11 +286,11 @@ async def pick_sticker(
             "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "system", "content": catalog},
-                {"role": "user", "content": f"最近几条：\n{recent}\n\n你要发的话：\n{text}"},
+                {"role": "user", "content": ask},
             ],
             "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
-            "max_tokens": 100,
+            "max_tokens": 150,
         },
     )
     response.raise_for_status()
@@ -285,14 +299,15 @@ async def pick_sticker(
         pick = json.loads(data["choices"][0]["message"].get("content") or "{}")
     except ValueError:
         pick = {}
-    if not isinstance(pick, dict):
-        pick = {}
-    name, score = pick.get("sticker"), pick.get("score")
-    return (
-        name if isinstance(name, str) else "",
-        int(score) if isinstance(score, int | float) else 0,
-        data.get("usage") or {},
-    )
+    items = pick.get("stickers") if isinstance(pick, dict) else None
+    picks = [
+        (item["name"], int(item["score"]))
+        for item in (items if isinstance(items, list) else [])
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and isinstance(item.get("score"), int | float)
+    ]
+    return picks, data.get("usage") or {}
 
 
 async def search(client: httpx.AsyncClient, query: str, count: int = 4) -> list[dict[str, Any]]:

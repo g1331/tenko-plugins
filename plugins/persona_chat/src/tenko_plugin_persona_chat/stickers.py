@@ -11,6 +11,10 @@ from typing import Any
 # 模型在 text 里写“[表情:名字]”就发一张收藏的表情包。
 TOKEN = re.compile(r"\[表情[:：]\s*([^\[\]]{1,12}?)\s*\]")
 _KINDS = {b"\xff\xd8\xff": "jpg", b"\x89PNG": "png", b"GIF8": "gif"}
+_DAY = 86400
+# 新收的先留几天：刚收进来还没轮到发，按用量淘汰的话下一张一进来就把它挤掉了。
+_FRESH = 3 * _DAY
+_BANS = 500  # 删过的图记多少张，多了丢最早的
 
 
 def _clean(text: str, limit: int, drop: str = r"[\s\[\]:：,，]+") -> str:
@@ -19,11 +23,15 @@ def _clean(text: str, limit: int, drop: str = r"[\s\[\]:：,，]+") -> str:
 
 class Stickers:
     """索引：{名字: {"file", "mood", "qq", "saved", "used", "last"}}；``qq`` 是 QQ 给的
-    图片文件名（内容的 md5），用来认出群友又发了收藏里的同一张。"""
+    图片文件名（内容的 md5），用来认出群友又发了收藏里的同一张。
 
-    def __init__(self, store: Any, limit: int = 100) -> None:
+    ``bans`` 记删过的图 [{"sha", "qq", "name"}]：被人要求删掉的，群友再发也不收回来。
+    """
+
+    def __init__(self, store: Any, limit: int = 100, bans: Any = None) -> None:
         self.store = store
         self.limit = limit
+        self.bans = bans
 
     @property
     def folder(self) -> Path:
@@ -51,7 +59,8 @@ class Stickers:
 
         名字不合法、格式不认识或已经收过就返回 ``None``。
 
-        满了先丢模型挑的 ``replace``；没挑或挑的不在收藏里，丢用得最少、最久没用的。
+        满了先丢模型挑的 ``replace``；没挑或挑的不在收藏里，丢收了几天以上的里头平均每天发得最少的，
+        一样少就丢最久没发的；全是新收的才在全部里挑。
         """
 
         name, mood = _clean(name, 12), _clean(mood, 60, r"[\s\[\]]+")
@@ -59,6 +68,8 @@ class Stickers:
         if kind is None and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
             kind = "webp"
         if not name or kind is None:
+            return None
+        if self.banned(data, qq_file):
             return None
         file = f"{hashlib.sha256(data).hexdigest()[:16]}.{kind}"
         index = self.index()
@@ -68,16 +79,17 @@ class Stickers:
         while final in index:
             final, n = f"{name}{n}", n + 1
         dropped = []
+        now = time.time()
         while index and len(index) >= self.limit:
             if replace in index:
                 stale = replace
             else:
-                stale = min(index, key=lambda k: (index[k]["used"], index[k]["last"]))
+                old = [k for k in index if now - index[k]["saved"] >= _FRESH] or list(index)
+                stale = min(old, key=lambda k: (self._rate(index[k], now), index[k]["last"]))
             self._drop(index, stale)
             dropped.append(stale)
         self.folder.mkdir(parents=True, exist_ok=True)
         (self.folder / file).write_bytes(data)
-        now = time.time()
         index[final] = {
             "file": file,
             "mood": mood,
@@ -107,12 +119,28 @@ class Stickers:
         return name
 
     def remove(self, name: str) -> bool:
+        """删掉一张并记进 ``bans``；收藏满了腾位置丢的不算，那些只是没地方放。"""
+
         index = self.index()
         if name not in index:
             return False
+        entry = index[name]
         self._drop(index, name)
         self.store.save(index)
+        if self.bans is not None:
+            ban = {"sha": entry["file"].partition(".")[0], "qq": entry["qq"], "name": name}
+            self.bans.save([*self.bans.load(default=[]), ban][-_BANS:])
         return True
+
+    def banned(self, data: bytes, qq_file: str) -> bool:
+        """这张图删过：内容一样，或者 QQ 文件名（内容的 md5）一样。"""
+
+        if self.bans is None:
+            return False
+        sha = hashlib.sha256(data).hexdigest()[:16]
+        return any(
+            b["sha"] == sha or (qq_file and b["qq"] == qq_file) for b in self.bans.load(default=[])
+        )
 
     def _drop(self, index: dict[str, dict[str, Any]], name: str) -> None:
         (self.folder / index.pop(name)["file"]).unlink(missing_ok=True)
@@ -123,6 +151,16 @@ class Stickers:
             index[name]["used"] += 1
             index[name]["last"] = time.time()
             self.store.save(index)
+
+    def rate(self, name: str) -> float:
+        """平均每天发几次，收进来不满一天按一天算；不在收藏里是 0。"""
+
+        entry = self.index().get(name)
+        return self._rate(entry, time.time()) if entry else 0.0
+
+    @staticmethod
+    def _rate(entry: dict[str, Any], now: float) -> float:
+        return entry["used"] / max(1.0, (now - entry["saved"]) / _DAY)
 
     def moods(self) -> dict[str, str]:
         """名字 → 备注，会话拿它当目录快照。"""

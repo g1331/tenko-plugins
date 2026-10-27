@@ -24,12 +24,13 @@ def fake_llm(module, monkeypatch):
         return fake.replies.pop(0) if fake.replies else [], {"completion_tokens": 7}
 
     monkeypatch.setattr(module.llm, "chat", chat)
-    fake.picks, fake.picked = [], []  # 单独挑表情包：要返回的 (名字, 分数)、问过的话
+    # 单独挑表情包：每次要返回的候选 [(名字, 分数)]、问过的话、叫它别挑的
+    fake.picks, fake.picked, fake.avoided = [], [], []
 
-    async def pick_sticker(client, *, model, prompt, catalog, recent, text):
+    async def pick_sticker(client, *, model, prompt, catalog, recent, text, avoid=None):
         fake.picked.append(text)
-        name, score = fake.picks.pop(0) if fake.picks else ("", 0)
-        return name, score, {}
+        fake.avoided.append(avoid or [])
+        return (fake.picks.pop(0) if fake.picks else []), {}
 
     monkeypatch.setattr(module.llm, "pick_sticker", pick_sticker)
     module.conversations.clear()
@@ -52,6 +53,7 @@ def fake_llm(module, monkeypatch):
     module._waiters.clear()
     module.usage_book.store.save({})
     module.sticker_book.store.save({})
+    module.sticker_book.bans.save([])
     module.chat_store.save({})
     module.memory_store.save({})
     module.persona_store.save({})
@@ -553,6 +555,18 @@ async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm)
     assert "group:100" not in module._waiters and len(fake_llm.requests) == 2
 
 
+async def test_she_stays_out_of_a_bot_talk_repeat_chain(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "quiet_seconds", 0.05)
+    fake_llm.replies.append([{"text": "你追到哪了"}])
+    await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
+
+    # 一群人跟着复读“这群怎么那么多机器人”，没人叫她：不问模型
+    for i in range(3):
+        await feed(module, session([Text("这群怎么那么多机器人")], user=str(i), message_id=f"r{i}"))
+    await module._waiters["group:100"]
+    assert len(fake_llm.requests) == 1
+
+
 async def test_talking_to_someone_else_right_after_her_is_not_answering(module, fake_llm):
     fake_llm.replies.append([{"text": "你追到哪了"}])
     await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
@@ -605,15 +619,22 @@ async def test_she_stops_chiming_in_once_she_talks_too_much(module, fake_llm, mo
     module._waiters.pop("group:100").cancel()
 
 
-async def test_tired_bot_may_ignore_calls_then_stops(module, fake_llm, monkeypatch):
+async def test_tired_bot_answers_calls_briefly_then_stops(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "stamina", 4)
-    for i in range(8):
+    for i in range(6):
         fake_llm.replies.append([{"text": f"回{i}"}])
         await feed(module, session([At("42"), Text(" 在吗")], user=str(i), message_id=f"m{i}"))
 
-    # 说了 4 句后累了：不再强制回复；说满 6 句后完全不理
-    assert [force for _, force in fake_llm.requests] == [True] * 4 + [False] * 2
+    # 说了 4 句后累了：@ 她照样强制回，只是提示要简短
+    assert [force for _, force in fake_llm.requests] == [True] * 6
     assert "有点累了" in fake_llm.requests[4][0][-1]["content"]
+    # 说满 6 句：只提到名字的不理了，@ 她的还回；说满 8 句连 @ 也不理
+    await feed(module, session([Text("大肥鱼在吗")], user="20", message_id="n1"))
+    assert len(fake_llm.requests) == 6
+    for i in range(6, 9):
+        fake_llm.replies.append([{"text": f"回{i}"}])
+        await feed(module, session([At("42"), Text(" 在吗")], user=str(i), message_id=f"m{i}"))
+    assert len(fake_llm.requests) == 8
 
 
 async def test_lines_are_sent_as_separate_bubbles(module, fake_llm):
@@ -625,8 +646,7 @@ async def test_lines_are_sent_as_separate_bubbles(module, fake_llm):
     bubbles = [call.args[0][0].children for call in s.send.call_args_list]
     assert [[getattr(c, "text", "@") for c in b] for b in bubbles] == [
         ["@", " 真的假的"],
-        ["晒一下"],
-        ["我不信 多的"],  # 最多三条，多出来的并进最后一条
+        ["晒一下 我不信 多的"],  # 最多两条，多出来的并进最后一条
     ]
     conversation = module.conversations["group:100"]
     assert len(conversation.spoken) == 1  # 一口气连发算一句话
@@ -634,7 +654,44 @@ async def test_lines_are_sent_as_separate_bubbles(module, fake_llm):
     fake_llm.replies.append([{"text": "嗯"}])
     await feed(module, session([At("42"), Text(" 然后呢")], user="2", message_id="m3"))
     assistant = [m for m in fake_llm.requests[-1][0] if m["role"] == "assistant"]
-    assert assistant == [{"role": "assistant", "content": "@群友7 真的假的\n晒一下\n我不信 多的"}]
+    assert assistant == [{"role": "assistant", "content": "@群友7 真的假的\n晒一下 我不信 多的"}]
+
+
+async def test_at_most_two_bubbles_and_one_when_called_a_bot(module, fake_llm):
+    fake_llm.replies.append([{"text": "笑死\n真的"}, {"text": "还有\n别的"}])
+    s = session([At("42"), Text(" 你看")], message_id="m1")
+    await feed(module, s)
+    assert [c.args[0][0].children[0].text for c in s.send.call_args_list] == ["笑死", "真的"]
+
+    # 在说 bot：只发第一句
+    fake_llm.replies.append([{"text": "被你发现了\n其实我是"}])
+    s = session([At("42"), Text(" 这个bot没有活人感")], user="2", message_id="m2")
+    await feed(module, s)
+    assert [c.args[0][0].children[0].text for c in s.send.call_args_list] == ["被你发现了"]
+
+
+async def test_called_a_bot_she_answers_with_just_a_sticker(module, fake_llm, monkeypatch):
+    module.sticker_book.add("流汗", "x", GIF, "0.gif")
+    monkeypatch.setattr(module.random, "random", lambda: 0.9)  # 平时 4 分的这次不发
+    fake_llm.replies.append([{"text": "我才不是机器人"}])
+    fake_llm.picks.append([("流汗", 4)])
+    await feed(module, session([At("42"), Text(" 机器人活了")], message_id="m1"))
+    assert fake_llm.picked == ["我才不是机器人"]
+    lines = module._conversation("group:100").lines
+    assert lines[-1].text == "[表情:流汗]" and lines[-2].speaker is not None
+
+    # 没有贴切的就照常说那一句
+    fake_llm.replies.append([{"text": "复活吓死你们"}])
+    fake_llm.picks.append([("流汗", 2)])
+    await feed(module, session([At("42"), Text(" 人机又来了")], user="2", message_id="m2"))
+    assert lines[-1].text == "复活吓死你们"
+
+
+def test_habit_hint_names_overused_particles_and_openers(module):
+    said = ["好嘛", "不过也行", "行嘛", "不过算了", "是嘛", "不过呢", "对嘛", "不过", "嗯"]
+    hint = module.habit_hint(said)
+    assert "“嘛”用得太勤了" in hint and "老用“不过”开头" in hint
+    assert module.habit_hint(said[:6]) == ""  # 20 条里不超过 3 条不管
 
 
 async def test_lines_carry_the_real_role_not_the_nickname(module, fake_llm):
@@ -723,6 +780,27 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     assert lines[-2].text == "@你 [表情包:猫猫震惊]" and lines[-2].images == ("u4",)
 
 
+async def test_deleted_sticker_is_not_saved_again(module, fake_llm, monkeypatch):
+    async def download(http, url):
+        return GIF
+
+    monkeypatch.setattr(module, "_download", download)
+
+    async def allowed(session, level):
+        return True
+
+    monkeypatch.setattr(module, "require_perm", allowed)
+    module.sticker_book.add("难绷", "龙图", GIF, "abc.gif")
+    assert await module.manage_stickers(session([]), "删", "难绷") == "删掉了「难绷」"
+
+    # 群友又发了同一张：她想收也不收
+    onebot = OneBot({"11": [{"file": "abc.gif", "sub_type": 1}]})
+    save = {"tool": "save_sticker", "number": 1, "name": "难绷2", "mood": "无语"}
+    fake_llm.replies.append([save, {"text": "哈哈"}])
+    await feed(module, session([At("42"), Image(src="u1")], message_id="11", internal=onebot))
+    assert module.sticker_book.index() == {}
+
+
 async def test_called_bot_still_talks_after_only_saving_a_sticker(module, fake_llm, monkeypatch):
     async def download(http, url):
         return GIF
@@ -769,7 +847,7 @@ async def test_a_fitting_sticker_is_picked_after_she_speaks(module, fake_llm):
     module.sticker_book.add("用户赶都赶不走", "被缠着时发", GIF, "a.gif")
     onebot = OneBot()
     fake_llm.replies.append([{"text": "不退 我赖这儿了"}])
-    fake_llm.picks.append(("用户赶都赶不走", 5))
+    fake_llm.picks.append([("用户赶都赶不走", 5)])
     await feed(
         module, session([At("42"), Text(" 你能自己退群吗")], message_id="m1", internal=onebot)
     )
@@ -780,7 +858,7 @@ async def test_a_fitting_sticker_is_picked_after_she_speaks(module, fake_llm):
 
     # 不够贴切就只说话
     fake_llm.replies.append([{"text": "凭什么"}])
-    fake_llm.picks.append(("用户赶都赶不走", 3))
+    fake_llm.picks.append([("用户赶都赶不走", 3)])
     await feed(module, session([At("42"), Text(" 退吧")], user="2", message_id="m2"))
     assert lines[-1].text == "凭什么" and len(onebot.sent) == 1
 
@@ -792,6 +870,45 @@ async def test_a_fitting_sticker_is_picked_after_she_speaks(module, fake_llm):
     assert len(fake_llm.picked) == 2
 
 
+async def test_picked_sticker_skips_recent_ones_and_favors_rarely_sent(
+    module, fake_llm, monkeypatch
+):
+    for i, name in enumerate(["猫猫震惊", "猫猫无语", "得加钱", "哈哈"]):
+        module.sticker_book.add(name, "x", GIF + bytes([i]), f"{i}.gif")
+    for _ in range(8):
+        module.sticker_book.use("得加钱")  # 今天已经发了 8 次
+    weights = []
+
+    def choices(names, chances):
+        weights.append(dict(zip(names, chances, strict=True)))
+        return [names[0]]
+
+    monkeypatch.setattr(module.random, "choices", choices)
+    conversation = module._conversation("group:100")
+    conversation.add("s1", None, "[表情:猫猫震惊]")  # 刚发过
+    # 自己配的那张刚发过：删掉重挑；候选里刚发过的、编的不要，只在最贴切的一档里挑
+    fake_llm.replies.append([{"text": "笑死[表情:猫猫震惊]"}])
+    fake_llm.picks.append(
+        [("猫猫震惊", 5), ("得加钱", 5), ("编的", 5), ("猫猫无语", 5), ("哈哈", 4)]
+    )
+    await feed(module, session([At("42"), Text(" 你看")], message_id="m1"))
+
+    assert fake_llm.picked == ["笑死"] and fake_llm.avoided == [["猫猫震惊"]]
+    # 同样 5 分，它天天发：按 1/√(1+每天次数) 压下去
+    assert weights == [{"得加钱": pytest.approx(1 / 3), "猫猫无语": 1.0}]
+    assert [x.text for x in conversation.lines][-2:] == ["笑死", "[表情:得加钱]"]
+
+    # 最好的只有 4 分：三次里才发一次
+    for chance, sent in ((0.9, False), (0.1, True)):
+        monkeypatch.setattr(module.random, "random", lambda chance=chance: chance)
+        fake_llm.replies.append([{"text": "行吧"}])
+        fake_llm.picks.append([("猫猫无语", 4)])
+        await feed(
+            module, session([At("42"), Text(" 嗯")], user=str(chance), message_id=f"x{chance}")
+        )
+        assert (conversation.lines[-1].text == "[表情:猫猫无语]") is sent
+
+
 async def test_unasked_reply_to_a_picture_is_a_sticker_only(module, fake_llm, monkeypatch):
     async def download(http, url):
         return b"\x89PNG" + url.encode()
@@ -801,7 +918,7 @@ async def test_unasked_reply_to_a_picture_is_a_sticker_only(module, fake_llm, mo
     onebot = OneBot()
     # 看了图总想描述画面：先按她想说的挑一张表情包，字不发
     fake_llm.replies.append([{"text": "这猫眼睛瞪得比我还圆"}])
-    fake_llm.picks.append(("猫猫震惊", 5))
+    fake_llm.picks.append([("猫猫震惊", 5)])
     for i in range(2):
         await feed(module, session([Text(f"闲聊{i}")], user=str(i), message_id=f"m{i}"))
     s = session([Image(src="cat")], user="9", message_id="pic", internal=onebot)
@@ -883,7 +1000,8 @@ async def test_called_bot_may_search_first_then_reply(module, fake_llm, monkeypa
     # 搜完那轮不强制（能顺手改表情包备注），没说话就再强制一次
     assert queries == ["战地6 新赛季"] and not first_force and not second_force and third_force
     assert "新赛季（EA，2026-10-20）：加了新地图" in second[-1]["content"]
-    assert s.send.call_args.args[0][0].children[0].text == "我搜了下，有新地图"
+    # 搜是悄悄的：开头交代“我搜了下”的删掉
+    assert s.send.call_args.args[0][0].children[0].text == "有新地图"
 
     # 今天的次数用完：照旧强制只能说话
     fake_llm.replies.append([{"text": "不知道诶"}])
@@ -913,13 +1031,13 @@ async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(
 
 async def test_typed_sticker_words_become_the_sticker(module, fake_llm):
     module.sticker_book.add("得加钱", "被使唤时发", GIF, "abc.gif")
-    fake_llm.replies.append([{"text": "周报？\n得加钱哦~\n得加钱也不干"}])
+    fake_llm.replies.append([{"text": "得加钱哦~\n得加钱也不干"}])
     s = session([At("42"), Text(" 写周报")], message_id="m1")
     await feed(module, s)
 
-    first, second, third = (call.args[0][0] for call in s.send.call_args_list)
-    assert [type(c) for c in second.children] == [Image]  # 整条就是图上的字
-    assert str(third.children[0]) == "得加钱也不干"  # 还有别的话就照常发字
+    first, second = (call.args[0][0] for call in s.send.call_args_list)
+    assert [type(c) for c in first.children] == [Image]  # 整条就是图上的字
+    assert str(second.children[0]) == "得加钱也不干"  # 还有别的话就照常发字
 
 
 async def test_sticker_falls_back_when_onebot_hands_back_an_error(module, fake_llm):
@@ -1140,6 +1258,19 @@ async def test_called_bot_runs_a_listed_command_and_answers_from_the_result(
     assert module.conversations["group:100"].lines[2].text == "KD 挺高啊"
 
 
+async def test_after_a_command_she_says_one_line(module, fake_llm, commands):
+    fake_llm.replies += [
+        [{"tool": "run_command", "command": "/bf1s SHlSAN13"}],
+        [{"text": "KD 挺高啊\nK/D 2.1 胜率 54%"}, {"text": "时长 600 小时"}],
+    ]
+    await feed(module, session([At("42"), Text(" 查下 SHlSAN13 的战绩")]))
+
+    # 结果图大家都看得到：只发第一条，后面念数据的不发
+    texts = [line.text for line in module.conversations["group:100"].lines]
+    assert texts[2:] == ["KD 挺高啊"]
+    assert "只回一条" in fake_llm.requests[1][0][-1]["content"]
+
+
 async def test_a_slow_send_receipt_does_not_cut_her_off(module, fake_llm, commands):
     fake_llm.replies += [
         [{"tool": "run_command", "command": "/bf1s SHlSAN13"}],
@@ -1192,7 +1323,7 @@ async def test_master_gets_told_to_be_obeyed(module, fake_llm):
     await feed(module, session([At("42"), Text(" 删了那张龙图")], user="99"))
     await feed(module, session([At("42"), Text(" 删了那张龙图")], user="7", message_id="m2"))
     master, member = (messages[-1]["content"] for messages, _ in fake_llm.requests)
-    assert "#1 是你的主人（bot主人）" in master and "主人" not in member
+    assert "#1 是把你接进群的人（bot主人）" in master and "主人" not in member
 
 
 async def test_quoting_a_line_and_sending_a_command_is_not_calling_her(module, fake_llm):

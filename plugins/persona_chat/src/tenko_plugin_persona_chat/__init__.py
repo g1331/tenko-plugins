@@ -13,6 +13,7 @@ import asyncio
 import base64
 import dataclasses
 import json
+import random
 import re
 import time
 from contextvars import ContextVar
@@ -58,26 +59,31 @@ from .chat import (
     estimate_tokens,
     only_pictures,
     picture_url,
+    slang,
     split,
     summary_messages,
 )
 from .persona import (
+    BOT_TALK,
     DIGEST_PROMPT,
     FOLLOW_HINT,
     LONG_HINT,
     PICK_STICKER_PROMPT,
     PICTURE_HINT,
     PRESETS,
+    RULE_LINES,
     SHORT_HINT,
     UNPROMPTED_HINT,
     answer_hint,
     boss_hint,
     command_hint,
+    habit_hint,
     memory_hint,
     mention_hint,
     repeat_hint,
     rules,
     search_hint,
+    slang_hint,
 )
 from .stickers import TOKEN, Stickers
 
@@ -114,8 +120,9 @@ class PersonaChatConfig(BasicConfModel):
     user_cooldown_seconds: int = 5
     """同一个人叫 bot 的最短间隔。"""
     stamina: int = 15
-    """精力：10 分钟内说这么多句、或 1 小时内说两倍这么多句就累了。用掉三分之二后不再主动开口，
-    累了以后被叫到也由它决定理不理，到 1.5 倍完全不理；不说话就慢慢恢复。0 不限。"""
+    """精力：10 分钟内说这么多句、或 1 小时内说两倍这么多句就累了。用掉三分之二后不再主动开口；
+    累了以后只提到名字的由它决定理不理，到 1.5 倍不理，@ 她、引用她的照样简短回，到 2 倍才不理；
+    不说话就慢慢恢复。0 不限。"""
     vision_images: int = 5
     """每次请求最多带这么多张新图，低清晰度发给模型看，每张约 190 token；0 只告诉模型“[图片]”。"""
     search_daily: int = 20
@@ -153,7 +160,9 @@ declare(scope="group", controlled=True)
 config = plugin.get_config(PersonaChatConfig)
 usage_book = UsageBook(Store("usage", version=1))
 # 别叫 stickers：热重载时导入子模块会把同名的包属性覆盖成 .stickers 模块。
-sticker_book = Stickers(Store("stickers", version=1), config.sticker_limit)
+sticker_book = Stickers(
+    Store("stickers", version=1), config.sticker_limit, Store("sticker_bans", version=1)
+)
 conversations: dict[str, Conversation] = {}
 # 聊天记录存盘：{会话: Conversation.dump()}。有新消息的会话记进 _unsaved，
 # 她每说完一次就存，其余时候最多每分钟存一次，插件卸载或退出时再存一次。
@@ -192,8 +201,19 @@ _speaking: ContextVar[bool] = ContextVar("persona_chat_speaking", default=False)
 _TENKO = "Tenko 功能"
 _TENKO_CHARS = 100
 _MAX_SENDS = 2
-# 单独挑的表情包贴切到这个分（1-5）才跟着发：实测约三成回复会配上，和群友发图的频率相当。
+# 一次回复最多发几条字（表情包另算）：她一次连发 4 条以上的占 18%，活跃群友是 8%，
+# 只发一条的她 41%、群友 63%；提示里写了说短，照样两次 send_message 各分三行。
+_MAX_BUBBLES = 2
+# 搜完开口先交代“我搜了下”：日志里 133 条，提示怎么写都压不干净，群友不会每句都这么说。
+_SEARCHED = re.compile(r"^(?:我)?(?:刚)?(?:搜|查)了(?:一)?下[，,。：:\s]*")
+# 精力用到这么多倍时，只提到名字的不理；@ 她、引用她的到 _WORN_OUT 才不理。
+_TIRED_OUT = 1.5
+_WORN_OUT = 2.0
+# 单独挑的表情包：候选到这个分（1-5）才算贴切；最好的一张有 5 分才一定发，只有 4 分时按概率发。
+# 一次给三张候选时模型打分放得很松，最好那张常有 4 分，4 分就发的话回放里四分之三的话都配图。
 _STICKER_SCORE = 4
+_STICKER_SURE = 5
+_STICKER_MAYBE = 1 / 3
 _STICKERS_DONE = "表情包已经处理好了，这次只说话。"
 _STICKER_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker")
 # 群友口头叫她删表情包：bot主人、bot管理员叫的照删，别人叫的每个群每天最多删这么几张，
@@ -584,13 +604,16 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         streak = _streaks.get((key, user_id), 0) + 1 if quick else 0
         _streaks[(key, user_id)] = streak
         load = _load(conversation, now)
-        if streak >= _STREAK_MUTE or load >= 1.5:
+        direct = private or at_me or reply_me or is_reply_me
+        # @ 她、引用她时一声不吭，群里就是“似了吧”“bot是不是下播了”：累了也简短回一句。
+        if streak >= _STREAK_MUTE or load >= (_WORN_OUT if direct else _TIRED_OUT):
             return
         mood = "again" if streak >= _STREAK_LOOSE else "tired" if load >= 1 else "call"
         # 只是提到名字：很多人自己部署了同名的 AI，“我的大肥鱼”不一定在说她，让她自己判断。
-        if mood == "call" and not (private or at_me or reply_me or is_reply_me):
+        if mood == "call" and not direct:
             mood = "named"
-        await respond(session, conversation, line, force=mood == "call", mood=mood)
+        force = mood == "call" or mood == "tired" and direct
+        await respond(session, conversation, line, force=force, mood=mood)
     elif not private and not lookalike and not at_only and key not in _waiters:
         now = time.monotonic()
         # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
@@ -900,7 +923,7 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
     catalog = ""
     if config.sticker_limit:
         if conversation.stickers is None:
-            conversation.stickers = sticker_book.moods()
+            conversation.stickers = _shuffled(sticker_book.moods())
         catalog = sticker_book.catalog(conversation.stickers)
         # 目录在前缀里，收藏一变就从那里断缓存：变化先写在末尾提示里，压缩时才并进目录。
         hint = "\n".join(filter(None, [hint, sticker_book.changes(conversation.stickers)]))
@@ -974,6 +997,13 @@ async def respond(
         pictured = target is None and trigger is not None and only_pictures(trigger.text)
         if pictured:
             hint += PICTURE_HINT
+        # 在说 bot、人机的只发第一句；不另加提示：实测一点明，别人说别的 bot 她也急着回
+        # “我不是机器人”。
+        bot_talk = trigger is not None and bool(BOT_TALK.search(trigger.text))
+        # 一群人接龙复读“这群怎么那么多机器人”：没人叫她就别对号入座，正常人不会出来回一句。
+        if target is None and bot_talk and conversation.repeated(trigger):
+            logger.info("AI群友在 {} 不接复读的 bot 话题：{}", key, trigger.text)
+            return
         if target is not None and target.role.endswith(_TRUSTED):
             hint += boss_hint(target.number, target.role.split()[-1])
         if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
@@ -984,7 +1014,8 @@ async def respond(
         weekday = "一二三四五六日"[now.weekday()]
         hint = (
             f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
-            f"{_recall(key, conversation)}{hint}{repeat_hint(said, phrases)}{SHORT_HINT}"
+            f"{_recall(key, conversation)}{hint}{repeat_hint(said, [*phrases, *RULE_LINES])}"
+            f"{habit_hint(said)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
         )
         conversation.unseen = 0
         usages: list[dict] = []
@@ -1015,6 +1046,7 @@ async def respond(
                 asker = (target or answer).speaker  # running 时两者必有其一
                 found.append(await _run_command(session, conversation, ran, asker))
             searched = bool(found)
+            commanded = running and bool(ran.strip())
             again = None
             if searched:
                 again = "\n".join([hint, *found])
@@ -1059,6 +1091,16 @@ async def respond(
         edits = [c for c in calls if c.get("tool") == "edit_sticker"]
         deletes = [c for c in calls if c.get("tool") == "delete_sticker"]
         calls = [c for c in calls if "tool" not in c]
+        # 只说一句：用完功能时结果图大家都看得到，连发三条念数据（K/D、胜率、时长）一看就是 bot；
+        # 被说是 bot 时连着辩解（“欸 哪没活人感嘛 / 我这不是在陪你们聊吗”）越辩越像。
+        if (commanded or bot_talk) and (texts := [c["text"] for c in calls]):
+            first = next((x for t in texts for x in t.splitlines() if x.strip()), "")
+            calls = [{**calls[0], "text": first}]
+            if "\n".join(texts).strip() != first.strip():
+                logger.info("AI群友在 {} 只说一句，丢掉了：{}", key, texts)
+        if searched:
+            for c in calls:
+                c["text"] = _SEARCHED.sub("", c["text"])
         # 要说的话含违禁词就整次不说：只删那几个字，剩下的话照样能看出在聊什么。
         if word := next(
             (w for c in calls[:_MAX_SENDS] if (w := banned(c["text"], config.banned_words))), None
@@ -1066,7 +1108,11 @@ async def respond(
             said = [c["text"] for c in calls]
             logger.info("AI群友在 {} 想说的话含违禁词“{}”，没有发：{}", key, word, said)
             calls = []
-        await _add_sticker(conversation, calls[:_MAX_SENDS], key)
+        # 被说是 bot：有贴切的表情包就只发表情包，打字回什么都像在对号入座、变相承认。
+        await _add_sticker(conversation, calls[:_MAX_SENDS], key, sure=bot_talk)
+        if bot_talk and any(TOKEN.search(c["text"]) for c in calls):
+            for c in calls:
+                c["text"] = "\n".join(f"[表情:{name}]" for name in TOKEN.findall(c["text"]))
         if pictured:
             # 她想说的话先拿去挑了表情包，字不发：看图说话总在描述画面。
             for c in calls:
@@ -1085,7 +1131,10 @@ async def respond(
         # 整个回复只有表情包时，最近发过的也照发，不然被叫到却一声不吭。
         repeat = not any(TOKEN.sub("", c["text"]).strip() for c in calls[:_MAX_SENDS])
         for arguments in calls[:_MAX_SENDS]:
-            pieces = split(arguments["text"], max(config.max_reply_chars, 1))
+            if sent >= _MAX_BUBBLES:
+                logger.info("AI群友在 {} 一次说太多，后面的没发：{}", key, arguments["text"])
+                break
+            pieces = split(arguments["text"], max(config.max_reply_chars, 1), _MAX_BUBBLES - sent)
             if not pieces:
                 continue
             quoted = conversation.by_number(arguments.get("reply_to"))
@@ -1162,40 +1211,89 @@ async def respond(
         _save()
 
 
-async def _add_sticker(conversation: Conversation, calls: list[dict], key: str) -> None:
-    """说的话里没配表情包时，单独挑一张贴切的跟在后面发；最近发过的由 ``_pick_sticker`` 拦下。"""
+async def _add_sticker(
+    conversation: Conversation, calls: list[dict], key: str, *, sure: bool = False
+) -> None:
+    """说的话里没配能发的表情包时，单独挑一张贴切的跟在后面发；``sure`` 时 4 分的也一定发。
+
+    挑图的模型给三张候选，去掉最近发过的，在最贴切的那一档里随机挑：只要一张的话每次都是
+    它心里最贴切的那几张，又正好最常在冷却里，挑中了也发不出去。
+    模型自己配的表情包都在冷却里（或是编的名字）时，删掉它们重新挑。
+    """
 
     said = "\n".join(c["text"] for c in calls).strip()
+    words = TOKEN.sub("", said).strip()
+    window = _sticker_window()
     if (
-        not said
+        not words
         or not config.sticker_limit
         or not sticker_book.index()
-        or TOKEN.search(said)
+        or any(_can_send(conversation, name, window) for name in TOKEN.findall(said))
         or said.startswith(("@", *_command_prefixes()))  # 在用别的 bot 的功能
     ):
         return
+    if words != said:
+        for c in calls:
+            c["text"] = TOKEN.sub("", c["text"]).strip()
+        said = words
     lines = islice(conversation.lines, max(len(conversation.lines) - 6, 0), None)
     recent = "\n".join(
         f"{(x.speaker.rpartition('(')[0] or x.speaker) if x.speaker else '你'}：{x.text}"
         for x in lines
     )
+    now = datetime.now()
     try:
-        name, score, usage = await llm.pick_sticker(
+        picks, usage = await llm.pick_sticker(
             client,
             model=config.model,
             prompt=PICK_STICKER_PROMPT,
-            catalog=sticker_book.catalog(sticker_book.moods()),
+            # 模型偏爱靠前的：每天换个顺序，当天的前缀缓存照样命中。
+            catalog=sticker_book.catalog(_shuffled(sticker_book.moods(), now.date().isoformat())),
             recent=recent,
             text=said,
+            avoid=[n for n in sticker_book.index() if not _can_send(conversation, n, window)],
         )
     except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
         logger.debug("AI群友挑表情包失败：{!r}", error)  # 挑不出来就只说话
         return
     if not in_sandbox():
-        now = datetime.now()
         usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
-    if score >= _STICKER_SCORE and sticker_book.path(name):
-        calls[-1]["text"] += f"\n[表情:{name}]"
+    fit = {
+        name: score
+        for name, score in picks
+        if score >= _STICKER_SCORE and _can_send(conversation, name, window)
+    }
+    best = max(fit.values(), default=0)
+    if not best or best < _STICKER_SURE and not sure and random.random() >= _STICKER_MAYBE:
+        return
+    # 只在最贴切的那一档里挑：按次一档的抽签更不重复，回放盲评却明显输给只挑一张。
+    # 同样贴切的几张里平时发得多的机会小，每天发十几次的那几张只剩四分之一左右。
+    top = [name for name, score in fit.items() if score == best]
+    weights = [1 / (1 + sticker_book.rate(name)) ** 0.5 for name in top]
+    calls[-1]["text"] += f"\n[表情:{random.choices(top, weights)[0]}]"
+
+
+def _shuffled(moods: dict[str, str], seed: str | None = None) -> dict[str, str]:
+    """打乱目录顺序：模型挑表情包偏爱列表前头的，按收藏先后排，后收的就总轮不上。"""
+
+    items = list(moods.items())
+    random.Random(seed).shuffle(items)
+    return dict(items)
+
+
+def _sticker_window() -> int:
+    """同一张表情包在一个会话里隔多久才再发：每张收藏算 1 分钟，最长半小时，收藏少时才不至于
+    发过一两张就没得挑。"""
+
+    return min(1800, 60 * len(sticker_book.index()))
+
+
+def _can_send(conversation: Conversation, name: str, window: int) -> bool:
+    """收藏里有这张，最近 ``window`` 秒在这儿也没发过；``window`` 为 0 就不看发没发过。"""
+
+    return bool(sticker_book.path(name)) and not conversation.sent_recently(
+        f"[表情:{name}]", window
+    )
 
 
 def _pick_sticker(
@@ -1203,31 +1301,22 @@ def _pick_sticker(
 ) -> tuple[str, str | None, str]:
     """拆出第一个能发的“[表情:名字]”：返回 (前面的话, 名字, 后面的话)，其余标记删掉。
 
-    名字不在收藏里（模型编的）、最近在这儿发过，或这次已经发过一张，都不发。“最近”按收藏多少定：
-    每张算 1 分钟，最长半小时，收藏少时才不至于发过一两张就没得挑；``repeat`` 时不看最近发没发过。
+    名字不在收藏里（模型编的）、最近在这儿发过（见 ``_sticker_window``），或这次已经发过一张，
+    都不发；``repeat`` 时不看最近发没发过。
     一整条正好是某张收藏的名字（模型把图上的字打了出来，如“得加钱！”）时，改发那张图。
     """
 
-    window = min(1800, 60 * len(sticker_book.index()))
+    window = 0 if repeat else _sticker_window()
     if allowed and not TOKEN.search(text):
         bare = _bare(text)
         for name in sticker_book.index():
-            if (
-                _bare(name) == bare
-                and sticker_book.path(name)
-                and (repeat or not conversation.sent_recently(f"[表情:{name}]", window))
-            ):
+            if _bare(name) == bare and _can_send(conversation, name, window):
                 return "", name, ""
     chosen: str | None = None
     head = text
     for match in TOKEN.finditer(text):
         name = match[1]
-        if (
-            allowed
-            and chosen is None
-            and sticker_book.path(name)
-            and (repeat or not conversation.sent_recently(f"[表情:{name}]", window))
-        ):
+        if allowed and chosen is None and _can_send(conversation, name, window):
             chosen = name
             head, tail = text[: match.start()], text[match.end() :]
             break
@@ -1301,6 +1390,9 @@ async def _save_sticker(arguments: dict, conversation: Conversation) -> None:
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http:
         data = await _download(http, src)
     if data is None or data_url(data) is None:
+        return
+    if sticker_book.banned(data, qq_file):
+        logger.info("AI群友想收的表情包「{}」以前删过，不收", arguments.get("name"))
         return
     saved = sticker_book.add(
         str(arguments.get("name", "")),

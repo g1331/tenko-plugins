@@ -263,6 +263,7 @@ def test_stickers_dedupe_rename_evict_and_list(module, tmp_path):
     )
     stickers.use("猫猫震惊")
     assert len(list((tmp_path / "stickers").iterdir())) == 2
+
     assert stickers.remove("新来的") and not stickers.remove("新来的")
     assert stickers.path("新来的") is None and stickers.path("猫猫震惊").is_file()
 
@@ -273,6 +274,39 @@ def test_stickers_dedupe_rename_evict_and_list(module, tmp_path):
     assert stickers.index()["猫猫啊"]["mood"] == "猫瞪眼「啊？」；吃惊时发"
     assert stickers.path("猫猫啊").is_file() and "猫猫震惊" not in stickers.index()
     assert stickers.edit("猫猫啊", " ") is None and stickers.edit("没有", "x") is None
+
+
+def test_deleted_stickers_stay_out(module, tmp_path):
+    stickers = type(module.sticker_book)(
+        MemoryStore(tmp_path / "stickers.json"), limit=2, bans=MemoryStore(tmp_path / "bans.json")
+    )
+    stickers.add("龙图", "x", PNG, "a.png")
+    stickers.add("猫猫", "x", b"GIF8" + b"1" * 20, "b.gif")
+    assert stickers.remove("龙图")
+    assert stickers.banned(PNG, "") and stickers.banned(b"GIF8" + b"2" * 20, "a.png")
+    assert stickers.add("换个名字", "x", PNG, "c.png") is None  # 内容一样
+    assert stickers.add("又一张", "x", b"GIF8" + b"3" * 20, "a.png") is None  # QQ 文件名一样
+    # 满了腾位置丢的不算删
+    stickers.add("新的", "x", b"GIF8" + b"4" * 20, "d.gif")
+    stickers.add("再新的", "x", b"GIF8" + b"5" * 20, "e.gif")
+    assert [b["name"] for b in stickers.bans.load(default=[])] == ["龙图"]
+
+
+def test_full_stickers_keep_new_ones_and_drop_the_least_sent(module, tmp_path):
+    stickers = type(module.sticker_book)(MemoryStore(tmp_path / "stickers.json"), limit=3)
+    for i, name in enumerate(["老常用", "老冷门", "新来的"]):
+        stickers.add(name, "x", b"GIF8" + bytes([i]) * 20, f"{i}.gif")
+    index = stickers.index()
+    index["老常用"].update(saved=index["老常用"]["saved"] - 10 * 86400, used=30)
+    index["老冷门"].update(saved=index["老冷门"]["saved"] - 10 * 86400, used=2)
+    stickers.store.save(index)
+    assert stickers.rate("老常用") == pytest.approx(3) and stickers.rate("新来的") == 0
+
+    # “新来的”一次没发过，但刚收进来、还没轮到发：丢老的里头平均每天发得最少的
+    assert stickers.add("第四张", "x", b"GIF8" + b"9" * 20, "9.gif") == ("第四张", ["老冷门"])
+    # 剩下的老图只有一张，照样按发得少的丢；全是新收的才在全部里挑
+    assert stickers.add("第五张", "x", b"GIF8" + b"8" * 20, "8.gif") == ("第五张", ["老常用"])
+    assert stickers.add("第六张", "x", b"GIF8" + b"7" * 20, "7.gif")[1] == ["新来的"]
 
 
 def test_sticker_changes_since_snapshot(module, tmp_path):
@@ -344,3 +378,37 @@ async def test_every_tool_call_but_silence_comes_back(module):
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
         calls, _ = await module.llm.chat(c, model="m", messages=[], force=False, max_tokens=9)
     assert calls == [{"name": "难绷", "tool": "delete_sticker"}, {"text": "行 删了"}]
+
+
+def test_slang_counts_short_lines_several_people_send(chat):
+    conversation = chat.Conversation()
+    for speaker, text in [
+        ("甲(1)", "hyw"),
+        ("甲(1)", "草"),  # 只有一个人发的不算
+        ("乙(2)", "@你 HYW"),
+        ("甲(1)", "草"),
+        ("甲(1)", "回复#1（甲说的“hyw”） hyw"),
+        ("甲(1)", "草"),
+        ("乙(2)", "听见你说～"),  # 接龙复读只算一次
+        ("丙(3)", "听见你说～"),
+        ("甲(1)", "听见你说～"),
+        ("乙(2)", "001"),  # 纯数字、命令不算
+        ("丙(3)", "#sl"),
+        ("甲(1)", "001"),
+        ("丙(3)", "#sl"),
+        ("乙(2)", "001"),
+        ("丙(3)", "#sl"),
+        ("甲(1)", "今日老婆"),
+        ("Tenko 功能", "你今天的老婆是…"),
+        ("乙(2)", "今日老婆"),
+        ("Tenko 功能", "你今天的老婆是…"),
+        ("丙(3)", "今日老婆"),
+        ("Tenko 功能", "你今天的老婆是…"),
+        ("乙(2)", "[表情包]"),
+        ("丙(3)", "[表情包]"),
+        ("乙(2)", "[表情包]"),
+        ("丙(3)", "这句太长了不算短说法"),
+    ]:
+        conversation.add(None, speaker, text)
+    conversation.add(None, None, "hyw")  # 她自己说的不算
+    assert chat.slang(conversation.lines) == ["hyw"]
