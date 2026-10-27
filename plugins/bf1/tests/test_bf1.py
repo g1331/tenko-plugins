@@ -247,10 +247,15 @@ async def db(module, monkeypatch):
 
 async def test_binding_lets_queries_skip_the_name(module, player, rendered, db):
     reply = await module._answer(module.stats_reply(None, None, "qq1"))
-    assert reply.startswith("还没绑定 EA 名字")
+    assert reply == "还没绑定：使用 /bf1绑定 你的EA名字，或者在命令后面带上名字"
     assert await module.bind_reply(None, "qq1") == "用法：/bf1绑定 <EA 名字>"
     assert (await module.bind_reply("abc", "qq1")).startswith("已绑定 abc（PID 2）")
     assert await module.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
+    assert await module.bind_reply("abc", "qq1") == "已绑定 abc（PID 2）"
+    # 同一个号改了名再绑，提示改名
+    renamed = {**PERSONA, "display_name": "abd", "time_played_hours": 884}
+    player["/players/search"] = {"personas": [renamed]}
+    assert await module.bind_reply("abd", "qq1") == "已绑定 abd（PID 2），改过名：abc → abd"
     player["/players/2"] = PERSONA
     reply = await module.stats_reply(None, None, "qq1")
     assert reply.startswith("abc 的战地一战绩")
@@ -258,10 +263,12 @@ async def test_binding_lets_queries_skip_the_name(module, player, rendered, db):
 
 async def test_old_json_bindings_move_into_the_database(module, player, db):
     module._legacy.save({"qq1": {"pid": 9, "name": "old"}, "qq2": {"pid": 8, "name": "kept"}})
-    assert (await module.bind_reply("abc", "qq1")).startswith("已绑定 abc")
+    assert await module.bind_reply("abc", "qq1") == "绑定变更：old（PID 9）→ abc（PID 2）"
     # 新绑定覆盖 JSON 里的旧值，JSON 里别人的绑定原样导入
     assert await module.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
     assert await module.bind_reply(None, "qq2") == "当前绑定：kept（PID 8）"
+    # 换了个号再绑，说一声原来的
+    assert await module.bind_reply("abc", "qq2") == "绑定变更：kept（PID 8）→ abc（PID 2）"
     assert not module._legacy.path.exists()
     module._legacy.path.with_name("bindings.json.imported").unlink()
 
@@ -328,7 +335,7 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
     assert [m["sectors"] for m in op["track"]] == [[True] * 3, [True, False, False, False], []]
     assert (op["where"], op["next"], op["defender"]) == ("区域 2/4 · 第 2/3 张图", "西奈沙漠", None)
     assert "美国（2）：low、top" in reply and reply.endswith(
-        "用 /bf1pl gameId\nhttps://bfm.umrbotech.com/bf1/server/7#players"
+        "其他 1 个：/bf1ss test\nhttps://bfm.umrbotech.com/bf1/server/7#players"
     )
     assert ctx["waiting"] == [("排队", "#34d399", [("wait", 91)])] and "排队（1）：wait" in reply
 
@@ -337,7 +344,7 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
 
     api["/servers/7/players"] = down
     # 服名里的短数字按名字搜，不当 gameId
-    assert "「3090」匹配 2 个服务器" in await module.server_reply("3090", None)
+    assert "其他 1 个：/bf1ss 3090" in await module.server_reply("3090", None)
     assert rendered["context"]["players_missing"]
 
 
@@ -441,7 +448,7 @@ async def test_a_request_waits_for_its_account_without_a_deadline(module, db, mo
     _admin(module, monkeypatch, approve, self_id="other")
     assert await module._claim("g", "10", "bot", "f")
     reply = await module.decide("g", "10", "y")
-    assert reply.startswith("收到这份申请的号 bot 现在不在线") and not calls
+    assert reply == "收到申请的号 bot 不在线，上线后再回复" and not calls
     # 一天后这个号上线了，申请照样能处理
     monkeypatch.setattr(module.time, "time", lambda: 1e12)
     _admin(module, monkeypatch, approve)

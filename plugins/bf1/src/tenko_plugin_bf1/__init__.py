@@ -257,7 +257,7 @@ async def _player(name: str | None, user_id: str) -> dict[str, Any]:
         return await _persona(name)
     bound = await _bound(user_id)
     if not bound:
-        raise Bf1Error("还没绑定 EA 名字：先发 /bf1绑定 你的EA名字，或者在命令后面带上名字")
+        raise Bf1Error("还没绑定：使用 /bf1绑定 你的EA名字，或者在命令后面带上名字")
     return await _get(f"/players/{bound.pid}")
 
 
@@ -330,11 +330,18 @@ async def bind_reply(name: str | None, user_id: str) -> str:
             return "用法：/bf1绑定 <EA 名字>"
         return f"当前绑定：{bound.name or '名字未知'}（PID {bound.pid}）"
     persona = await _persona(name)
+    before = await _bound(user_id)
     await _bind(user_id, persona)
-    return (
-        f"已绑定 {persona['display_name']}（PID {persona['persona_id']}），"
-        "之后 /bf1s /bf1w /bf1v 不带名字就查这个号"
-    )
+    pid, new = persona["persona_id"], persona["display_name"]
+    reply = f"已绑定 {new}（PID {pid}）"
+    if before is None:
+        return reply
+    old = before.name or "名字未知"
+    if before.pid != pid:
+        return f"绑定变更：{old}（PID {before.pid}）→ {new}（PID {pid}）"
+    if before.name and before.name != new:
+        return f"{reply}，改过名：{old} → {new}"
+    return reply
 
 
 async def _search_servers(keyword: str) -> tuple[list[dict[str, Any]], int]:
@@ -382,7 +389,7 @@ async def server_reply(keyword: str, service) -> MessageChain | str:
             raise Bf1Error(f"没找到名字含「{keyword}」的服务器（空服不在列表里）")
         game_id = servers[0]["game_id"]
         if total > 1:
-            note = f"「{keyword}」匹配 {total} 个服务器，这是人最多的；要看别的用 /bf1pl gameId"
+            note = f"其他 {total - 1} 个：/bf1ss {keyword}"
     detail, players = await asyncio.gather(
         _get(f"/servers/{game_id}"), _optional(f"/servers/{game_id}/players")
     )
@@ -715,9 +722,7 @@ async def decide(group: str, applicant: str, said: str) -> str:
             return f"{applicant} 的入群申请已经处理过了"
         account = next((a for a in online_accounts() if str(a.self_id) == pending.self_id), None)
         if account is None:
-            return (
-                f"收到这份申请的号 {pending.self_id} 现在不在线，等它上线再回复，或者去 QQ 里处理"
-            )
+            return f"收到申请的号 {pending.self_id} 不在线，上线后再回复"
         flag, pid, name = pending.flag, pending.pid, pending.name
         # 先删再调接口：失败多半是申请在 QQ 里已经处理过了，留着也没用
         await db.delete(pending)
