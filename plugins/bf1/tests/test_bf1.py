@@ -239,6 +239,7 @@ async def db(module, monkeypatch):
     async with engine.begin() as conn:
         await conn.run_sync(module.Binding.__table__.create)
         await conn.run_sync(module.JoinReview.__table__.create)
+        await conn.run_sync(module.JoinRequest.__table__.create)
     monkeypatch.setattr(module, "get_session", lambda: AsyncSession(engine))
     yield
     await engine.dispose()
@@ -366,7 +367,7 @@ async def test_join_request_shows_the_card_and_flags_problems(module, player, re
     message, persona = await module.review_request("10", "新人", "问题：EA名字\n答案：abc", None)
     assert message[0] == Text("收到 新人(10) 的入群申请\n答案：abc\n检查：BFBAN 实锤\n")
     assert isinstance(message[1], Image)
-    assert message[-1].text.endswith("20 分钟内有效")
+    assert message[-1].text.endswith("作为理由拒绝")
     assert persona["persona_id"] == 2
     await module.bind_reply("abc", "10")
     player["/stats/2/ban"] = {"bfban": "unknown", "bfeac": "unknown"}
@@ -405,44 +406,67 @@ def test_reply_to_the_review_message_finds_the_applicant(module):
     assert module._quoted_applicant([Text("y")], {"bot"}) is None
 
 
-async def test_admin_decides_and_approval_binds_the_name(module, db):
+def _admin(module, monkeypatch, approve, self_id="bot"):
+    account = SimpleNamespace(
+        self_id=self_id, protocol=SimpleNamespace(guild_member_approve=approve)
+    )
+    monkeypatch.setattr(module, "online_accounts", lambda: (account,))
+
+
+async def test_admin_decides_and_approval_binds_the_name(module, db, monkeypatch):
     calls = []
 
     async def approve(flag, ok, comment):
         calls.append((flag, ok, comment))
 
-    account = SimpleNamespace(protocol=SimpleNamespace(guild_member_approve=approve))
-    far = module.time.monotonic() + 60
-    module._pending[("g", "10")] = module._Pending(account, "f1", PERSONA, far)
+    _admin(module, monkeypatch, approve)
+    assert await module._claim("g", "10", "bot", "f1")
+    await module._remember_persona("g", "10", PERSONA)
     assert await module.decide("g", "10", "Y") == "已同意 10 的入群申请"
     assert await module.bind_reply(None, "10") == "当前绑定：abc（PID 2）"
-    module._pending[("g", "11")] = module._Pending(account, "f2", PERSONA, far)
+    assert await module._claim("g", "11", "bot", "f2")
+    await module._remember_persona("g", "11", PERSONA)
     assert await module.decide("g", "11", "ID 不对") == "已拒绝 11 的入群申请，理由：ID 不对"
     assert calls == [("f1", True, ""), ("f2", False, "ID 不对")]
     assert await module.bind_reply(None, "11") == "用法：/bf1绑定 <EA 名字>"
-    assert await module.decide("g", "11", "y") == "11 的入群申请已经处理过或超时了"
-    module._pending[("g", "12")] = module._Pending(account, "f3", None, 0)
-    assert await module.decide("g", "12", "y") == "12 的入群申请已经处理过或超时了"
+    assert await module.decide("g", "11", "y") == "11 的入群申请已经处理过了"
 
 
-async def test_approval_failure_is_reported(module, db):
+async def test_a_request_waits_for_its_account_without_a_deadline(module, db, monkeypatch):
+    calls = []
+
+    async def approve(flag, ok, comment):
+        calls.append(flag)
+
+    _admin(module, monkeypatch, approve, self_id="other")
+    assert await module._claim("g", "10", "bot", "f")
+    reply = await module.decide("g", "10", "y")
+    assert reply.startswith("收到这份申请的号 bot 现在不在线") and not calls
+    # 一天后这个号上线了，申请照样能处理
+    monkeypatch.setattr(module.time, "time", lambda: 1e12)
+    _admin(module, monkeypatch, approve)
+    assert await module.decide("g", "10", "y") == "已同意 10 的入群申请" and calls == ["f"]
+
+
+async def test_joining_clears_the_pending_request(module, db):
+    assert await module._claim("g", "10", "bot", "f")
+    await module._drop_request("g", "10")
+    assert await module.decide("g", "10", "y") == "10 的入群申请已经处理过了"
+
+
+async def test_approval_failure_is_reported(module, db, monkeypatch):
     async def approve(flag, ok, comment):
         raise RuntimeError("不是管理员")
 
-    account = SimpleNamespace(protocol=SimpleNamespace(guild_member_approve=approve))
-    module._pending[("g", "10")] = module._Pending(account, "f", None, module.time.monotonic() + 9)
+    _admin(module, monkeypatch, approve)
+    assert await module._claim("g", "10", "bot", "f")
     assert await module.decide("g", "10", "y") == "处理 10 的入群申请失败：不是管理员"
 
 
-def test_the_first_admin_account_claims_the_request(module):
-    now = module.time.monotonic()
-    module._pending.pop(("g", "10"), None)
-    assert module._claim("g", "10")
-    module._pending[("g", "10")] = module._Pending(None, "f", None, now + module.REVIEW_SECONDS)
-    assert not module._claim("g", "10")
+async def test_the_first_admin_account_claims_the_request(module, db, monkeypatch):
+    assert await module._claim("g", "10", "bot", "f")
+    assert not await module._claim("g", "10", "bot2", "f")
     # 一分钟前的申请没审完、又申请了一次：照常处理新的
-    module._pending[("g", "10")] = module._Pending(
-        None, "f", None, now + module.REVIEW_SECONDS - 60
-    )
-    assert module._claim("g", "10")
-    del module._pending[("g", "10")]
+    now = module.time.time()
+    monkeypatch.setattr(module.time, "time", lambda: now + 60)
+    assert await module._claim("g", "10", "bot2", "f9")
