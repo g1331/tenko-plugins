@@ -61,7 +61,6 @@ from .chat import (
     summary_messages,
 )
 from .persona import (
-    DAY_PROMPT,
     DIGEST_PROMPT,
     FOLLOW_HINT,
     LONG_HINT,
@@ -72,10 +71,10 @@ from .persona import (
     answer_hint,
     boss_hint,
     command_hint,
-    day_hint,
     memory_hint,
     mention_hint,
     repeat_hint,
+    rules,
     search_hint,
 )
 from .stickers import TOKEN, Stickers
@@ -166,9 +165,6 @@ _streaks: dict[tuple[str, str], int] = {}
 _talks: dict[tuple[str, str], tuple[int, float]] = {}
 _TALK_GAP = 300
 _LONG_ROUNDS = 4  # 每聊满 4 轮提醒一次她别在一个梗上打转，每轮都提她就每轮换话题
-# 她今天的几件小事，按人设每天生成一次：{日期: 内容}，存最近几天，生成时避开重复。
-day_store = Store("days", version=1)
-_day_lock = asyncio.Lock()
 _waiters: dict[str, asyncio.Task[None]] = {}
 # 她攒下的档案：{"people": {QQ号: {"name", "note"}}, "groups": {会话: {"note", "upto"}}}。
 # 人所有群共用，群各一份；群里比上次整理多出 _DIGEST_EVERY 条就在后台让模型整理一次，
@@ -722,7 +718,7 @@ async def _run_command(
         return command_hint(text, False, asker)
     token = _speaking.set(True)  # 自己记，带上图给她看，不走 on_sent 的截断和“[图片]”
     try:
-        receipts = await session.send(result)
+        receipts = await _send(session, result)
     finally:
         _speaking.reset(token)
     elements = list(result) if not isinstance(result, str) else [Text(result)]
@@ -743,17 +739,38 @@ async def _run_command(
     return command_hint(text, True, asker)
 
 
-def _persona() -> tuple[str, str, list[str]]:
-    """当前人设：(名字, 人设, 梗和口头禅)。名字为空时只靠配置里的唤醒词。"""
+async def _send(session: Session, content) -> list:
+    """发消息；NapCat 等 QQ 回执超时（retcode 1200）时消息通常已经送达，当作发出去了。
+
+    不然异常一路抛出去：战绩图群友已经看到了，她却不接着说话、结果也没记下，下次被叫又查一遍。
+    """
+
+    try:
+        return await session.send(content)
+    except Exception as error:
+        seen: BaseException | None = error
+        while seen is not None:
+            if "Timeout: NTEvent" in str(seen) and "/sendMsg" in str(seen):
+                logger.info("AI群友发消息等回执超时，当作已发出：{!r}", error)
+                return []
+            seen = seen.__cause__
+        raise
+
+
+def _persona() -> tuple[str, str, list[str], bool]:
+    """当前人设：(名字, 人设, 梗和口头禅, 有没有自己的日子)。名字为空时只靠配置里的唤醒词。
+
+    自定义人设只写了人物本身，有日子才像个真人；想要不编群外经历的用预置的小埋。
+    """
 
     chosen = persona_store.load(default={})
     name = chosen.get("name", "")
     if chosen.get("text"):
-        return name, chosen["text"], []
+        return name, chosen["text"], [], True
     if name in PRESETS:
         return name, *PRESETS[name]
     if config.persona:
-        return "", config.persona, config.catchphrases
+        return "", config.persona, config.catchphrases, True
     return "大肥鱼", *PRESETS["大肥鱼"]
 
 
@@ -795,40 +812,6 @@ def _rounds(key: str, speaker: str | None) -> int:
     count = count + 1 if now - last < _TALK_GAP else 1
     _talks[(key, speaker or "")] = (count, now)
     return count
-
-
-async def _today(key: str) -> str:
-    """她今天的几件小事；当天第一次用时按人设生成，失败就当没有，下次再试。"""
-
-    day = datetime.now()
-    today = day.date().isoformat()
-    async with _day_lock:
-        days = day_store.load(default={})
-        if today in days:
-            return days[today]
-        recent = "；".join(days[d] for d in sorted(days)[-2:])
-        before = f"最近几天是：{recent}别和这些重复。" if recent else ""
-        date = f"{today}（周{'一二三四五六日'[day.weekday()]}）"
-        try:
-            text, usage = await llm.summarize(
-                client,
-                model=config.model,
-                messages=[
-                    {"role": "system", "content": _persona()[1]},
-                    {"role": "user", "content": DAY_PROMPT.format(date=date, before=before)},
-                ],
-                max_tokens=200,
-            )
-        except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
-            logger.warning("AI群友生成今天的小事失败：{!r}", error)
-            return ""
-        if not in_sandbox():
-            usage_book.add(day.date(), key, usage, estimate_cost(usage, day))
-        lines = [re.sub(r"^\s*(?:[-·•]|\d+[.、)])\s*", "", line) for line in text.splitlines()]
-        text = "；".join(line.rstrip("。；") for line in lines if line) + "。" if text else ""
-        days = {d: days[d] for d in sorted(days)[-2:]} | {today: text}
-        day_store.save(days)
-        return text
 
 
 def _load(conversation: Conversation, now: float) -> float:
@@ -909,7 +892,8 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
     await _fetch_pictures(shown)
     for line in shown:
         line.shown = True
-    persona = _persona()[1]
+    _, persona, _, life = _persona()
+    house = rules(life)
 
     catalog = ""
     if config.sticker_limit:
@@ -922,7 +906,7 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
     force = force and (retry or not any(line.sticker and line.pictures for line in shown))
 
     async def ask(images: int):
-        messages = build_messages(persona, conversation, hint, images, catalog)
+        messages = build_messages(persona, conversation, hint, images, catalog, house)
         upto = conversation.asked = conversation.lines[-1].number if conversation.lines else 0
         calls, usage = await llm.chat(
             client, model=config.model, messages=messages, force=force, max_tokens=_MAX_TOKENS
@@ -930,7 +914,7 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
         conversation.passed = max(conversation.passed, upto)
         # 给“上下文”命令校准：粗估的各部分按这次实际输入等比例折算。
         pictures = sum(line.image_tokens for line in shown if line.pictures) if images else 0
-        rough = sum(context_parts(persona, _TOOLS, conversation, catalog, hint).values())
+        rough = sum(context_parts(persona, _TOOLS, conversation, catalog, hint, house).values())
         text = usage.get("prompt_tokens", 0) - pictures
         if text > 0 and rough > 0:
             conversation.scale = text / rough
@@ -972,7 +956,7 @@ async def respond(
         if _over_budget(key):
             return
         if target is not None:
-            hint = mention_hint(target.number, mood, target.text)
+            hint = mention_hint(target.number, mood, target.text, _persona()[3])
         else:
             hint = (
                 answer_hint(answer.number, answer.text, conversation.her_words_before(answer))
@@ -990,7 +974,7 @@ async def respond(
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
         hint = (
-            f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。{day_hint(await _today(key))}"
+            f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
             f"{_recall(key, conversation)}{hint}{repeat_hint(said, phrases)}{SHORT_HINT}"
         )
         conversation.unseen = 0
@@ -1131,8 +1115,8 @@ async def respond(
                     # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
                     token = _speaking.set(True)
                     try:
-                        receipts = await session.send(
-                            content if quote else [Message(content=content)]
+                        receipts = await _send(
+                            session, content if quote else [Message(content=content)]
                         )
                     finally:
                         _speaking.reset(token)
@@ -1730,7 +1714,6 @@ async def manage_persona(
             return "要写名字和人设，例如：/AI群友 人设 改 阿呆 你是阿呆，……"
         else:
             persona_store.save({"name": name, "text": text})
-        day_store.save({})  # 今天的小事是按旧人设编的，换了就重新编
         now = _persona()[0] or "配置里的人设"
         return (
             f"换成{now}了，所有群都生效，叫“{now}”也算叫她。各群之前的聊天还是旧人设说的，"
@@ -1782,10 +1765,11 @@ def format_context(key: str, conversation: Conversation) -> str:
     if stickers is None:
         stickers = sticker_book.moods() if config.sticker_limit else {}
     catalog = sticker_book.catalog(stickers) if config.sticker_limit else ""
+    _, persona, _, life = _persona()
     parts = {
         name: rough * conversation.scale
         for name, rough in context_parts(
-            _persona()[1], _TOOLS, conversation, catalog, conversation.hint
+            persona, _TOOLS, conversation, catalog, conversation.hint, rules(life)
         ).items()
     }
     seen = [line for line in lines if line.shown]

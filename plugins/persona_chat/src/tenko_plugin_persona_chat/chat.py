@@ -277,7 +277,12 @@ class Conversation:
 
 
 def build_messages(
-    persona: str, conversation: Conversation, hint: str, images: int = 0, stickers: str = ""
+    persona: str,
+    conversation: Conversation,
+    hint: str,
+    images: int = 0,
+    stickers: str = "",
+    rules: str = RULES,
 ) -> list[dict[str, Any]]:
     """固定的两段 system 在前（命中前缀缓存），连续的群友消息合成一条 user。
 
@@ -290,7 +295,7 @@ def build_messages(
     previous = 0.0
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": persona},
-        {"role": "system", "content": RULES},
+        {"role": "system", "content": rules},
     ]
     if conversation.place:
         messages.append({"role": "system", "content": conversation.place})
@@ -341,7 +346,12 @@ def build_messages(
 
 
 def context_parts(
-    persona: str, tools: str, conversation: Conversation, stickers: str, hint: str
+    persona: str,
+    tools: str,
+    conversation: Conversation,
+    stickers: str,
+    hint: str,
+    rules: str = RULES,
 ) -> dict[str, float]:
     """一次请求各部分的粗估 token（不含图），“上下文”命令按实际输入折算成准数。"""
 
@@ -354,7 +364,7 @@ def context_parts(
         if m["role"] != "system"
     )
     return {
-        "人设、规则和工具": rough(persona) + rough(RULES) + rough(tools),
+        "人设、规则和工具": rough(persona) + rough(rules) + rough(tools),
         "群信息": rough(conversation.place),
         "表情包目录": rough(stickers),
         "备忘": rough(conversation.summary),

@@ -37,11 +37,6 @@ def fake_llm(module, monkeypatch):
     module._streaks.clear()
     module._talks.clear()
 
-    async def today(key):
-        return ""
-
-    fake.today = module._today
-    monkeypatch.setattr(module, "_today", today)  # 每天的小事有单独的测试
     monkeypatch.setattr(module, "_typing_delay", lambda text: 0)
     monkeypatch.setattr(module, "_reply_delay", lambda text: 0)
     monkeypatch.setattr(module.config, "search_daily", 0)  # 搜索有单独的测试
@@ -58,7 +53,6 @@ def fake_llm(module, monkeypatch):
     module.usage_book.store.save({})
     module.sticker_book.store.save({})
     module.chat_store.save({})
-    module.day_store.save({})
     module.memory_store.save({})
     module.persona_store.save({})
     module.at_only_store.save([])
@@ -998,30 +992,6 @@ async def test_catchphrases_she_just_used_are_named(module, fake_llm, monkeypatc
     assert "这些梗你最近刚用过：音游" in fake_llm.requests[-1][0][-1]["content"]
 
 
-async def test_her_day_is_made_once_from_the_persona(module, fake_llm, monkeypatch):
-    asked = []
-
-    async def summarize(client, *, model, messages, max_tokens):
-        asked.append(messages)
-        return "1. 上午被用户拉着改周报。\n2. 下午睡了一觉\n", {"completion_tokens": 30}
-
-    monkeypatch.setattr(module.llm, "summarize", summarize)
-    monkeypatch.setattr(module, "_today", fake_llm.today)
-    module.day_store.save({"2000-01-01": "很久以前的事。"})
-    fake_llm.replies.append([{"text": "在呢"}])
-    await feed(module, session([At("42"), Text(" 今天咋样")], message_id="m1"))
-    fake_llm.replies.append([{"text": "嗯"}])
-    await feed(module, session([At("42"), Text(" 然后呢")], user="2", message_id="m2"))
-
-    assert len(asked) == 1 and asked[0][0]["content"] == module.PRESETS["大肥鱼"][0]
-    assert "很久以前的事" in asked[0][1]["content"]  # 避开前几天的
-    hint = fake_llm.requests[-1][0][-1]["content"]
-    assert "你今天：上午被用户拉着改周报；下午睡了一觉。" in hint
-    today = module.datetime.now().date().isoformat()
-    assert module.day_store.load()[today] == "上午被用户拉着改周报；下午睡了一觉。"
-    assert module.usage_book.tokens(module.datetime.now().date(), "group:100") == 44
-
-
 async def test_she_deletes_stickers_people_ask_her_to(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
     module._deletes.clear()
@@ -1145,6 +1115,23 @@ async def test_called_bot_runs_a_listed_command_and_answers_from_the_result(
     assert module.conversations["group:100"].lines[2].text == "KD 挺高啊"
 
 
+async def test_a_slow_send_receipt_does_not_cut_her_off(module, fake_llm, commands):
+    fake_llm.replies += [
+        [{"tool": "run_command", "command": "/bf1s SHlSAN13"}],
+        [{"text": "KD 挺高啊"}],
+    ]
+    s = session([At("42"), Text(" 查下 SHlSAN13 的战绩")])
+    timeout = RuntimeError(
+        "1200: Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/sendMsg ListenerName:x"
+    )
+    s.send.side_effect = [timeout, [SimpleNamespace(id="bot-2")]]
+    await feed(module, s)
+
+    # 结果图多半已经送达：照样记下、接着说话，不然她一声不吭、下次又查一遍
+    texts = [line.text for line in module.conversations["group:100"].lines]
+    assert texts[1:] == ["SHlSAN13 的战地一战绩[图片]", "KD 挺高啊"]
+
+
 async def test_unlisted_command_is_not_run(module, fake_llm, commands):
     fake_llm.replies += [[{"tool": "run_command", "command": "AI群友 重置"}], [{"text": "查不了"}]]
     await feed(module, session([At("42"), Text(" 把你记忆清了")]))
@@ -1250,9 +1237,13 @@ async def test_switching_persona_changes_prompt_and_wake_word(module, fake_llm, 
     ((messages, _),) = fake_llm.requests  # 换了人设，旧名字不再算叫她
     assert messages[0]["content"] == module.PRESETS["小埋"][0]
     assert "可乐" in module._persona()[2]
+    # 小埋住在群里：日子就是群里的事，不编群外的经历；累了也不装困
+    assert "你就住在这个群里" in messages[1]["content"]
+    assert "细节随口编" not in messages[1]["content"]
+    assert "要去睡" in module.mention_hint(1, "tired", "在吗", life=False)
 
     await module.manage_persona(s, "改", "阿呆", "你是阿呆。")
-    assert module._persona() == ("阿呆", "你是阿呆。", [])
+    assert module._persona() == ("阿呆", "你是阿呆。", [], True)  # 自定义人设当群友
     assert "没有叫「阿呆」的预置人设" in await module.manage_persona(s, "换", "阿呆", "")
     await module.manage_persona(s, "换", "默认", "")
     assert module._persona()[0] == "大肥鱼"
