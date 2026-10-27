@@ -389,9 +389,12 @@ async def server_reply(keyword: str, service) -> MessageChain | str:
         _get(f"/servers/{game_id}"), _optional(f"/servers/{game_id}/players")
     )
     context = pages.server_page(detail, players, _source())
-    # 匹配说明跟在图后面当文字，不画进图里
+    # 匹配说明和网页链接跟在图后面当文字，不画进图里
+    link = f"{config.base_url.rstrip('/')}/bf1/server/{game_id}#players"
     fallback = format_server(detail, players)
-    return await _reply(service, "server.html", context, fallback, note or None)
+    return await _reply(
+        service, "server.html", context, fallback, f"{note}\n{link}" if note else link
+    )
 
 
 def format_overview(overview: dict[str, Any]) -> str:

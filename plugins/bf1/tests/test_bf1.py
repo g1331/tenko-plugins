@@ -326,7 +326,9 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
     op = ctx["operation"]
     assert [m["sectors"] for m in op["track"]] == [[True] * 3, [True, False, False, False], []]
     assert (op["where"], op["next"], op["defender"]) == ("区域 2/4 · 第 2/3 张图", "西奈沙漠", None)
-    assert "美国（2）：low、top" in reply and reply.endswith("用 /bf1pl gameId")
+    assert "美国（2）：low、top" in reply and reply.endswith(
+        "用 /bf1pl gameId\nhttps://bfm.umrbotech.com/bf1/server/7#players"
+    )
     assert ctx["waiting"] == [("排队", "#34d399", [("wait", 91)])] and "排队（1）：wait" in reply
 
     def down(**_):
