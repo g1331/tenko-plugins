@@ -96,6 +96,9 @@ class PersonaChatConfig(BasicConfModel):
     api_key: str = ""
     """接口密钥；为空时插件不应答。只写在本机配置里，不要提交到仓库。"""
     model: str = "deepseek-flash"
+    reasoning_effort: str = "high"
+    """聊天回复的思考强度：low、high、max，留空不思考。思考每次只多几十到一两百个输出 token，
+    回放 40 个场景盲评 24:12 胜过不思考：更看得懂在逗谁、在玩什么梗，事实也更少说错。"""
     wake_words: list[str] = model_field(
         default_factory=list, description="除了人设的名字，消息里含这些词时也当作在叫 bot。"
     )
@@ -934,7 +937,12 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
         messages = build_messages(persona, conversation, hint, images, catalog, house)
         upto = conversation.asked = conversation.lines[-1].number if conversation.lines else 0
         calls, usage = await llm.chat(
-            client, model=config.model, messages=messages, force=force, max_tokens=_MAX_TOKENS
+            client,
+            model=config.model,
+            messages=messages,
+            force=force,
+            max_tokens=_MAX_TOKENS,
+            effort=config.reasoning_effort,
         )
         conversation.passed = max(conversation.passed, upto)
         # 给“上下文”命令校准：粗估的各部分按这次实际输入等比例折算。
@@ -1139,7 +1147,9 @@ async def respond(
                 continue
             quoted = conversation.by_number(arguments.get("reply_to"))
             if quoted is None and sent == 0:
-                quoted = target
+                # 跟聊时提示只让她回 answer 那条：开思考时她多半把话直接写进正文，填不了 reply_to，
+                # 那条被后面的话盖住了也照样引用，不然看不出她在回谁。
+                quoted = target or answer
             # 按编号找人，模型只能 @ 窗口里说过话的群友，编不出 QQ 号也 @ 不了全体。
             called = conversation.by_number(arguments.get("mention"))
             # 叫别的 bot 时模型照群友的写法打“@昵称 指令”，要换成真的 @ 对方才会响应。

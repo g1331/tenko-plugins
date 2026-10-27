@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -192,28 +193,67 @@ async def chat(
     messages: list[dict[str, Any]],
     force: bool,
     max_tokens: int,
+    effort: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """返回 send_message 和其他工具的参数列表（其他工具的带 ``"tool"``）和 usage。
 
-    assistant 的 content 一律丢弃。
+    ``effort`` 是思考强度（low/high/max），空的不思考。思考时接口只认 ``tool_choice=auto``，
+    模型常把要说的话直接写进 content：没调 send_message 时 content 就当要说的话，
+    否则 content 丢弃。``force`` 时思考完还是没开口，就不思考、强制只能说话再问一次。
     """
 
-    response = await client.post(
-        "/chat/completions",
-        json={
-            "model": model,
-            "messages": messages,
-            # 群聊闲聊不需要推理；关掉思考才能用强制工具调用。
+    calls, usage = await _chat(client, model, messages, force, max_tokens, effort)
+    if effort and force and not any("tool" not in c for c in calls):
+        kept = [c for c in calls if c["tool"] in _STICKER_TOOLS]
+        again, more = await _chat(client, model, messages, True, max_tokens, "")
+        calls = kept + again
+        usage = {
+            **more,
+            **{k: usage.get(k, 0) + more.get(k, 0) for k in _BILLED if k in usage or k in more},
+        }
+    return calls, usage
+
+
+# usage 里按 token 计费的几项：再问一次时两次相加；prompt_tokens 取后一次，校准上下文大小用。
+_BILLED = ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "completion_tokens")
+_STICKER_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker")
+# 思考的 token 也算在 max_tokens 里；给它另留一份，不然想完了没字数说话。
+_THINK_TOKENS = 2048
+
+
+async def _chat(
+    client: httpx.AsyncClient,
+    model: str,
+    messages: list[dict[str, Any]],
+    force: bool,
+    max_tokens: int,
+    effort: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "tools": TOOLS,
+        "max_tokens": max_tokens,
+    }
+    if effort:
+        payload |= {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": effort,
+            "tool_choice": "auto",
+            "max_tokens": max_tokens + _THINK_TOKENS,
+        }
+    else:
+        # 关掉思考才能用强制工具调用。
+        payload |= {
             "thinking": {"type": "disabled"},
-            "tools": TOOLS,
             "tool_choice": FORCE_SEND if force else "required",
-            "max_tokens": max_tokens,
-        },
-    )
+        }
+    response = await client.post("/chat/completions", json=payload)
     response.raise_for_status()
     data = response.json()
+    message = data["choices"][0]["message"]
     calls = []
-    for call in data["choices"][0]["message"].get("tool_calls") or []:
+    for call in message.get("tool_calls") or []:
         function = call.get("function") or {}
         name = function.get("name")
         # stay_silent 没有参数要带回去；别的工具都从 TOOLS 里认，新加的工具不会被漏掉。
@@ -228,8 +268,35 @@ async def chat(
         if name != "send_message":
             calls.append({**arguments, "tool": name})
         elif isinstance(arguments.get("text"), str):
-            calls.append(arguments)
+            calls.extend(_quoted(arguments))
+    said = (message.get("content") or "").strip()
+    if effort and said and not any("tool" not in c for c in calls):
+        calls.extend(_quoted({"text": said}))
     return calls, data.get("usage") or {}
+
+
+# 直接写字时没法填 reply_to，规则让她在那句开头写“回复#编号 ”；她偶尔照记录的格式抄成
+# “回复#12（甲说的“…”） ”，括号一起去掉。
+_QUOTE = re.compile(r"^回复#(\d+)(?:（[^\n]*?）)?\s*", re.M)
+
+
+def _quoted(call: dict[str, Any]) -> list[dict[str, Any]]:
+    """把 text 里行首的“回复#编号 ”换成 reply_to；接了几条就拆成几次发言，各引用各的。"""
+
+    text = call["text"]
+    marks = list(_QUOTE.finditer(text))
+    if not marks:
+        return [call]
+    calls = []
+    if head := text[: marks[0].start()].strip():
+        calls.append({**call, "text": head})
+    for mark, after in zip(marks, [*marks[1:], None], strict=True):
+        piece = text[mark.end() : after.start() if after else len(text)].strip()
+        if piece:
+            # @ 只跟着第一次，不然拆开的每次都 @ 一遍。
+            extra = {} if calls else {k: v for k, v in call.items() if k == "mention"}
+            calls.append({**extra, "text": piece, "reply_to": int(mark[1])})
+    return calls
 
 
 async def digest(

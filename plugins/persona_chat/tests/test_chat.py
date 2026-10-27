@@ -380,6 +380,78 @@ async def test_every_tool_call_but_silence_comes_back(module):
     assert calls == [{"name": "难绷", "tool": "delete_sticker"}, {"text": "行 删了"}]
 
 
+async def test_thinking_takes_plain_content_as_what_she_says(module):
+    import json
+
+    import httpx
+
+    payloads = []
+
+    def reply(request):
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "是康神吧"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        calls, _ = await module.llm.chat(
+            c, model="m", messages=[], force=False, max_tokens=9, effort="high"
+        )
+    assert calls == [{"text": "是康神吧"}]
+    # 思考时接口只认 auto；思考的 token 另留一份
+    assert payloads[0]["tool_choice"] == "auto"
+    assert payloads[0]["reasoning_effort"] == "high"
+    assert payloads[0]["max_tokens"] > 9
+
+
+async def test_quote_marks_in_plain_content_become_reply_to(module):
+    import httpx
+
+    content = "回复#12（甲说的“这图谁做的”） 笑死 做得真像\n回复#14 你那把也太菜了"
+
+    def reply(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        calls, _ = await module.llm.chat(
+            c, model="m", messages=[], force=False, max_tokens=9, effort="high"
+        )
+    assert calls == [
+        {"text": "笑死 做得真像", "reply_to": 12},
+        {"text": "你那把也太菜了", "reply_to": 14},
+    ]
+
+
+async def test_forced_thinking_that_stays_quiet_asks_again_without_thinking(module):
+    import json
+
+    import httpx
+
+    payloads = []
+
+    def reply(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            call = {"function": {"name": "save_sticker", "arguments": '{"name": "难绷"}'}}
+            message = {"tool_calls": [call, {"function": {"name": "stay_silent"}}]}
+            usage = {"completion_tokens": 100, "prompt_cache_miss_tokens": 50}
+        else:
+            call = {"function": {"name": "send_message", "arguments": '{"text": "在"}'}}
+            message = {"tool_calls": [call]}
+            usage = {"completion_tokens": 5, "prompt_cache_miss_tokens": 50, "prompt_tokens": 50}
+        return httpx.Response(200, json={"choices": [{"message": message}], "usage": usage})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        calls, usage = await module.llm.chat(
+            c, model="m", messages=[], force=True, max_tokens=9, effort="high"
+        )
+    # 收藏表情包留着，话由不思考、强制说话的那次补上；两次的钱都记上
+    assert calls == [{"name": "难绷", "tool": "save_sticker"}, {"text": "在"}]
+    assert payloads[1]["thinking"] == {"type": "disabled"}
+    assert payloads[1]["tool_choice"]["function"]["name"] == "send_message"
+    assert usage["completion_tokens"] == 105
+    assert usage["prompt_cache_miss_tokens"] == 100
+    assert usage["prompt_tokens"] == 50
+
+
 def test_slang_counts_short_lines_several_people_send(chat):
     conversation = chat.Conversation()
     for speaker, text in [

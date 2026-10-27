@@ -19,7 +19,7 @@ def untimed(text):
 def fake_llm(module, monkeypatch):
     fake = SimpleNamespace(replies=[], requests=[], roles={})
 
-    async def chat(client, *, model, messages, force, max_tokens):
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
         fake.requests.append((messages, force))
         return fake.replies.pop(0) if fake.replies else [], {"completion_tokens": 7}
 
@@ -383,7 +383,7 @@ async def test_rejected_pictures_are_dropped_and_retried(module, fake_llm, monke
     monkeypatch.setattr(module, "_download", download)
     seen = []
 
-    async def chat(client, *, model, messages, force, max_tokens):
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
         has_image = any(isinstance(m["content"], list) for m in messages)
         seen.append(has_image)
         if has_image:
@@ -403,7 +403,7 @@ async def test_rejected_pictures_are_dropped_and_retried(module, fake_llm, monke
 
 
 async def test_content_risk_drops_only_the_unchecked_lines(module, fake_llm, monkeypatch):
-    async def chat(client, *, model, messages, force, max_tokens):
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
         if "敏感" in str(messages):
             request = httpx.Request("POST", "https://x")
             body = '{"error":{"message":"Content Exists Risk","type":"invalid_request_error"}}'
@@ -445,7 +445,7 @@ async def test_rapid_back_and_forth_loosens_then_stops(module, fake_llm, monkeyp
 async def test_long_context_is_compressed_after_reply(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "context_tokens", 100)
 
-    async def chat(client, *, model, messages, force, max_tokens):
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
         return [{"text": "嗯"}], {"prompt_tokens": 150, "prompt_cache_miss_tokens": 150}
 
     async def summarize(client, *, model, messages, max_tokens):
@@ -468,7 +468,7 @@ async def test_compress_drops_enough_that_the_next_reply_stays_under(module, fak
     # 不然压完还超，每次回复都改写备忘，前缀缓存全失效。
     monkeypatch.setattr(module.config, "context_tokens", 1000)
 
-    async def chat(client, *, model, messages, force, max_tokens):
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
         return [{"text": "嗯"}], {"prompt_tokens": 1001}
 
     async def summarize(client, *, model, messages, max_tokens):
@@ -553,6 +553,21 @@ async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm)
     # 再来一条不是紧跟着她的，照旧攒够两条才问
     await feed(module, session([Text("你呢")], user="2", message_id="m2"))
     assert "group:100" not in module._waiters and len(fake_llm.requests) == 2
+
+
+async def test_answering_a_buried_follow_up_quotes_it(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "quiet_seconds", 0.05)
+    fake_llm.replies.append([{"text": "你追到哪了"}])
+    await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
+
+    # 接她话的那条被别人的话盖住了：开思考时她填不了 reply_to，也要引用那条
+    fake_llm.replies.append([{"text": "这么快"}])
+    s = session([Text("第一千话")], message_id="m1")
+    await feed(module, s)
+    await feed(module, session([Text("饿了")], user="2", message_id="m2"))
+    await module._waiters["group:100"]
+    sent = s.send.call_args_list[-1].args[0]
+    assert isinstance(sent[0], Quote) and sent[0].id == "m1"
 
 
 async def test_she_stays_out_of_a_bot_talk_repeat_chain(module, fake_llm, monkeypatch):
@@ -1079,7 +1094,7 @@ async def test_tenko_replies_are_context_but_her_own_are_not_doubled(module, fak
 
 
 async def test_context_parts_add_up_to_the_last_real_prompt(module, fake_llm, monkeypatch):
-    async def chat(client, *, model, messages, force, max_tokens):
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
         return [{"text": "嗯"}], {"prompt_tokens": 5000, "prompt_cache_hit_tokens": 4500}
 
     monkeypatch.setattr(module.llm, "chat", chat)
