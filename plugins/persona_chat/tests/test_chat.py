@@ -78,6 +78,25 @@ def test_shape_flattens_and_cuts_at_sentence_end(chat):
     assert chat.shape("#4 阿明这波陪跑", 50) == "阿明这波陪跑"
 
 
+def test_banned_words_ignore_case_spaces_and_punctuation(chat):
+    words = ["lanyinzhenshen", "蓝银真神"]
+    assert chat.banned("你知道 Lan Yin-Zhen.Shen 吗", words) == "lanyinzhenshen"
+    assert chat.banned("全角的ＬＡＮＹＩＮ ｚｈｅｎｓｈｅｎ", words) == "lanyinzhenshen"
+    assert chat.banned("藍 銀·草", ["蓝银"]) == "蓝银"  # 繁体
+    assert chat.banned("蓝银草真好看", words) is None
+    assert chat.banned("随便什么", ["", " "]) is None  # 空词不把什么都拦下
+
+
+def test_long_banned_words_also_match_by_sound(chat):
+    words = ["lanyinzhenshen", "西安"]
+    for text in ("蓝银真神", "懒音真神", "蓝yin真shen", "LAN 银 zhen 神"):
+        assert chat.banned(text, words) == "lanyinzhenshen", text
+    assert chat.banned("今天篮球打得真神了", words) is None
+    # 读音太短的只按字面比：“西安”拦不到同音的“先”
+    assert chat.banned("我先吃饭", words) is None
+    assert chat.banned("去西安玩", words) == "西安"
+
+
 def test_cost_doubles_in_weekday_peak_hours(chat):
     usage = {
         "prompt_cache_miss_tokens": 1_000_000,

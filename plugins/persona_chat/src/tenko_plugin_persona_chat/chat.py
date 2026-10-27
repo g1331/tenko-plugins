@@ -7,12 +7,15 @@ import base64
 import io
 import re
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+import zhconv
 from PIL import Image, ImageOps
+from pypinyin import lazy_pinyin
 
 from .persona import RULES, SUMMARY_PROMPT
 
@@ -62,6 +65,10 @@ class Conversation:
     lines: deque[Line] = field(init=False)
     next_number: int = 1
     unseen: int = 0  # 上次请求之后新进来的群友消息数
+    # 请求成功时记录里最后一条的编号；正在发的请求带到哪一条。被内容审核拒绝时，
+    # 触发的只可能在这两者之间，撤掉这几条就行，前面的都审过了。
+    passed: int = 0
+    asked: int = 0
     last_message_at: float = 0.0
     last_unprompted_at: float = float("-inf")
     last_reply_at: float = float("-inf")
@@ -115,6 +122,16 @@ class Conversation:
                 break
             said.insert(0, other.text)
         return " ".join(said)
+
+    def drop_unchecked(self) -> list[Line]:
+        """撤掉最近一次被拒的请求里新带上、还没审过的消息，返回撤掉的。"""
+
+        dropped = [line for line in self.lines if self.passed < line.number <= self.asked]
+        if dropped:
+            kept = [line for line in self.lines if line not in dropped]
+            self.lines.clear()
+            self.lines.extend(kept)
+        return dropped
 
     def by_number(self, number: object) -> Line | None:
         return next((line for line in self.lines if line.number == number), None)
@@ -221,6 +238,7 @@ class Conversation:
         return {
             "summary": self.summary,
             "next_number": self.next_number,
+            "passed": self.passed,
             "lines": [
                 {
                     "number": line.number,
@@ -236,7 +254,11 @@ class Conversation:
 
     @classmethod
     def restore(cls, data: dict[str, Any]) -> Conversation:
-        conversation = cls(summary=data["summary"], next_number=data["next_number"])
+        # 旧存盘没有 passed：之前都正常聊过来了，当作全审过。
+        passed = data.get("passed", data["next_number"] - 1)
+        conversation = cls(
+            summary=data["summary"], next_number=data["next_number"], passed=passed, asked=passed
+        )
         conversation.lines.extend(Line(images=(), **line) for line in data["lines"])
         return conversation
 
@@ -244,7 +266,11 @@ class Conversation:
         """沙盒用的副本：读得到当前窗口，写入不影响真实会话。"""
 
         clone = Conversation(
-            self.size, next_number=self.next_number, summary=self.summary, place=self.place
+            self.size,
+            next_number=self.next_number,
+            summary=self.summary,
+            place=self.place,
+            passed=self.passed,
         )
         clone.lines.extend(self.lines)
         return clone
@@ -453,6 +479,43 @@ def shape(text: str, limit: int) -> str:
     cut = text[:limit]
     end = max(cut.rfind(mark) for mark in _SENTENCE_ENDS)
     return cut[: end + 1] if end >= limit // 2 else cut.rstrip() + "…"
+
+
+def banned(text: str, words: list[str]) -> str | None:
+    """``text`` 里含的第一个违禁词。
+
+    先统一成简体、半角、小写，去掉空格、标点和符号，“Ｌan Yin-Zhen.Shen”“藍 銀·真 神”都认得出来。
+    词条读出来够长（拼音不少于 ``_SOUND_LETTERS`` 个字母）的再按拼音比一次，
+    写成“lanyinzhenshen”就能拦下“蓝银真神”“懒音真神”“蓝yin真shen”；
+    短的读音撞车太多（“西安”和“先”都是 xian），只按字面比。
+    """
+
+    plain = _bare(text)
+    sound = None
+    for word in words:
+        if not (bare := _bare(word)):
+            continue
+        if bare in plain:
+            return word
+        if len(spelled := _spell(bare)) >= _SOUND_LETTERS:
+            sound = sound if sound is not None else _spell(plain)
+            if spelled in sound:
+                return word
+    return None
+
+
+_SOUND_LETTERS = 8
+
+
+def _bare(text: str) -> str:
+    text = zhconv.convert(unicodedata.normalize("NFKC", text), "zh-cn").casefold()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def _spell(text: str) -> str:
+    """不带声调的拼音连写，汉字以外的照原样。"""
+
+    return "".join(lazy_pinyin(text))
 
 
 # deepseek-flash 每 1M token 的闲时美元价：缓存未命中输入、命中输入、输出。

@@ -16,6 +16,8 @@ dependencies = [
     "tenko-api>=0.4.1,<0.5",
     "httpx>=0.27",
     "pillow>=10",
+    "pypinyin>=0.51",
+    "zhconv>=1.4",
 ]
 
 [project.urls]

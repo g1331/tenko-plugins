@@ -61,6 +61,7 @@ def fake_llm(module, monkeypatch):
     module.day_store.save({})
     module.memory_store.save({})
     module.persona_store.save({})
+    module.at_only_store.save([])
     module._unsaved.clear()
     return fake
 
@@ -165,6 +166,48 @@ async def test_batch_lets_model_stay_silent_and_commands_are_context_only(module
     assert not force
     assert messages[4]["content"].endswith("#4 [群友1(1)] @你 /猜词")
     assert module.conversations["group:100"].unseen == 0
+
+
+async def test_banned_words_are_unseen_and_unsaid(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "banned_words", ["lanyinzhenshen"])
+    s = session([At("42"), Text(" LAN yin zhen shen 是谁")], message_id="m1")
+    await feed(module, s)
+    assert not fake_llm.requests and not module.conversations["group:100"].lines
+    assert not s.send.called
+
+    fake_llm.replies.append([{"text": "你说的是 lanyinzhenshen 吧"}, {"text": "我知道"}])
+    s = session([At("42"), Text(" 懒音真神是谁")], user="2", message_id="m2")  # 同音也拦
+    await feed(module, s)
+    assert not fake_llm.requests
+
+    s = session([At("42"), Text(" 刚才说的是谁")], message_id="m3")
+    await feed(module, s)
+    assert len(fake_llm.requests) == 1 and not s.send.called
+    assert [line.speaker for line in module.conversations["group:100"].lines] == ["群友1(1)"]
+
+
+async def test_at_only_mode_ignores_names_quotes_and_chiming_in(module, fake_llm, monkeypatch):
+    async def require_perm(session, level):
+        return session.user.id == "1"  # 1 号是群管理
+
+    monkeypatch.setattr(module, "require_perm", require_perm)
+    s = session([], user="1", message_id="cmd")
+    assert "以后只有 @ 她才回" in await module.manage_at_only(s, "开")
+    assert "现在开着" in await module.manage_at_only(s, None)
+    assert "只有群管理员" in await module.manage_at_only(session([], user="2"), "关")
+
+    await feed(module, session([Text("大肥鱼 吃了吗")], user="3", message_id="m1"))
+    for i in range(10):  # 攒够数也不插话
+        await feed(module, session([Text(f"闲聊{i}")], user=str(i + 10), message_id=f"n{i}"))
+    assert not fake_llm.requests and not module._waiters
+    assert len(module.conversations["group:100"].lines) == 11  # 照样记进上下文
+
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], user="3", message_id="m2"))
+    assert len(fake_llm.requests) == 1
+
+    await module.manage_at_only(s, "关")
+    assert module.at_only_store.load(default=[]) == []
 
 
 async def test_quotes_only_when_others_spoke_after(module, fake_llm):
@@ -361,6 +404,34 @@ async def test_rejected_pictures_are_dropped_and_retried(module, fake_llm, monke
     assert seen == [True, False]
     assert s.send.called
     assert module.conversations["group:100"].lines[0].pictures == []
+
+
+async def test_content_risk_drops_only_the_unchecked_lines(module, fake_llm, monkeypatch):
+    async def chat(client, *, model, messages, force, max_tokens):
+        if "敏感" in str(messages):
+            request = httpx.Request("POST", "https://x")
+            body = '{"error":{"message":"Content Exists Risk","type":"invalid_request_error"}}'
+            raise httpx.HTTPStatusError(
+                "bad", request=request, response=httpx.Response(400, text=body, request=request)
+            )
+        return [{"text": "嗯"}], {}
+
+    monkeypatch.setattr(module.llm, "chat", chat)
+    reported = AsyncMock()
+    monkeypatch.setattr(module, "report_error", reported)
+    await feed(module, session([At("42"), Text(" 早")], message_id="m1"))
+    await feed(module, session([Text("闲聊")], user="2", message_id="m2"))
+    s = session([At("42"), Text(" 说点敏感的")], user="3", message_id="m3")
+    await feed(module, s)
+
+    texts = [line.text for line in module.conversations["group:100"].lines]
+    # 审过的留着；被拒那次新带上的都撤掉，包括她自己说的和无辜的“闲聊”：
+    # 分不清是哪条触发的，留下哪条都可能让群再卡住。不回、不当成故障上报。
+    assert texts == ["@你 早"]
+    assert not s.send.called and not reported.called
+    s = session([At("42"), Text(" 还在吗")], user="4", message_id="m4")
+    await feed(module, s)
+    assert s.send.called  # 群没被卡死
 
 
 async def test_rapid_back_and_forth_loosens_then_stops(module, fake_llm, monkeypatch):

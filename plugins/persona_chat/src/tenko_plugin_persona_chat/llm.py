@@ -149,6 +149,12 @@ RUN_COMMAND = {
 FORCE_SEND = {"type": "function", "function": {"name": "send_message"}}
 
 
+def content_risk(error: httpx.HTTPStatusError) -> bool:
+    """DeepSeek 的内容审核拒绝了这次请求：触发的内容留在记录里，以后每次请求都会被拒。"""
+
+    return error.response.status_code == 400 and "Content Exists Risk" in error.response.text
+
+
 async def summarize(
     client: httpx.AsyncClient, *, model: str, messages: list[dict[str, Any]], max_tokens: int
 ) -> tuple[str, dict[str, Any]]:

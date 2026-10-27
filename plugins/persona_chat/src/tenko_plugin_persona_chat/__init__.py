@@ -50,6 +50,7 @@ from .chat import (
     Conversation,
     Line,
     UsageBook,
+    banned,
     build_messages,
     context_parts,
     data_url,
@@ -126,6 +127,12 @@ class PersonaChatConfig(BasicConfModel):
     """每个群每天的 token 上限（未命中缓存的输入+输出）；0 不限。"""
     global_daily_tokens: int = 0
     """所有群和私聊合计每天的 token 上限，口径同上；0 不限。"""
+    banned_words: list[str] = model_field(
+        default_factory=list,
+        description="违禁词：群友的消息含这些词时她看不到也不接话，她要说的话含这些词时整次回复不发。"
+        "不分简繁、全半角和大小写，忽略空格和标点；拼音 8 个字母以上的还按读音比，"
+        "写 lanyinzhenshen 也能拦下同音的汉字。",
+    )
 
 
 plugin.metadata(
@@ -170,6 +177,8 @@ memory_store = Store("memory", version=1)
 # 用命令换的人设，所有群共用：{"name": 预置人设名} 或 {"name": 名字, "text": 自定义人设}；
 # 空的用配置里的。
 persona_store = Store("persona", version=1)
+# 群管理用命令打开“只回 @”的群：[会话, …]。这些群里只有 @ 她才回，不认唤醒词和引用，也不主动插话。
+at_only_store = Store("at_only", version=1)
 _digests: dict[str, asyncio.Task[None]] = {}
 _DIGEST_EVERY = 60
 _DIGEST_LINES = 300  # 第一次整理时最多读最近这么多条，旧的靠备忘
@@ -524,15 +533,24 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     spoken = "".join(e.text for e in elements if isinstance(e, Text))
     if not text:
         return
+    # 含违禁词的消息不记进记录：她看不到，就不会被带着接话，之后的提示和备忘里也没有。
+    # 查的是展开后的整条（含引用的开头、合并转发的内容），套一层转发绕不过去。
+    if word := banned(text, config.banned_words):
+        logger.info("AI群友在 {} 忽略了一条含违禁词“{}”的消息：{}", key, word, text[:100])
+        return
     private = session.event.guild is None
     speaker = _speaker(session)
     # 名字和她像的别人的号多半是另一个 AI：引用她、提到名字都是它在自说自话，只有 @ 她才算叫她，
     # 它的话也不催她接话，免得两个 AI 你一句我一句刷屏。
     lookalike = _lookalike(speaker)
+    at_only = not private and key in at_only_store.load(default=[])
     calling = (
         private
         or at_me
-        or (not lookalike and (reply_me or is_reply_me or any(w in spoken for w in _wake_words())))
+        or (
+            not (lookalike or at_only)
+            and (reply_me or is_reply_me or any(w in spoken for w in _wake_words()))
+        )
     )
     # 叫她时带的收藏表情包也给她看图：多半是要她看这张，光凭备注会认错。
     if calling:
@@ -575,7 +593,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         if mood == "call" and not (private or at_me or reply_me or is_reply_me):
             mood = "named"
         await respond(session, conversation, line, force=mood == "call", mood=mood)
-    elif not private and not lookalike and key not in _waiters:
+    elif not private and not lookalike and not at_only and key not in _waiters:
         now = time.monotonic()
         # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
         fresh = _load(conversation, now) * 3 < 2
@@ -905,9 +923,11 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
 
     async def ask(images: int):
         messages = build_messages(persona, conversation, hint, images, catalog)
+        upto = conversation.asked = conversation.lines[-1].number if conversation.lines else 0
         calls, usage = await llm.chat(
             client, model=config.model, messages=messages, force=force, max_tokens=_MAX_TOKENS
         )
+        conversation.passed = max(conversation.passed, upto)
         # 给“上下文”命令校准：粗估的各部分按这次实际输入等比例折算。
         pictures = sum(line.image_tokens for line in shown if line.pictures) if images else 0
         rough = sum(context_parts(persona, _TOOLS, conversation, catalog, hint).values())
@@ -1018,6 +1038,18 @@ async def respond(
                     # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
                     calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
         except httpx.HTTPStatusError as error:
+            if llm.content_risk(error):
+                # 不撤掉的话，触发审核的那条一直留在记录里，这个群以后每次请求都被拒，
+                # 只能手动重置。这次就不回了，原文写进日志，好补进违禁词。
+                dropped = [f"{line.speaker}：{line.text}" for line in conversation.drop_unchecked()]
+                logger.warning(
+                    "AI群友在 {} 的请求被内容审核拒绝，撤掉还没审过的 {} 条：{}",
+                    key,
+                    len(dropped),
+                    dropped,
+                )
+                _changed(key)
+                return
             status = error.response.status_code
             logger.warning("AI群友请求失败：HTTP {} {}", status, error.response.text[:200])
             # 密钥失效、余额不足这类需要人处理的错误，每种只报告一次。
@@ -1034,6 +1066,13 @@ async def respond(
         edits = [c for c in calls if c.get("tool") == "edit_sticker"]
         deletes = [c for c in calls if c.get("tool") == "delete_sticker"]
         calls = [c for c in calls if "tool" not in c]
+        # 要说的话含违禁词就整次不说：只删那几个字，剩下的话照样能看出在聊什么。
+        if word := next(
+            (w for c in calls[:_MAX_SENDS] if (w := banned(c["text"], config.banned_words))), None
+        ):
+            said = [c["text"] for c in calls]
+            logger.info("AI群友在 {} 想说的话含违禁词“{}”，没有发：{}", key, word, said)
+            calls = []
         await _add_sticker(conversation, calls[:_MAX_SENDS], key)
         first = next((c["text"] for c in calls[:_MAX_SENDS] if c["text"].strip()), "")
         if target is not None and first:
@@ -1549,20 +1588,21 @@ def _plain(elements) -> str:
 
 persona_command = Alconna(
     "AI群友",
-    Args["action", "重置|重置用量|用量|上下文|表情|记忆|忘记我|人设"]["op;?", "看|删|换|改|全部"][
-        "name;?", str
-    ]["text;?", AllParam],
+    Args["action", "重置|重置用量|用量|上下文|表情|记忆|忘记我|人设|只回艾特"][
+        "op;?", "看|删|换|改|全部|开|关"
+    ]["name;?", str]["text;?", AllParam],
     meta=CommandMeta(
         "清空 AI 群友在本群/本私聊记住的聊天、查看 token 用量和上下文、查看或删掉它对人和群的印象，"
         "或管理它收藏的表情包",
         usage=(
             "AI群友 重置 [全部] | 重置用量 | 用量 | 上下文 | 记忆 [删 QQ号] | 忘记我"
-            " | 表情 [看|删 名字] | 人设 [看 [名字]|换 名字|改 名字 人设]"
+            " | 表情 [看|删 名字] | 人设 [看 [名字]|换 名字|改 名字 人设] | 只回艾特 [开|关]"
         ),
         example=(
             "/AI群友 重置\n/AI群友 重置 全部\n/AI群友 重置用量\n/AI群友 用量\n/AI群友 上下文\n"
             "/AI群友 记忆\n/AI群友 忘记我\n/AI群友 表情\n/AI群友 表情 看 猫猫震惊\n"
-            "/AI群友 人设\n/AI群友 人设 换 小埋\n/AI群友 人设 改 阿呆 你是阿呆，……"
+            "/AI群友 人设\n/AI群友 人设 换 小埋\n/AI群友 人设 改 阿呆 你是阿呆，……\n"
+            "/AI群友 只回艾特 开"
         ),
     ),
 )
@@ -1622,6 +1662,8 @@ async def manage(
             return "只有群管理员及以上能查看记忆"
         key = _key(session)
         return _recall(key, _conversation(key)) or "还没攒下什么印象"
+    if action.result == "只回艾特":
+        return await manage_at_only(session, op.result if op.available else None)
     if action.result == "表情":
         return await manage_stickers(session, op.result if op.available else None, name.result)
     if not await require_perm(session, Permission.BotAdmin):
@@ -1637,6 +1679,29 @@ async def manage(
     return format_usage(
         usage_book.summary(today), only=key if session.event.guild is not None else None
     )
+
+
+async def manage_at_only(session: Session, op: str | None) -> str:
+    """只回 @ 按群开关，群管理员及以上能看能改；私聊本来就每条都回。"""
+
+    if session.event.guild is None:
+        return "私聊里每条都会回，这个开关只对群有用"
+    if not await require_perm(session, Permission.GroupAdmin):
+        return "只有群管理员及以上能设置只回艾特"
+    key = _key(session)
+    keys = at_only_store.load(default=[])
+    if op not in ("开", "关"):
+        state = "开着" if key in keys else "关着"
+        return f"本群只回艾特现在{state}：开着时只有 @ 她才回，叫名字、引用她都不回，也不主动插话"
+    if op == "开" and key not in keys:
+        keys.append(key)
+    elif op == "关" and key in keys:
+        keys.remove(key)
+    if not in_sandbox():
+        at_only_store.save(keys)
+    if op == "开":
+        return "好，本群以后只有 @ 她才回，叫名字、引用她都不回，也不主动插话"
+    return "好，本群恢复正常：叫名字、引用她、聊得热闹时都可能接话"
 
 
 def _forget(qq: str) -> bool:
