@@ -1307,7 +1307,7 @@ requires-dist = [
 
 [[package]]
 name = "tenko-plugin-persona-chat"
-version = "0.1.36"
+version = "0.1.37"
 source = { editable = "plugins/persona_chat" }
 dependencies = [
     { name = "httpx" },
