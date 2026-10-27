@@ -49,7 +49,7 @@ class Bf1Config(BasicConfModel):
 plugin.metadata(
     "战地一查询",
     author=["13"],
-    version="0.1.9",
+    version="0.1.10",
     description="经 bf-manager 查询战地一玩家战绩、武器、载具和服务器，带入群审核。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/bf1",
