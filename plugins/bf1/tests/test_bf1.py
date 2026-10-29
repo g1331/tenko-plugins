@@ -506,6 +506,49 @@ async def test_the_first_admin_account_claims_the_request(module, db, monkeypatc
     assert await module._claim("g", "10", "bot2", "f9")
 
 
+def _bot(self_id, role, calls, fail=False):
+    async def call_api(action, params):
+        calls.append((self_id, action, params))
+        if fail:
+            raise RuntimeError("掉线了")
+        return {"role": role} if action == "internal/get_group_member_info" else None
+
+    return SimpleNamespace(self_id=self_id, protocol=SimpleNamespace(call_api=call_api))
+
+
+async def test_joining_renames_a_bound_member_with_an_admin_account(module, player, db):
+    calls = []
+    member, admin = _bot("1", "member", calls), _bot("2", "admin", calls)
+    assert await module.rename_member("100", "10", [member, admin]) is None
+    assert calls == []
+    await module._bind("10", PERSONA)
+    # 绑定后改了名：用现在的名字
+    player["/players/2"] = {**PERSONA, "display_name": "abd"}
+    assert await module.rename_member("100", "10", [member, admin]) == "abd"
+    assert calls[-1] == (
+        "2",
+        "internal/set_group_card",
+        {"group_id": 100, "user_id": 10, "card": "abd"},
+    )
+    assert not any(c[0] == "1" and c[1].endswith("set_group_card") for c in calls)
+
+
+async def test_renaming_skips_broken_accounts_and_gives_up_without_an_admin(module, api, db):
+    await module._bind("10", PERSONA)
+
+    def down():
+        raise module.Bf1Error("查询服务暂时连不上，稍后再试")
+
+    api["/players/2"] = down
+    calls = []
+    # 查不到现在的名字就用绑定时记下的
+    named = await module.rename_member(
+        "100", "10", [_bot("1", "admin", calls, fail=True), _bot("2", "owner", calls)]
+    )
+    assert named == "abc" and calls[-1][0] == "2"
+    assert await module.rename_member("100", "10", [_bot("1", "member", [])]) is None
+
+
 def _alconna(name):
     return next(c for c in command_manager.get_commands() if c.command == name)
 

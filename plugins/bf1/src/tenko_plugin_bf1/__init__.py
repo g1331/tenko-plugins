@@ -25,10 +25,10 @@ from arclet.entari import (
 from arclet.entari.command import Query
 from arclet.entari.event.base import GuildMemberAddedEvent
 from loguru import logger
-from satori import Author, Element, Image, Quote, Text
+from satori import At, Author, Element, Image, Quote, Text
 from sqlalchemy import BigInteger, String, select
 from sqlalchemy.orm import Mapped, mapped_column
-from tenko_api.accounts import online_accounts
+from tenko_api.accounts import Account, accounts_for_group, online_accounts
 from tenko_api.features import declare, feature_enabled, feature_required
 from tenko_api.perm import Permission, require_perm
 from tenko_api.render import RenderService
@@ -757,6 +757,55 @@ async def _review_on(group_id: str) -> bool:
         return await db.get(JoinReview, group_id) is not None
 
 
+async def _onebot(account: Account, action: str, **params: Any) -> Any:
+    """OneBot 原始接口；失败时 satori 抛 ActionFailed。
+
+    直接走 ``call_api``：Entari 包装 ``protocol.internal`` 时会把关键字参数整个包成一项
+    ``kwargs``，NapCat 收不到参数。
+    """
+
+    # shortcut: 绕开 Entari 的包装缺陷，ArcletProject/Entari#32 修复后改回 protocol.internal。
+    return await asyncio.wait_for(account.protocol.call_api(f"internal/{action}", params), 10)
+
+
+async def rename_member(group: str, user_id: str, accounts: list[Account]) -> str | None:
+    """进群的人绑定过 EA 号，就把群名片改成它现在的名字；改成了返回名字。
+
+    进群通知只交给选路选中的一个号，它不一定是管理员，所以挨个问账号在群里的身份，
+    用第一个群主或管理员号改。
+    """
+
+    bound = await _bound(user_id)
+    if bound is None:
+        return None
+    try:
+        name = (await _get(f"/players/{bound.pid}"))["display_name"]
+    except Bf1Error:
+        name = bound.name
+    if not name:
+        return None
+    for account in accounts:
+        try:
+            me = await _onebot(
+                account,
+                "get_group_member_info",
+                group_id=int(group),
+                user_id=int(account.self_id),
+                no_cache=True,
+            )
+            if (me or {}).get("role") not in ("owner", "admin"):
+                continue
+            await _onebot(
+                account, "set_group_card", group_id=int(group), user_id=int(user_id), card=name
+            )
+        except Exception as error:  # 掉线、超时、不是 QQ 群：换下一个号
+            logger.warning("用 {} 改 {} 的群名片失败：{!r}", account.self_id, user_id, error)
+            continue
+        return name
+    logger.info("群 {} 里没有能改名片的管理员号，{} 的名片没改", group, user_id)
+    return None
+
+
 @plugin.listen(GuildMemberAddedEvent)
 async def on_join_request(
     session: Session[GuildMemberAddedEvent], *, render_service: RenderService
@@ -768,6 +817,14 @@ async def on_join_request(
     if request is None:
         # 真进群了：在 QQ 里直接同意的申请不会再有人回复，这里清掉
         await _drop_request(group, applicant)
+        if feature_enabled("bf1", group) and await _review_on(group):
+            receiver = session.account
+            others = accounts_for_group(group, platform=receiver.platform)
+            accounts = [receiver, *(a for a in others if str(a.self_id) != str(receiver.self_id))]
+            if name := await rename_member(group, applicant, accounts):
+                await session.send(
+                    MessageChain(At(applicant), Text(f" 已自动将你的群名片改为 {name}"))
+                )
         return
     if not feature_enabled("bf1", group) or not await _review_on(group):
         return
