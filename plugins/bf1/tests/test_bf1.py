@@ -371,11 +371,14 @@ async def test_overview(module, api, rendered):
     assert await module._answer(module.overview_reply(None)) == "全服概况暂时没有数据，稍后再试"
 
 
-async def test_join_request_shows_the_card_and_flags_problems(module, player, rendered, db):
+async def test_join_request_shows_the_card_and_flags_problems(module, rounds, rendered, db):
+    player = rounds
     rendered["result"] = b"jpeg"
     message, persona = await module.review_request("10", "新人", "问题：EA名字\n答案：abc", None)
     assert message[0] == Text("收到 新人(10) 的入群申请\n答案：abc\n检查：BFBAN 实锤\n")
-    assert isinstance(message[1], Image)
+    # 战绩卡片带玩家页链接，后面跟最近对局卡片
+    assert isinstance(message[1], Image) and message[2].text.endswith("/bf1/player/2")
+    assert isinstance(message[3], Image) and len(message) == 5
     assert message[-1].text.endswith("作为理由拒绝")
     assert persona["persona_id"] == 2
     await module.bind_reply("abc", "10")
@@ -394,15 +397,37 @@ async def test_join_request_without_a_usable_name(module, player, rendered, db):
 
 
 async def test_join_request_flags_a_mismatched_binding_and_unplayed_account(
-    module, player, rendered, db
+    module, rounds, rendered, db
 ):
-    player["/players/2"] = PERSONA
+    player = rounds
+    player["/stats/2/rounds"] = {"items": [], "next_before": None}
     await module._bind("10", {"persona_id": 9, "display_name": "other"})
     message, _ = await module.review_request("10", "新人", "abc", None)
     assert "这个 QQ 绑定的是 other，不是同一个号" in message[0].text
     player["/stats/2"] = {**STATS, "summary": {**STATS["summary"], "time_played_seconds": 0}}
     message, _ = await module.review_request("10", "新人", "abc", None)
-    assert "检查：有这个 EA 账号，但没玩过战地一" in message[0].text
+    assert message[0].text.endswith("检查：有这个 EA 账号，但没玩过战地一\n")
+
+
+async def test_join_request_lists_recent_rounds(module, rounds, rendered, db):
+    message, _ = await module.review_request("10", "新人", "abc", None)
+    # 两张卡片都回退成文字，中间空一行，对局部分不带链接
+    assert message[1].text.endswith("/bf1/player/2")
+    assert message[2].text.startswith("\n\nabc 最近 3 局\n")
+    assert "#rounds" not in message[2].text
+    rounds["/stats/2/rounds"] = {"items": [ROUNDS[1]], "next_before": None}
+    message, _ = await module.review_request("10", "新人", "abc", None)
+    assert message[0].text.endswith("最近对局：bf-manager 90 天内没记录到\n")
+    assert len(message) == 3
+
+
+async def test_join_request_survives_a_rounds_failure(module, rounds, rendered, db):
+    def broken(limit):
+        raise module.Bf1Error("bf-manager 出错")
+
+    rounds["/stats/2/rounds"] = broken
+    message, persona = await module.review_request("10", "新人", "abc", None)
+    assert "检查：BFBAN 实锤" in message[0].text and persona["persona_id"] == 2
 
 
 def test_reply_to_the_review_message_finds_the_applicant(module):

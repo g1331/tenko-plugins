@@ -332,8 +332,11 @@ def format_recent(name: str, context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def recent_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
-    persona = await _player(name, user_id)
+async def _recent_card(
+    persona: dict[str, Any], service, link: bool = True
+) -> MessageChain | str | None:
+    """最近对局卡片；bf-manager 没记录到能看的对局时返回 None。"""
+
     pid = persona["persona_id"]
     # 多取一些：排队、观战、进服就走的局会被筛掉
     result, platoon = await asyncio.gather(
@@ -341,11 +344,21 @@ async def recent_reply(name: str | None, service, user_id: str = "") -> MessageC
     )
     context = pages.recent_page(persona, platoon, result["items"], _source(), RECENT)
     if not context["rounds"]:
+        return None
+    text = format_recent(persona["display_name"], context)
+    return await _reply(
+        service, "recent.html", context, text, _player_link(pid, "rounds") if link else None
+    )
+
+
+async def recent_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
+    persona = await _player(name, user_id)
+    card = await _recent_card(persona, service)
+    if card is None:
         raise Bf1Error(
             f"还没有记录到 {persona['display_name']} 的对局（bf-manager 跟踪到的才有，保留 90 天）"
         )
-    text = format_recent(persona["display_name"], context)
-    return await _reply(service, "recent.html", context, text, _player_link(pid, "rounds"))
+    return card
 
 
 async def _bind(user_id: str, persona: dict[str, Any]) -> None:
@@ -660,21 +673,47 @@ async def review_request(
     """审核消息和查到的玩家。审核消息第一行带申请者 QQ，管理员回复时靠它找回申请。"""
 
     answer = _join_answer(comment)
-    persona = card = None
+    persona = card = recent = None
+    rounds_note = ""
     if not answer:
         verdict = "没填 EA 名字"
     else:
         try:
             persona = await _persona(answer)
-            card, stats, ban = await _stats_card(persona, service)
+            (card, stats, ban), recent = await asyncio.gather(
+                _stats_card(persona, service), _optional_recent(persona, service)
+            )
         except Bf1Error as error:
             verdict = str(error)
         else:
             verdict = await _verdict(applicant, persona, stats, ban)
-    head = f"收到 {nickname}({applicant}) 的入群申请\n答案：{answer or '-'}\n检查：{verdict}\n"
-    if isinstance(card, str):
-        card = MessageChain(Text(card))
-    return [Text(head), *(card or []), Text(f"\n{_REVIEW_HINT}")], persona
+            if recent is None and stats["summary"].get("time_played_seconds"):
+                rounds_note = "最近对局：bf-manager 90 天内没记录到\n"
+    head = (
+        f"收到 {nickname}({applicant}) 的入群申请\n答案：{answer or '-'}\n检查：{verdict}\n"
+        + rounds_note
+    )
+    parts = [Text(head), *_chain(card)]
+    if recent is not None:
+        # 两张都回退成文字时中间空一行；战绩卡片已经带了玩家页链接，对局卡片不再带
+        gap = "\n\n" if isinstance(card, str) and isinstance(recent, str) else ""
+        parts += _chain(f"{gap}{recent}" if isinstance(recent, str) else recent)
+    return [*parts, Text(f"\n{_REVIEW_HINT}")], persona
+
+
+def _chain(reply: MessageChain | str | None) -> list[Element]:
+    if reply is None:
+        return []
+    return [Text(reply)] if isinstance(reply, str) else list(reply)
+
+
+async def _optional_recent(persona: dict[str, Any], service) -> MessageChain | str | None:
+    """审核时对局记录查不到不耽误战绩卡片。"""
+
+    try:
+        return await _recent_card(persona, service, link=False)
+    except Bf1Error:
+        return None
 
 
 async def _claim(group_id: str, applicant: str, self_id: str, flag: str) -> bool:
