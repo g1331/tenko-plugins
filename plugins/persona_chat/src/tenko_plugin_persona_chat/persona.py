@@ -379,18 +379,26 @@ def mention_hint(number: int, mood: str = "call", said: str = "", life: bool = T
     return f"{called}，要回复，默认接这条。{_PASS}"
 
 
-def answer_hint(number: int, said: str, her: str) -> str:
+def answer_hint(number: int, said: str, her: str, newer: bool = False) -> str:
     """紧跟在她后面、没 @ 也没点名的一句：群友接话很少 @，点明是哪句她才知道有人可能在回她。
 
     只凭挨着不够：别人也常在这时接前面的话题、吐槽别人的图。把她刚说的 ``her`` 摆出来让她对照。
+    ``newer`` 是等她开口这会儿又有群友说了话：那些也可能在接她，她回哪句得自己标出来。
     """
 
-    return (
+    hint = (
         f"#{number} 紧跟在你后面说：“{said.strip()[:80]}”，但没 @ 你、也没引用你，"
         f"不一定是对你说的。你刚说的是：“{her.strip()[:80]}”。对照着看：是在回你这句、问你、怼你，"
         "就像被人当面接了话一样回一句；接的是前面别人的话或图、在跟别人说话、"
         "或者只是自己感叹，就调用 stay_silent。"
     )
+    if newer:
+        hint += (
+            f"#{number} 后面又有人说了话，也可能是在接你，一起对照着看，回你最想接的那句："
+            f"回的是 #{number} 或别的被盖住的话，就用 reply_to 引用它"
+            "（直接写字时在开头写“回复#编号 ”），不然群友会以为你在回最新那条；回最新那条直接说。"
+        )
+    return hint
 
 
 def search_hint(query: str, results: str) -> str:

@@ -607,19 +607,50 @@ def test_host_config_events_reach_her_under_her_plugin_id(runtime, module):
     assert info.qualified_name == module._PLUGIN_ID
 
 
-async def test_answering_a_buried_follow_up_quotes_it(module, fake_llm, monkeypatch):
+async def test_a_buried_follow_up_is_quoted_only_when_she_marks_it(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "quiet_seconds", 0.05)
     fake_llm.replies.append([{"text": "你追到哪了"}])
     await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
 
-    # 接她话的那条被别人的话盖住了：开思考时她填不了 reply_to，也要引用那条
-    fake_llm.replies.append([{"text": "这么快"}])
-    s = session([Text("第一千话")], message_id="m1")
+    # 接她话的那条被别人盖住了，后面那句也可能在接她：没标回哪句就不猜，直接说
+    fake_llm.replies.append([{"text": "笑死 那你写的"}])
+    s = session([Text("哦牛批")], message_id="m1")
     await feed(module, s)
-    await feed(module, session([Text("饿了")], user="2", message_id="m2"))
+    await feed(module, session([Text("那不然？")], user="2", message_id="m2"))
+    await module._waiters["group:100"]
+    hint = fake_llm.requests[-1][0][-1]["content"]
+    assert "#3 紧跟在你后面说：“哦牛批”" in hint and "#3 后面又有人说了话" in hint
+    (sent,) = s.send.call_args_list[-1].args[0]
+    assert isinstance(sent, Message)
+
+    # 标了 reply_to 才引用被盖住的那条
+    fake_llm.replies.append([{"text": "这么快", "reply_to": 6}])
+    s = session([Text("第一千话")], message_id="m3")
+    await feed(module, s)
+    await feed(module, session([Text("饿了")], user="2", message_id="m4"))
     await module._waiters["group:100"]
     sent = s.send.call_args_list[-1].args[0]
-    assert isinstance(sent[0], Quote) and sent[0].id == "m1"
+    assert isinstance(sent[0], Quote) and sent[0].id == "m3"
+
+
+async def test_mentioning_someone_not_yet_in_the_chat_reads_their_card(module, fake_llm):
+    asked = []
+
+    async def internal(action, **params):
+        asked.append((action, params))
+        return {"card": "", "nickname": "爸爸"}
+
+    s = session([At("329992300"), Text(" 睡不着咋办")], internal=internal, message_id="m1")
+    await feed(module, s)
+    line = module.conversations["group:100"].lines[-1]
+    assert asked == [("get_group_member_info", {"group_id": 100, "user_id": 329992300})]
+    assert line.text == "@爸爸 睡不着咋办"
+
+    # 说过话的人直接用记录里的昵称，不再问
+    await feed(module, session([Text("深呼吸")], user="329992300", internal=internal))
+    await feed(module, session([At("329992300"), Text(" 好")], internal=internal))
+    assert len(asked) == 1
+    assert module.conversations["group:100"].lines[-1].text == "@群友329992300 好"
 
 
 async def test_she_stays_out_of_a_bot_talk_repeat_chain(module, fake_llm, monkeypatch):

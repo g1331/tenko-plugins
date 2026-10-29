@@ -557,6 +557,37 @@ async def _fill_forwards(session: Session, elements: list) -> None:
             logger.debug("AI群友读取转发消息失败：{!r}", error)
 
 
+async def _fill_names(
+    session: Session, elements: list, conversation: Conversation, self_ids: set[str]
+) -> None:
+    """@ 了还没在记录里说过话的人时，消息段里只有 QQ 号：向 OneBot 实现要群名片填进 ``name``。
+
+    只剩个号，她常对不上是谁，把这条安到号的主人头上（群主 @ 某人问“睡不着咋办”，
+    她后来跟那人说“从你睡不着那句开始”）。
+    """
+
+    guild = session.event.guild
+    internal = _internal(session)
+    for element in elements:
+        if (
+            not isinstance(element, At)
+            or element.name
+            or not (element.id or "").isdigit()
+            or element.id in self_ids
+            or conversation.name_of(element.id)
+        ):
+            continue
+        if guild is None or internal is None:
+            return
+        try:
+            data = await internal(
+                "get_group_member_info", 5, group_id=int(guild.id), user_id=int(element.id)
+            )
+            element.name = (data.get("card") or data.get("nickname") or "").strip() or None
+        except Exception as error:  # 拿不到就照旧只写号
+            logger.debug("AI群友读取群名片失败：{!r}", error)
+
+
 @plugin.listen(MessageCreatedEvent)
 @feature_required()
 async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = False):
@@ -579,6 +610,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     elements = list(session.event.message.message)
     raw = await _raw_images(session) if any(isinstance(e, Image) for e in elements) else []
     await _fill_forwards(session, elements)
+    await _fill_names(session, elements, conversation, self_ids)
     text, at_me, reply_me, images, sticker, known = render(elements, conversation, self_ids, raw)
     # 唤醒词只认群友亲手打的字：@ 一个叫“大肥鱼”的群友、引用它的消息都不算叫 bot。
     spoken = "".join(e.text for e in elements if isinstance(e, Text))
@@ -1025,7 +1057,15 @@ async def respond(
             hint = mention_hint(target.number, mood, target.text, _persona()[3])
         else:
             hint = (
-                answer_hint(answer.number, answer.text, conversation.her_words_before(answer))
+                answer_hint(
+                    answer.number,
+                    answer.text,
+                    conversation.her_words_before(answer),
+                    any(
+                        x.number > answer.number and x.speaker not in (None, _TENKO)
+                        for x in conversation.lines
+                    ),
+                )
                 if answer
                 else FOLLOW_HINT
                 if follow
@@ -1183,9 +1223,11 @@ async def respond(
                 continue
             quoted = conversation.by_number(arguments.get("reply_to"))
             if quoted is None and sent == 0:
-                # 跟聊时提示只让她回 answer 那条：开思考时她多半把话直接写进正文，填不了 reply_to，
-                # 那条被后面的话盖住了也照样引用，不然看不出她在回谁。
-                quoted = target or answer
+                # 被叫的那条被后面的话盖住了也照样引用，不然看不出她在回谁。跟聊的 answer 不这样猜：
+                # 它只是排队时紧跟在她后面的那条，等她开口时别人可能又接了她的话，
+                # 她回的常是新的那句，硬引用 answer 就成了对着错的人说话；
+                # 要回被盖住的话，提示让她自己标 reply_to。
+                quoted = target
             # 按编号找人，模型只能 @ 窗口里说过话的群友，编不出 QQ 号也 @ 不了全体。
             called = conversation.by_number(arguments.get("mention"))
             # 叫别的 bot 时模型照群友的写法打“@昵称 指令”，要换成真的 @ 对方才会响应。
