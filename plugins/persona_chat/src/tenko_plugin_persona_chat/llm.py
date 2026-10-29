@@ -237,6 +237,7 @@ async def _chat(
     }
     if effort:
         payload |= {
+            "messages": _with_reasoning(messages),
             "thinking": {"type": "enabled"},
             "reasoning_effort": effort,
             "tool_choice": "auto",
@@ -273,6 +274,19 @@ async def _chat(
     if effort and said and not any("tool" not in c for c in calls):
         calls.extend(_quoted({"text": said}))
     return calls, data.get("usage") or {}
+
+
+def _with_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """思考模式下，最后一条 user 之后的 assistant 算同一轮，DeepSeek 要求带回 reasoning_content，
+    缺了整个请求 400。她刚说完话、还没人接时就是这样：记录里存的只有说的话，补个空的。"""
+
+    last = max((i for i, m in enumerate(messages) if m["role"] == "user"), default=-1)
+    return [
+        {**m, "reasoning_content": m.get("reasoning_content", "")}
+        if i > last and m["role"] == "assistant"
+        else m
+        for i, m in enumerate(messages)
+    ]
 
 
 # 直接写字时没法填 reply_to，规则让她在那句开头写“回复#编号 ”；她偶尔照记录的格式抄成

@@ -246,6 +246,9 @@ _STREAK_LOOSE = 3
 _STREAK_MUTE = 6
 # 跟聊时攒够这么多条新消息才问一次模型，不是每句都接。
 _FOLLOW_MIN_NEW = 2
+# 没人叫她时最多连着跟聊这么多次：她每接一句跟聊的窗口就重新计时，群友你一句我一句地聊，
+# 她就句句跟着点评，成了“评论员”。被叫到（@、引用、点名）后重新算。
+_FOLLOW_STREAK = 3
 # 日志里最活跃的群友大约说两成的话；最近 20 条里她开口（连着几条算一次）超过这个比例就不插嘴。
 _SHARE_WINDOW = 20
 _MAX_SHARE = 0.2
@@ -671,6 +674,7 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         follow = (
             fresh
             and now - conversation.last_reply_at < config.follow_seconds
+            and conversation.follows < _FOLLOW_STREAK
             and (answered or (conversation.unseen >= _FOLLOW_MIN_NEW and not quiet))
         )
         cold = (
@@ -678,6 +682,8 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             and not quiet
             and 0 < config.batch_size <= conversation.unseen
             and now - conversation.last_unprompted_at >= config.unprompted_interval_seconds
+            # 刚说过话（被叫到、跟聊）也算：跟聊到了上限，转头又主动插话就白封顶了。
+            and now - conversation.last_reply_at >= config.unprompted_interval_seconds
         )
         if follow or cold:
             answer = line if follow and answered else None
@@ -1044,13 +1050,16 @@ async def respond(
         if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
             hint += LONG_HINT
         said = [line.text for line in conversation.lines if line.speaker is None][-30:]
+        others = [line.text for line in conversation.lines if line.speaker not in (None, _TENKO)][
+            -200:
+        ]
         phrases = _persona()[2]
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
         hint = (
             f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
             f"{_recall(key, conversation)}{hint}{repeat_hint(said, [*phrases, *RULE_LINES])}"
-            f"{habit_hint(said)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
+            f"{habit_hint(said, others)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
         )
         conversation.unseen = 0
         usages: list[dict] = []
@@ -1240,6 +1249,7 @@ async def respond(
             logger.info("AI群友在 {} 想说的话全被丢掉了：{}", key, [c["text"] for c in calls])
         if sent:
             conversation.last_reply_at = time.monotonic()
+            conversation.follows = conversation.follows + 1 if follow else 0
         if target is None and sent and not follow:
             conversation.last_unprompted_at = time.monotonic()
         if not in_sandbox() and usage.get("prompt_tokens", 0) > config.context_tokens:

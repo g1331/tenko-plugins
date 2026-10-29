@@ -72,10 +72,21 @@ def test_dump_and_restore_keep_the_same_request(chat):
 
 
 def test_shape_flattens_and_cuts_at_sentence_end(chat):
-    assert chat.shape(" 行，\n机票钱你出 @全体成员 ", 50) == "行， 机票钱你出"
-    assert chat.shape("一二三四五。六七八九十", 8) == "一二三四五。"
+    assert chat.shape(" 行，\n机票钱你出 @全体成员 ", 50) == "行 机票钱你出"
+    assert chat.shape("一二三四五。六七八九十", 8) == "一二三四五"
     assert chat.shape("一二三四五六七八九十", 8) == "一二三四五六七八…"
     assert chat.shape("#4 阿明这波陪跑", 50) == "阿明这波陪跑"
+
+
+def test_short_lines_lose_written_punctuation(chat):
+    # 群友随手打字：短句不打逗号句号，用空格断开
+    assert chat.casual("一小时20块，这也太抠了。") == "一小时20块 这也太抠了"
+    assert chat.casual("行吧。") == "行吧"
+    assert chat.casual("还没进呢？八强碰到谁") == "还没进呢？八强碰到谁"  # 问号、感叹号照留
+    assert chat.casual("草，[表情:猫猫，吓傻]") == "草 [表情:猫猫，吓傻]"  # 标记里的字不动
+    # 认真回答的长句逗号照留，只去句末句号
+    long = "那看你玩什么游戏了，要是玩大作的话显卡就别省。"
+    assert chat.casual(long) == long[:-1]
 
 
 def test_banned_words_ignore_case_spaces_and_punctuation(chat):
@@ -400,6 +411,36 @@ async def test_thinking_takes_plain_content_as_what_she_says(module):
     assert payloads[0]["tool_choice"] == "auto"
     assert payloads[0]["reasoning_effort"] == "high"
     assert payloads[0]["max_tokens"] > 9
+
+
+async def test_thinking_passes_back_reasoning_for_her_trailing_words(module):
+    import json
+
+    import httpx
+
+    payloads = []
+
+    def reply(request):
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "嗯"}}]})
+
+    messages = [
+        {"role": "system", "content": "人设"},
+        {"role": "assistant", "content": "早"},
+        {"role": "user", "content": "#1 [甲] 在吗"},
+        {"role": "assistant", "content": "在"},
+        {"role": "system", "content": "提示"},
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        await module.llm.chat(
+            c, model="m", messages=messages, force=False, max_tokens=9, effort="high"
+        )
+        await module.llm.chat(c, model="m", messages=messages, force=True, max_tokens=9)
+    # 最后一条群友消息之后她说的话算同一轮：思考时 DeepSeek 要带回 reasoning_content，不然 400
+    sent = payloads[0]["messages"]
+    assert sent[3]["reasoning_content"] == "" and "reasoning_content" not in sent[1]
+    assert "reasoning_content" not in payloads[1]["messages"][3]  # 不思考时原样发
+    assert "reasoning_content" not in messages[3]  # 不改调用方的记录
 
 
 async def test_quote_marks_in_plain_content_become_reply_to(module):

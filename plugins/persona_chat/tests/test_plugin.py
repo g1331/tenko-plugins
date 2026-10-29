@@ -110,7 +110,7 @@ async def test_mention_replies_without_quote_and_records_usage(module, fake_llm)
     assert "#1 在叫你：“去吃火锅”" in messages[-1]["content"]  # 原话放在最后，别被前面的图带跑
     # 叫它的就是最新一条，直接说，不引用
     (sent,) = s.send.call_args.args[0]
-    assert isinstance(sent, Message) and sent.children[0].text == "行，机票钱你出"
+    assert isinstance(sent, Message) and sent.children[0].text == "行 机票钱你出"
     assert module.conversations["group:100"].lines[-1].speaker is None
     assert module.usage_book.tokens(module.datetime.now().date(), "group:100") == 7
 
@@ -124,7 +124,7 @@ async def test_chat_survives_a_restart_until_reset(module, fake_llm):
     await feed(module, session([At("42"), Text(" 刚才说啥来着")], user="2", message_id="m2"))
     messages, _ = fake_llm.requests[-1]
     assert untimed(messages[4]["content"]) == "#1 [群友1(1)] @你 去吃火锅"
-    assert messages[5] == {"role": "assistant", "content": "行，机票钱你出"}
+    assert messages[5] == {"role": "assistant", "content": "行 机票钱你出"}
     assert untimed(messages[6]["content"]) == "#3 [群友2(2)] @你 刚才说啥来着"
 
     module._save(forget="group:100")
@@ -538,6 +538,28 @@ async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm,
     assert not any(force for _, force in fake_llm.requests[1:])
 
 
+async def test_follow_up_stops_after_a_few_until_called_again(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "stamina", 100)
+    fake_llm.replies.append([{"text": "你追到哪了"}])
+    await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
+
+    # 群友你一句我一句，每句都紧跟在她后面：没人叫她时最多跟着接三次，不然句句点评
+    for i in range(6):
+        fake_llm.replies.append([{"text": f"接{i}"}])
+        await feed(module, session([Text(f"那你说说{i}")], user=str(i % 2 + 2), message_id=f"f{i}"))
+        if task := module._waiters.get("group:100"):
+            await task
+    assert len(fake_llm.requests) == 1 + module._FOLLOW_STREAK
+
+    # 再被叫到就重新算
+    fake_llm.replies.append([{"text": "咋"}])
+    await feed(module, session([At("42"), Text(" 你说呢")], user="5", message_id="m9"))
+    fake_llm.replies.append([{"text": "嗯"}])
+    await feed(module, session([Text("我觉得也是")], user="6", message_id="m10"))
+    await module._waiters["group:100"]
+    assert len(fake_llm.requests) == 3 + module._FOLLOW_STREAK
+
+
 async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm):
     fake_llm.replies.append([{"text": "你追到哪了"}])
     await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
@@ -737,6 +759,15 @@ def test_habit_hint_names_overused_particles_and_openers(module):
     hint = module.habit_hint(said)
     assert "“嘛”用得太勤了" in hint and "老用“不过”开头" in hint
     assert module.habit_hint(said[:6]) == ""  # 20 条里不超过 3 条不管
+
+
+def test_habit_hint_finds_her_own_stock_phrases(module):
+    # 不靠词表：她最近老说、群友不怎么说的短语就点名
+    said = ["大半夜不睡觉", "还不睡觉去", "快去睡觉去", "你也睡觉去", "睡觉去吧", "嗯"]
+    others = ["今天打了几把", "这把输了", "[图片]", "谁来开黑"] * 10
+    assert "“睡觉去”说得太多了" in module.habit_hint(said, others)
+    # 群友也一直在说的是话题，不是她的口癖
+    assert "睡觉去" not in module.habit_hint(said, [*others, "睡觉去了"])
 
 
 async def test_lines_carry_the_real_role_not_the_nickname(module, fake_llm):

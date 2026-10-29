@@ -73,6 +73,7 @@ class Conversation:
     last_message_at: float = 0.0
     last_unprompted_at: float = float("-inf")
     last_reply_at: float = float("-inf")
+    follows: int = 0  # 上次被叫到之后，没人叫她、她自己跟着接了几次话
     spoken: deque[float] = field(default_factory=lambda: deque(maxlen=200))  # bot 每句话的时刻
     stickers: dict[str, str] | None = None  # 表情包目录快照，压缩时换新；None 是还没拍
     usage: dict[str, Any] = field(default_factory=dict)  # 上次请求的 usage，给“上下文”命令看
@@ -538,11 +539,32 @@ def shape(text: str, limit: int) -> str:
 
     text = " ".join(text.replace("@全体成员", "").split())
     text = re.sub(r"^#\d+\s*", "", text)
-    if len(text) <= limit:
+    if len(text) > limit:
+        cut = text[:limit]
+        end = max(cut.rfind(mark) for mark in _SENTENCE_ENDS)
+        text = cut[: end + 1] if end >= limit // 2 else cut.rstrip() + "…"
+    return casual(text)
+
+
+# 群友 63% 的话不到 8 个字，带逗号的只有 7%、句号结尾的 1%；她的话一半带逗号，
+# 规则和末尾提示都压不住。她说过的话还会留在记录里当示范，越写越像作文，
+# 所以发出去之前就改成群友打字的样子：记录里存的也是改过的。
+_CASUAL_LIMIT = 16
+_STOPS = re.compile(r"\[[^\[\]]*\]|[，。；,;]")
+
+
+def casual(text: str) -> str:
+    """去掉句末的句号；短句里的逗号、句号换成空格，像群友随手打的字。
+
+    长句是在认真回答，逗号照留（压成几截空格隔开的短语反而像 AI），只去句末句号。
+    ``[表情:名字]`` 这类标记里的字不动。
+    """
+
+    text = text.rstrip().removesuffix("。").rstrip()
+    if len(text) > _CASUAL_LIMIT:
         return text
-    cut = text[:limit]
-    end = max(cut.rfind(mark) for mark in _SENTENCE_ENDS)
-    return cut[: end + 1] if end >= limit // 2 else cut.rstrip() + "…"
+    spaced = _STOPS.sub(lambda m: m[0] if m[0].startswith("[") else " ", text)
+    return " ".join(spaced.split())
 
 
 def banned(text: str, words: list[str]) -> str | None:
