@@ -1,4 +1,4 @@
-"""战地一查询：战绩、武器、载具和服务器，以及入群审核。
+"""战地一查询：战绩、武器、载具、最近对局和服务器，以及入群审核。
 
 数据全部来自 bf-manager 的公开查询接口；这里解析命令、取数据，图片排版在 :mod:`.pages`，
 渲染不了时回文字。
@@ -48,7 +48,7 @@ plugin.metadata(
     "战地一查询",
     author=["13"],
     version="0.1.12",
-    description="经 bf-manager 查询战地一玩家战绩、武器、载具和服务器，带入群审核。",
+    description="经 bf-manager 查询战地一玩家战绩、武器、载具、最近对局和服务器，带入群审核。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/bf1",
         "repository": "https://github.com/g1331/tenko-plugins",
@@ -61,6 +61,7 @@ config = plugin.get_config(Bf1Config)
 
 TOP = 10
 ITEM_CARDS = 10
+RECENT = 6
 
 
 class Binding(Model):
@@ -314,6 +315,39 @@ async def items_reply(
     return await _reply(service, "items.html", context, text, _player_link(pid, kind))
 
 
+def format_recent(name: str, context: dict[str, Any]) -> str:
+    rounds = context["rounds"]
+    lines = [
+        f"{name} 最近 {len(rounds)} 局",
+        " | ".join(f"{label} {value}" for label, value in context["kpis"]),
+    ]
+    for index, r in enumerate(rounds, 1):
+        gear = "、".join(f"{g['name']} {g['kills']} 杀" for g in r["gear"])
+        lines += [
+            f"{index}. {r['when']} {r['map']}·{r['mode'] or '-'} {r['outcome']}",
+            f"   {r['kd']} | KD {r['ratio']} | KPM {r['kpm']} | {r['minutes']} | {r['kit']}",
+            *([f"   {gear}"] if gear else []),
+            f"   {r['server']}",
+        ]
+    return "\n".join(lines)
+
+
+async def recent_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
+    persona = await _player(name, user_id)
+    pid = persona["persona_id"]
+    # 多取一些：排队、观战、进服就走的局会被筛掉
+    result, platoon = await asyncio.gather(
+        _get(f"/stats/{pid}/rounds", limit=20), _optional(f"/stats/{pid}/platoon")
+    )
+    context = pages.recent_page(persona, platoon, result["items"], _source(), RECENT)
+    if not context["rounds"]:
+        raise Bf1Error(
+            f"还没有记录到 {persona['display_name']} 的对局（bf-manager 跟踪到的才有，保留 90 天）"
+        )
+    text = format_recent(persona["display_name"], context)
+    return await _reply(service, "recent.html", context, text, _player_link(pid, "rounds"))
+
+
 async def _bind(user_id: str, persona: dict[str, Any]) -> None:
     await _import_legacy()
     async with get_session() as db:
@@ -430,15 +464,39 @@ async def _answer(query) -> MessageChain | str:
         return str(error)
 
 
-def _player_command(name: str, what: str) -> Alconna:
-    return Alconna(
-        name,
+def _meta(description: str, usage: str, example: str, aliases: list[str]) -> CommandMeta:
+    """主命令的说明里列出旧名字；旧名字本身不进帮助列表。"""
+
+    also = "；也可以用 " + " ".join(f"/{a}" for a in aliases) if aliases else ""
+    return CommandMeta(description + also, usage=usage, example=example)
+
+
+def _commands(names: list[str], args: Args, description: str, usage: str, example: str):
+    """一组同义命令：/bf1s 这类主命令，加上旧 bot 用过的 /stat、/战绩 等。
+
+    不用 Alconna 别名或 shortcut：entari 先按命令名前缀派发，别名到不了处理函数，
+    所以每个名字单独注册一条，共用同一个处理函数。
+    """
+
+    main, aliases = names[0], names[1:]
+
+    def register(handler):
+        command.on(Alconna(main, args, meta=_meta(description, usage, example, aliases)))(handler)
+        for alias in aliases:
+            meta = CommandMeta(description, usage=usage.replace(main, alias, 1), hide=True)
+            command.on(Alconna(alias, args, meta=meta))(handler)
+        return handler
+
+    return register
+
+
+def _player_commands(names: list[str], what: str):
+    return _commands(
+        names,
         Args["name?", str],
-        meta=CommandMeta(
-            f"查询战地一玩家的{what}，绑定过可以不带名字",
-            usage=f"{name} [EA 名字]",
-            example=f"/{name} SHlSAN13",
-        ),
+        f"查询战地一玩家的{what}，绑定过可以不带名字",
+        f"{names[0]} [EA 名字]",
+        f"/{names[0]} SHlSAN13",
     )
 
 
@@ -446,7 +504,7 @@ def _name(name: Query[str]) -> str | None:
     return name.result if name.available else None
 
 
-@command.on(_player_command("bf1s", "生涯战绩"))
+@_player_commands(["bf1s", "stat", "生涯", "战绩"], "生涯战绩")
 async def bf1s(
     session: Session,
     name: Query[str] = Query("name"),  # noqa: B008
@@ -456,7 +514,7 @@ async def bf1s(
     return await _answer(stats_reply(_name(name), render_service, session.user.id))
 
 
-@command.on(_player_command("bf1w", "武器击杀排行"))
+@_player_commands(["bf1w", "wp", "weapon", "武器"], "武器击杀排行")
 async def bf1w(
     session: Session,
     name: Query[str] = Query("name"),  # noqa: B008
@@ -466,7 +524,7 @@ async def bf1w(
     return await _answer(items_reply("weapons", _name(name), render_service, session.user.id))
 
 
-@command.on(_player_command("bf1v", "载具击杀排行"))
+@_player_commands(["bf1v", "vc", "vehicle", "载具"], "载具击杀排行")
 async def bf1v(
     session: Session,
     name: Query[str] = Query("name"),  # noqa: B008
@@ -476,27 +534,24 @@ async def bf1v(
     return await _answer(items_reply("vehicles", _name(name), render_service, session.user.id))
 
 
-def _bind_command(name: str) -> Alconna:
-    return Alconna(
-        name,
-        Args["name?", str],
-        meta=CommandMeta(
-            "把自己的 EA 名字记下来，之后查战绩可以不带名字；不带名字查看当前绑定",
-            usage=f"{name} [EA 名字]",
-            example=f"/{name} SHlSAN13",
-        ),
-    )
+@_player_commands(["bf1r", "recent", "match", "最近", "对局"], "最近对局")
+async def bf1r(
+    session: Session,
+    name: Query[str] = Query("name"),  # noqa: B008
+    *,
+    render_service: RenderService,
+):
+    return await _answer(recent_reply(_name(name), render_service, session.user.id))
 
 
-@command.on(_bind_command("bf1绑定"))
+@_commands(
+    ["bf1绑定", "bf1b", "绑定", "bind"],
+    Args["name?", str],
+    "把自己的 EA 名字记下来，之后查战绩可以不带名字；不带名字查看当前绑定",
+    "bf1绑定 [EA 名字]",
+    "/bf1绑定 SHlSAN13",
+)
 async def bf1bind(session: Session, name: Query[str] = Query("name")):  # noqa: B008
-    return await _answer(bind_reply(_name(name), session.user.id))
-
-
-# bf1b 是 bf1绑定 的简写。不用 Alconna shortcut：entari 先按命令名前缀派发，
-# "bf1b …" 只会命中 /bf1，到不了 bf1绑定 的 shortcut，所以单独注册一条
-@command.on(_bind_command("bf1b"))
-async def bf1b(session: Session, name: Query[str] = Query("name")):  # noqa: B008
     return await _answer(bind_reply(_name(name), session.user.id))
 
 
@@ -504,16 +559,13 @@ def _keyword(keyword: Query[list]) -> str:
     return " ".join(str(part) for part in keyword.result).strip()
 
 
-server_command = Alconna(
-    "bf1ss",
+@_commands(
+    ["bf1ss", "ss", "搜服务器"],
     Args["keyword", AllParam],
-    meta=CommandMeta(
-        "按名字搜索有人的战地一私服", usage="bf1ss <服务器名关键字>", example="/bf1ss sakula"
-    ),
+    "按名字搜索有人的战地一私服",
+    "bf1ss <服务器名关键字>",
+    "/bf1ss sakula",
 )
-
-
-@command.on(server_command)
 async def bf1ss(
     session: Session,
     keyword: Query[list] = Query("keyword"),  # noqa: B008
@@ -525,18 +577,13 @@ async def bf1ss(
     return await _answer(servers_reply(text, render_service))
 
 
-detail_command = Alconna(
-    "bf1pl",
+@_commands(
+    ["bf1pl", "ds", "详细服务器"],
     Args["keyword", AllParam],
-    meta=CommandMeta(
-        "查看战地一服务器的玩家列表；关键字匹配多个时显示人最多的",
-        usage="bf1pl <服务器名关键字 | gameId>",
-        example="/bf1pl pigu",
-    ),
+    "查看战地一服务器的玩家列表；关键字匹配多个时显示人最多的",
+    "bf1pl <服务器名关键字 | gameId>",
+    "/bf1pl pigu",
 )
-
-
-@command.on(detail_command)
 async def bf1pl(
     session: Session,
     keyword: Query[list] = Query("keyword"),  # noqa: B008
@@ -548,7 +595,7 @@ async def bf1pl(
     return await _answer(server_reply(text, render_service))
 
 
-@command.on(Alconna("bf1", meta=CommandMeta("战地一全服在线人数、地区分布和热门地图", usage="bf1")))
+@_commands(["bf1", "bfstat"], Args(), "战地一全服在线人数、地区分布和热门地图", "bf1", "/bf1")
 async def bf1(session: Session, *, render_service: RenderService):
     return await _answer(overview_reply(render_service))
 

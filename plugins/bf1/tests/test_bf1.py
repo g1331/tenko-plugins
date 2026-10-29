@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from arclet.alconna import command_manager
+from arclet.entari.command import _commands
 from satori import Author, Image, Quote, Text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -477,3 +479,143 @@ async def test_the_first_admin_account_claims_the_request(module, db, monkeypatc
     now = module.time.time()
     monkeypatch.setattr(module.time, "time", lambda: now + 60)
     assert await module._claim("g", "10", "bot2", "f9")
+
+
+def _alconna(name):
+    return next(c for c in command_manager.get_commands() if c.command == name)
+
+
+@pytest.mark.parametrize(
+    ("handler", "names"),
+    [
+        ("bf1s", ["bf1s", "stat", "生涯", "战绩"]),
+        ("bf1w", ["bf1w", "wp", "weapon", "武器"]),
+        ("bf1v", ["bf1v", "vc", "vehicle", "载具"]),
+        ("bf1r", ["bf1r", "recent", "match", "最近", "对局"]),
+        ("bf1bind", ["bf1绑定", "bf1b", "绑定", "bind"]),
+        ("bf1ss", ["bf1ss", "ss", "搜服务器"]),
+        ("bf1pl", ["bf1pl", "ds", "详细服务器"]),
+        ("bf1", ["bf1", "bfstat"]),
+    ],
+)
+def test_old_command_names_reach_the_same_handler(module, handler, names):
+    """旧 bot 的 -stat、-武器 等改成 /stat、/武器，和主命令走同一个处理函数。"""
+
+    for name in names:
+        # entari 按命令名（带 Alconna 前缀）建派发表，每个名字要有自己的一条
+        targets = [_commands.subscribers[i] for i in _commands.trie[f"/{name}"]]
+        assert [t.callable_target for t in targets] == [getattr(module, handler)]
+    main = _alconna(names[0])
+    assert not main.meta.hide and all(f"/{n}" in main.meta.description for n in names[1:])
+    for name in names[1:]:
+        assert _alconna(name).meta.hide
+
+
+def test_old_names_take_the_same_arguments(module):
+    assert _alconna("最近").parse("/最近 abc").query("name") == "abc"
+    assert _alconna("stat").parse("/stat").matched
+    assert _alconna("ss").parse("/ss sakula").matched
+
+
+def _round(id, kills, deaths, *, status="finished", won=True, seconds=600, weapons=None):
+    return {
+        "round": {
+            "id": id,
+            "game_id": 9,
+            "server_game_id": 9,
+            "server_name": "S1",
+            "map_name": "MP_Amiens",
+            "map_display_name": "亚眠",
+            "map_image_url": "m.jpg",
+            "game_mode": "Conquest",
+            "mode_display_name": "征服",
+            "started_at": 1793200000,
+            "ended_at": 1793201200,
+            "observed_start": True,
+            "settled": True,
+            "winner": 1,
+            "team1_faction": "大英帝国",
+            "team2_faction": "德意志帝国",
+            "player_count": 64,
+        },
+        "player": {
+            "persona_id": 2,
+            "name": "abc",
+            "team": 1,
+            "status": status,
+            "won": won,
+            "kills": kills,
+            "deaths": deaths,
+            "score": 10000,
+            "assists": 0,
+            "revives": 0,
+            "heals": 0,
+            "repairs": 0,
+            "dogtags": 0,
+            "vehicle_kills": 0,
+            "seconds": seconds,
+            "kit": "scout",
+            "kd": kills / deaths if deaths else float(kills),
+            "kpm": kills / seconds * 60 if seconds else None,
+            "spm": 1000.0,
+            "weapons": weapons,
+        },
+    }
+
+
+ROUNDS = [
+    _round(
+        5,
+        30,
+        10,
+        weapons=[
+            {"kind": "vehicle", "name": "战马", "kills": 9, "shared_kills": True},
+            {"kind": "weapon", "name": "罗斯 MKIII（步兵）", "image": "r.png", "kills": 20},
+            {"kind": "weapon", "name": "军铲", "image": "s.png", "kills": 10},
+            {"kind": "weapon", "name": "信号枪", "kills": 0, "seconds": 100},
+        ],
+    ),
+    # 排队、观战、进服就走：没击杀也没死过
+    _round(4, 0, 0, status="left", won=None, seconds=30),
+    _round(3, 10, 20, status="left", won=None, seconds=300),
+    _round(2, 5, 5, won=False, seconds=0),
+]
+
+
+@pytest.fixture
+def rounds(player):
+    player["/players/2"] = PERSONA
+    player["/stats/2/rounds"] = lambda limit: {"items": ROUNDS[:limit], "next_before": None}
+    return player
+
+
+async def test_recent_rounds_card(module, rounds, rendered):
+    rendered["result"] = b"jpeg"
+    reply = await module.recent_reply("abc", object())
+    assert str(reply).endswith("/bf1/player/2#rounds")
+    ctx = rendered["context"]
+    assert rendered["template"] == "recent.html"
+    assert ctx["tag"] == "EA"
+    assert [r["outcome"] for r in ctx["rounds"]] == ["胜利", "中途退出", "失败"]
+    first = ctx["rounds"][0]
+    assert first["when"].startswith("2026-")
+    assert first["minutes"] == "在场 10 分钟"
+    # 战马的击杀和骑马时的武器重复，不列；没击杀的不列
+    assert [g["name"] for g in first["gear"]] == ["罗斯 MKIII（步兵）", "军铲"]
+    assert dict(ctx["kpis"])["胜 / 负"] == "1 / 1"
+    assert dict(ctx["kpis"])["击杀 / 死亡"] == "45 / 35"
+
+
+async def test_recent_rounds_fall_back_to_text(module, rounds, rendered, db):
+    await module._bind("u1", PERSONA)
+    reply = await module.recent_reply(None, None, "u1")
+    assert reply.startswith("abc 最近 3 局\n")
+    assert "罗斯 MKIII（步兵） 20 杀、军铲 10 杀" in reply
+    assert reply.endswith("/bf1/player/2#rounds")
+
+
+async def test_no_recent_rounds(module, rounds, rendered):
+    rounds["/stats/2/rounds"] = {"items": [ROUNDS[1]], "next_before": None}
+    reply = await module._answer(module.recent_reply("abc", None))
+    assert reply.startswith("还没有记录到 abc 的对局")
+    assert "template" not in rendered

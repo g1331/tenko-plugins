@@ -1,0 +1,96 @@
+{% extends "_base.html" %}
+{% from "_macros.html" import avatar %}
+{#- 每局一张卡片，照 bf-manager 网页玩家页「对局」：左边色条和阵营旗帜标胜负，地图缩略图，下面是战绩和击杀最多的武器。
+    没有对局时插件回文字，不画这张图。 -#}
+{% block style %}
+  .who { display: flex; align-items: center; gap: 20px; padding: 18px 22px; background: var(--panel); }
+  .who h1 { margin: 2px 0 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 44px; line-height: 1.15; word-break: break-all; }
+  .who h1 .tag { color: var(--muted); margin-right: 10px; }
+  .kpis { display: grid; grid-template-columns: repeat(5, 1fr); margin: 2px 0 18px; padding: 16px 22px; background: var(--panel); border-top: 1px solid var(--line); }
+  .kpi .v { font-family: "Oswald", sans-serif; font-size: 34px; font-weight: 600; line-height: 1.2; }
+  .kpi:first-child .v { color: var(--amber); }
+  .rounds { display: flex; flex-direction: column; gap: 14px; }
+  .round { position: relative; background: var(--panel); padding: 16px 20px 16px 28px;
+    background-image: linear-gradient(90deg, color-mix(in srgb, var(--accent) 22%, transparent), transparent 45%);
+    clip-path: polygon(0 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%); }
+  .round::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 7px; background: var(--accent); }
+  .top { display: flex; align-items: center; gap: 18px; }
+  .side { width: 92px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .side img { width: 54px; height: 54px; object-fit: contain; }
+  .side .nf { width: 54px; height: 54px; border: 2px dashed var(--line); }
+  .side b { font-size: 18px; letter-spacing: .08em; color: var(--accent); white-space: nowrap; }
+  .thumb { width: 176px; height: 99px; flex: none; object-fit: cover; background: rgba(255,255,255,.08);
+    clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%); }
+  .info { min-width: 0; flex: 1; }
+  .map { font-size: 28px; font-weight: 700; line-height: 1.25; }
+  .map small { margin-left: 10px; font-size: 18px; font-weight: 500; color: var(--amber-soft); }
+  .meta, .server { margin-top: 4px; font-size: 18px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kit { width: 84px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 17px; color: var(--muted); }
+  .kit img { width: 46px; height: 46px; object-fit: contain; }
+  .bottom { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .stat .v { font-family: "Oswald", sans-serif; font-size: 28px; font-weight: 500; line-height: 1.2; white-space: nowrap; }
+  .stat:first-child .v { color: var(--text); font-weight: 700; }
+  .gear { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .gun { min-width: 0; }
+  .gun .pic { position: relative; height: 58px; padding-left: 56px; display: flex; align-items: center; justify-content: center; background: #6e6e74; }
+  .gun img { max-width: 200px; max-height: 50px; object-fit: contain; }
+  .gun .k { position: absolute; left: 0; top: 0; padding: 0 8px; background: rgba(0,0,0,.72);
+    font-family: "Oswald", sans-serif; font-size: 22px; font-weight: 600; line-height: 1.3; color: var(--amber); }
+  .gun .k small { margin-left: 3px; font-family: "SC", sans-serif; font-size: 17px; font-weight: 400; color: var(--soft); }
+  .gun .n { margin-top: 6px; font-size: 18px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .note { margin-top: 8px; font-size: 17px; color: var(--amber-soft); }
+  .hint { margin-top: 14px; font-size: 17px; color: var(--muted); text-align: center; }
+{% endblock %}
+{% block body %}
+<div class="who">
+  {{ avatar(avatar_url, false, 84) }}
+  <div>
+    <div class="eyebrow">Battlefield 1 · 最近对局</div>
+    <h1>{% if tag %}<span class="tag">[{{ tag }}]</span>{% endif %}{{ name }}</h1>
+  </div>
+</div>
+<div class="kpis">
+  {% for label, value in kpis %}<div class="kpi"><div class="label">{{ label }}</div><div class="v">{{ value }}</div></div>{% endfor %}
+</div>
+<div class="rounds">
+  {% for r in rounds %}
+  <div class="round" style="--accent: {{ r.color }}">
+    <div class="top">
+      <div class="side">
+        {% if r.flag %}<img src="{{ r.flag }}">{% else %}<div class="nf"></div>{% endif %}
+        <b>{{ r.outcome }}</b>
+      </div>
+      {% if r.map_image %}<img class="thumb" src="{{ r.map_image }}">{% else %}<div class="thumb"></div>{% endif %}
+      <div class="info">
+        <div class="map">{{ r.map }}{% if r.mode %}<small>{{ r.mode }}</small>{% endif %}</div>
+        <div class="meta"><span class="d">{{ r.when }}</span> · {{ r.minutes }} · {{ r.faction }}</div>
+        <div class="server">{{ r.server }}</div>
+      </div>
+      <div class="kit">{% if r.portrait %}<img src="{{ r.portrait }}">{% endif %}{{ r.kit }}</div>
+    </div>
+    <div class="bottom">
+      <div class="stats">
+        <div class="stat"><div class="label">击杀 / 死亡</div><div class="v">{{ r.kd }}</div></div>
+        <div class="stat"><div class="label">KD</div><div class="v">{{ r.ratio }}</div></div>
+        <div class="stat"><div class="label">KPM</div><div class="v">{{ r.kpm }}</div></div>
+        <div class="stat"><div class="label">SPM</div><div class="v">{{ r.spm }}</div></div>
+      </div>
+      {#- 武器在战绩下面单独一行：图上角标写击杀，名字在图下面单独一行 -#}
+      {% if r.gear %}
+      <div class="gear">
+        {% for g in r.gear %}
+        <div class="gun">
+          <div class="pic"><span class="k">{{ g.kills }}<small>杀</small></span>{% if g.image %}<img src="{{ g.image }}">{% endif %}</div>
+          <div class="n">{{ g.name }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% if r.suspect %}<div class="note">这一局的数据混进了相邻对局，仅供参考</div>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+<div class="hint">只含 bf-manager 跟踪到的对局，保留 90 天</div>
+{% endblock %}

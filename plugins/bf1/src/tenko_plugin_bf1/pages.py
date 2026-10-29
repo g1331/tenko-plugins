@@ -472,6 +472,95 @@ def server_page(
     }
 
 
+OUTCOMES = {
+    "win": ("胜利", "#fbbf24"),
+    "loss": ("失败", "rgba(255,255,255,.5)"),
+    "left": ("中途退出", "rgba(255,255,255,.3)"),
+    "unknown": ("胜负不明", "rgba(255,255,255,.3)"),
+}
+
+
+def _outcome(p: dict[str, Any]) -> str:
+    if p.get("status") == "left":
+        return "left"
+    won = p.get("won")
+    return "unknown" if won is None else "win" if won else "loss"
+
+
+def _round_gear(weapons: list[dict[str, Any]] | None, count: int) -> list[dict[str, Any]]:
+    """这一局有击杀的武器载具，按击杀排；战马的击杀和骑马时用的武器重复，不列。"""
+
+    used = [w for w in weapons or [] if w.get("kills") and not w.get("shared_kills")]
+    rows = []
+    for w in sorted(used, key=lambda w: w["kills"], reverse=True)[:count]:
+        rows.append(
+            {"name": w.get("name") or "-", "image": w.get("image") or "", "kills": w["kills"]}
+        )
+    return rows
+
+
+def _round_row(item: dict[str, Any]) -> dict[str, Any]:
+    r, p = item["round"], item["player"]
+    outcome = _outcome(p)
+    faction = r.get("team1_faction") if p.get("team") == 1 else r.get("team2_faction")
+    kit = p.get("kit")
+    return {
+        "outcome": OUTCOMES[outcome][0],
+        "color": OUTCOMES[outcome][1],
+        "win": outcome == "win",
+        "flag": _flag(faction),
+        "faction": faction or "阵营未知",
+        "map": r.get("map_display_name") or r.get("map_name") or "未知地图",
+        "map_image": r.get("map_image_url"),
+        "mode": r.get("mode_display_name") or r.get("game_mode") or "",
+        "server": r.get("server_name") or "-",
+        "when": datetime.fromtimestamp(r["ended_at"]).strftime("%Y-%m-%d %H:%M"),
+        # 写本人在场多久：中途进出的人整局时长没有意义
+        "minutes": f"在场 {max(1, round((p.get('seconds') or 0) / 60))} 分钟",
+        "kit": "精英兵" if kit == "elite" else CLASSES.get(kit or "", "-"),
+        "portrait": _portrait(kit) if kit in CLASSES else None,
+        "kd": f"{p['kills']}/{p['deaths']}",
+        "ratio": _fixed(p.get("kd")),
+        "kpm": _fixed(p.get("kpm")),
+        "spm": _fixed(p.get("spm"), 0),
+        "suspect": p.get("status") == "suspect",
+        "gear": _round_gear(p.get("weapons"), 3),
+    }
+
+
+def recent_page(
+    persona: dict[str, Any],
+    platoon: dict[str, Any] | None,
+    items: list[dict[str, Any]],
+    source: str,
+    count: int,
+) -> dict[str, Any]:
+    # 没击杀也没死过的（排队、观战、进服就走）不算一局
+    played = [
+        i for i in items if (i["player"].get("kills") or 0) + (i["player"].get("deaths") or 0)
+    ][:count]
+    players = [i["player"] for i in played]
+    kills = sum(p.get("kills") or 0 for p in players)
+    deaths = sum(p.get("deaths") or 0 for p in players)
+    seconds = sum(p.get("seconds") or 0 for p in players)
+    outcomes = [_outcome(p) for p in players]
+    wins, losses = outcomes.count("win"), outcomes.count("loss")
+    return {
+        **_common(source),
+        "name": persona["display_name"],
+        "tag": (platoon or {}).get("tag"),
+        "avatar_url": persona.get("avatar_url") or "",
+        "kpis": [
+            ("胜 / 负", f"{wins} / {losses}"),
+            ("击杀 / 死亡", f"{kills} / {deaths}"),
+            ("KD", _fixed(kills / deaths if deaths else float(kills))),
+            ("KPM", _kpm(kills, seconds)),
+            ("在场", _duration(seconds)),
+        ],
+        "rounds": [_round_row(i) for i in played],
+    }
+
+
 def _sparkline(history: list[dict[str, Any]], width: int, height: int) -> dict[str, Any] | None:
     points = [h["players"] for h in history if isinstance(h.get("players"), int)]
     if len(points) < 2:
