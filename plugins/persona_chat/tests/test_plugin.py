@@ -726,13 +726,30 @@ async def test_tired_bot_answers_calls_briefly_then_stops(module, fake_llm, monk
     # 说了 4 句后累了：@ 她照样强制回，只是提示要简短
     assert [force for _, force in fake_llm.requests] == [True] * 6
     assert "有点累了" in fake_llm.requests[4][0][-1]["content"]
-    # 说满 6 句：只提到名字的不理了，@ 她的还回；说满 8 句连 @ 也不理
+    # 说满 6 句：只提到名字的不理了；@ 她的再累也强制回，不然群里就是“似了吧”
     await feed(module, session([Text("大肥鱼在吗")], user="20", message_id="n1"))
     assert len(fake_llm.requests) == 6
-    for i in range(6, 9):
+    for i in range(6, 12):
         fake_llm.replies.append([{"text": f"回{i}"}])
         await feed(module, session([At("42"), Text(" 在吗")], user=str(i), message_id=f"m{i}"))
-    assert len(fake_llm.requests) == 8
+    assert [force for _, force in fake_llm.requests[6:]] == [True] * 6
+    assert "别只答应一句“马上查”" in fake_llm.requests[-1][0][-1]["content"]
+
+
+async def test_answering_a_command_she_ran_does_not_tire_her(module, fake_llm, commands):
+    for i in range(3):
+        fake_llm.replies += [
+            [{"tool": "run_command", "command": f"/bf1s p{i}"}],
+            [{"text": "KD 挺高啊"}],
+        ]
+        await feed(
+            module, session([At("42"), Text(f" 查下 p{i}")], user=str(i), message_id=f"m{i}")
+        )
+    assert len(module.conversations["group:100"].spoken) == 0
+
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], user="9", message_id="m9"))
+    assert len(module.conversations["group:100"].spoken) == 1
 
 
 async def test_lines_are_sent_as_separate_bubbles(module, fake_llm):
@@ -1360,7 +1377,10 @@ async def test_called_bot_runs_a_listed_command_and_answers_from_the_result(
     # 结果原样发到群里、带着图记进记录，她回话在后面
     assert [call.args[0] for call in s.send.await_args_list][0][0].text.startswith("SHlSAN13")
     result = module.conversations["group:100"].lines[1]
-    assert result.speaker == "Tenko 功能" and result.text == "SHlSAN13 的战地一战绩[图片]"
+    assert (
+        result.speaker == "Tenko 功能"
+        and result.text == "（你用“bf1s SHlSAN13”查的）SHlSAN13 的战地一战绩[图片]"
+    )
     assert result.sharp and result.pictures[0].startswith("data:image/jpeg")
     assert module.conversations["group:100"].lines[2].text == "KD 挺高啊"
 
@@ -1392,7 +1412,7 @@ async def test_a_slow_send_receipt_does_not_cut_her_off(module, fake_llm, comman
 
     # 结果图多半已经送达：照样记下、接着说话，不然她一声不吭、下次又查一遍
     texts = [line.text for line in module.conversations["group:100"].lines]
-    assert texts[1:] == ["SHlSAN13 的战地一战绩[图片]", "KD 挺高啊"]
+    assert texts[1:] == ["（你用“bf1s SHlSAN13”查的）SHlSAN13 的战地一战绩[图片]", "KD 挺高啊"]
 
 
 async def test_unlisted_command_is_not_run(module, fake_llm, commands):

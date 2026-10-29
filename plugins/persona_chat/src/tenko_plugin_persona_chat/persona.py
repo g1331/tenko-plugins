@@ -341,6 +341,10 @@ _PASS = (
 )
 
 
+# 只叫她“简短回一句”时，被叫去查战绩她只回“马上查”，没调用功能，接着就再没下文。
+_TIRED_WORK = "要你用功能查东西，就照样调用 run_command 去查，别只答应一句“马上查”。"
+
+
 def mention_hint(number: int, mood: str = "call", said: str = "", life: bool = True) -> str:
     """``call`` 必须回；``named`` 是只提到她的名字；``again`` 是连着来回好几轮；
     ``tired`` 是最近说太多话、累了：有日子的可以说要歇会儿，住在群里的不装困，只是少说；
@@ -365,10 +369,12 @@ def mention_hint(number: int, mood: str = "call", said: str = "", life: bool = T
             return (
                 f"{called}，但你这阵子已经说了很多话：简短回一句就好，一条、十来个字；"
                 "只是提到你、不是在跟你说话就调用 stay_silent。别说自己困了、累了、要去睡。"
+                f"{_TIRED_WORK}"
             )
         return (
             f"{called}，但你这阵子已经说了很多话，有点累了。想回就简短回一句，"
             "也可以像真人一样说自己要歇会儿；实在懒得理就调用 stay_silent。"
+            f"{_TIRED_WORK}"
         )
     if said:
         return (

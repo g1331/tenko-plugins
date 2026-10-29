@@ -210,9 +210,8 @@ _MAX_SENDS = 2
 _MAX_BUBBLES = 2
 # 搜完开口先交代“我搜了下”：日志里 133 条，提示怎么写都压不干净，群友不会每句都这么说。
 _SEARCHED = re.compile(r"^(?:我)?(?:刚)?(?:搜|查)了(?:一)?下[，,。：:\s]*")
-# 精力用到这么多倍时，只提到名字的不理；@ 她、引用她的到 _WORN_OUT 才不理。
+# 精力用到这么多倍时，只提到名字的不理；@ 她、引用她的再累也回。
 _TIRED_OUT = 1.5
-_WORN_OUT = 2.0
 # 单独挑的表情包：候选到这个分（1-5）才算贴切；最好的一张有 5 分才一定发，只有 4 分时按概率发。
 # 一次给三张候选时模型打分放得很松，最好那张常有 4 分，4 分就发的话回放里四分之三的话都配图。
 _STICKER_SCORE = 4
@@ -670,8 +669,9 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         _streaks[(key, user_id)] = streak
         load = _load(conversation, now)
         direct = private or at_me or reply_me or is_reply_me
-        # @ 她、引用她时一声不吭，群里就是“似了吧”“bot是不是下播了”：累了也简短回一句。
-        if streak >= _STREAK_MUTE or load >= (_WORN_OUT if direct else _TIRED_OUT):
+        # @ 她、引用她时一声不吭，群里就是“似了吧”“bot是不是下播了”：再累也简短回一句。
+        # 以前到两倍连 @ 也不理：一群人轮流叫她查战绩，她刚答应“马上查”就没了声。
+        if streak >= _STREAK_MUTE or not direct and load >= _TIRED_OUT:
             return
         mood = "again" if streak >= _STREAK_LOOSE else "tired" if load >= 1 else "call"
         # 只是提到名字：很多人自己部署了同名的 AI，“我的大肥鱼”不一定在说她，让她自己判断。
@@ -816,10 +816,12 @@ async def _run_command(
         _speaking.reset(token)
     elements = list(result) if not isinstance(result, str) else [Text(result)]
     images = tuple(e.src for e in elements if isinstance(e, Image) and e.src)
+    # 记下查的是什么：结果常只有一张图，“查了谁”只在这次的提示里，过后她只能按位置猜，
+    # 把查 YueMaT 的图当成紧挨着的上一条“查一下Alan_Mikasa_999”的，还说“刚查过了”。
     line = conversation.add(
         receipts[0].id if receipts else None,
         _TENKO,
-        " ".join(_plain(elements).split())[:_COMMAND_CHARS],
+        f"（你用“{text}”查的）" + " ".join(_plain(elements).split())[:_COMMAND_CHARS],
         images,
         counted=False,
     )
@@ -1278,7 +1280,10 @@ async def respond(
                 if sticker:
                     sticker_book.use(sticker)
                 sent += 1
-            conversation.spoken.append(time.monotonic())  # 一口气连发的几条算一句话
+            # 一口气连发的几条算一句话。替人查完顺口说的结果不算累：查战绩一来就是一串，
+            # 算进去的话几个人轮流叫她查，十分钟就把她累趴了。
+            if not commanded:
+                conversation.spoken.append(time.monotonic())
         for arguments in saves:
             await _save_sticker(arguments, conversation)
         for arguments in edits:
