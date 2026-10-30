@@ -1549,6 +1549,40 @@ async def test_switching_persona_changes_prompt_and_wake_word(module, fake_llm, 
     assert module._persona()[0] == "大肥鱼"
 
 
+# 撤到最近约 4000 token 的图再问；还是太大就全撤掉，只用文字
+@pytest.mark.parametrize(("limit", "expected"), [(25, [30, 22]), (10, [30, 22, 0])])
+async def test_a_request_too_large_retires_old_pictures_and_still_answers(
+    module, fake_llm, monkeypatch, limit, expected
+):
+    conversation = module._conversation("group:100")
+    for i in range(30):  # 看过的图都内嵌在请求里，攒多了请求体超限
+        line = conversation.add(f"m{i}", "群友1(1)", "[图片]", images=(f"u{i}",))
+        line.shown, line.pictures = True, [f"data:image/png;base64,{i}"]
+    sizes = []
+
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
+        images = sum(
+            b["type"] == "image_url"
+            for m in messages
+            if isinstance(m["content"], list)
+            for b in m["content"]
+        )
+        sizes.append(images)
+        if images > limit:
+            request = httpx.Request("POST", "https://x")
+            raise httpx.HTTPStatusError(
+                "big", request=request, response=httpx.Response(413, request=request)
+            )
+        return [{"text": "啥图这么多"}], {}
+
+    monkeypatch.setattr(module.llm, "chat", chat)
+    s = session([At("42"), Text(" 看看")], message_id="m30")
+    await feed(module, s)
+
+    assert sizes == expected
+    assert s.send.called
+
+
 async def test_old_pictures_go_before_the_chat_is_compressed(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "context_tokens", 20000)
     summarized = []

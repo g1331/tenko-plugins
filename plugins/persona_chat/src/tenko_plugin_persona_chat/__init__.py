@@ -1018,8 +1018,21 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
     try:
         return await ask(budget)
     except httpx.HTTPStatusError as error:
+        # 看过的图都以 base64 内嵌，请求体按字节限：大群图多，token 没到压缩线就先被拒（413），
+        # 而压缩要等回复成功之后才做，这个群从此一直失败、再也不说话。先撤旧图再问一次。
+        if error.response.status_code == 413 and conversation.retire_images(_KEEP_IMAGE_TOKENS):
+            logger.warning("AI群友请求太大被拒，撤掉旧图重试")
+            try:
+                return await ask(budget)
+            except httpx.HTTPStatusError as again:
+                error = again
+        if error.response.status_code == 413 and any(line.pictures for line in conversation.lines):
+            # 留下的几张高清图也可能很大：全撤掉，只用文字再问一次。
+            logger.warning("AI群友请求还是太大，撤掉全部图片重试")
+            conversation.retire_images(0)
+            return await ask(0)
         if error.response.status_code != 400 or not any(line.pictures for line in shown):
-            raise
+            raise error
         # 某张图格式或尺寸不被接受时整个请求都会被拒：丢掉这批图，只用文字再问一次。
         logger.warning("AI群友带图请求被拒，去掉图片重试：{}", error.response.text[:200])
         for line in shown:
