@@ -1086,6 +1086,11 @@ async def respond(
             return
         conversation.unseen = 0
         before = usage_book.row(datetime.now().date(), key)
+        # 平时在回复成功后按实际输入量压缩；请求一直失败（比如图太多被 413 拒）就永远等不到，
+        # 上下文越攒越大。所以开口前也按估算看一眼，超了先压再问。
+        estimate = int(sum(_context_estimate(conversation).values()))
+        if not in_sandbox() and estimate > config.context_tokens:
+            await _compress(key, conversation, estimate)
         thought = await _think(session, conversation, turn, force)
         if thought is None:
             return
@@ -2040,10 +2045,9 @@ async def manage_stickers(session: Session, op: str | None, name: str | None) ->
     return "\n".join(lines)
 
 
-def format_context(key: str, conversation: Conversation) -> str:
-    """本群/本私聊下次请求里各部分多大、记着什么，以及为什么可能不说话。"""
+def _context_estimate(conversation: Conversation) -> dict[str, float]:
+    """下次请求各部分约多少 token：文字按上次实际输入折算，加上看过的图。"""
 
-    lines = conversation.lines
     stickers = conversation.stickers
     if stickers is None:
         stickers = sticker_book.moods() if config.sticker_limit else {}
@@ -2055,8 +2059,19 @@ def format_context(key: str, conversation: Conversation) -> str:
             persona, _TOOLS, conversation, catalog, conversation.hint, rules(life)
         ).items()
     }
+    parts["看过的图"] = sum(line.image_tokens for line in conversation.lines if line.shown)
+    return parts
+
+
+def format_context(key: str, conversation: Conversation) -> str:
+    """本群/本私聊下次请求里各部分多大、记着什么，以及为什么可能不说话。"""
+
+    lines = conversation.lines
+    stickers = conversation.stickers
+    if stickers is None:
+        stickers = sticker_book.moods() if config.sticker_limit else {}
+    parts = _context_estimate(conversation)
     seen = [line for line in lines if line.shown]
-    parts["看过的图"] = sum(line.image_tokens for line in seen)
     images = sum(len(line.images) for line in seen)
     sharp = sum(len(line.images) for line in seen if line.sharp)
     when = (

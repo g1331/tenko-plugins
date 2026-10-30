@@ -444,6 +444,7 @@ async def test_rapid_back_and_forth_loosens_then_stops(module, fake_llm, monkeyp
 
 async def test_long_context_is_compressed_after_reply(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "context_tokens", 100)
+    monkeypatch.setattr(module, "_context_estimate", lambda conversation: {})  # 只看回复后的
 
     async def chat(client, *, model, messages, force, max_tokens, effort=""):
         return [{"text": "嗯"}], {"prompt_tokens": 150, "prompt_cache_miss_tokens": 150}
@@ -1581,6 +1582,31 @@ async def test_a_request_too_large_retires_old_pictures_and_still_answers(
 
     assert sizes == expected
     assert s.send.called
+
+
+async def test_context_over_the_limit_is_compressed_before_asking(module, fake_llm, monkeypatch):
+    # 压缩平时等回复成功后按实际输入做；一直请求失败就等不到，所以开口前按估算先压
+    monkeypatch.setattr(module, "in_sandbox", lambda: False)
+    monkeypatch.setattr(module.config, "context_tokens", 8000)
+
+    async def summarize(client, *, model, messages, max_tokens):
+        return "备忘", {}
+
+    monkeypatch.setattr(module.llm, "summarize", summarize)
+    conversation = module._conversation("group:100")
+    for i in range(30):
+        line = conversation.add(f"m{i}", "群友1(1)", "[图片]", images=(f"u{i}",))
+        line.shown, line.pictures = True, [f"data:image/png;base64,{i}"]
+    sizes = []
+
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
+        sizes.append(sum(isinstance(m["content"], list) for m in messages))
+        return [{"text": "嗯"}], {}
+
+    monkeypatch.setattr(module.llm, "chat", chat)
+    await feed(module, session([At("42"), Text(" 看看")], message_id="m30"))
+
+    assert sizes and sum(line.shown for line in conversation.lines) < 30
 
 
 async def test_old_pictures_go_before_the_chat_is_compressed(module, fake_llm, monkeypatch):
