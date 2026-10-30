@@ -136,6 +136,8 @@ def test_usage_book_counts_per_key_and_globally_and_keeps_a_week(chat):
     assert book.tokens(date(2026, 10, 20), "group:1") == 13
     assert book.tokens(date(2026, 10, 20), chat.GLOBAL) == 26
     assert list(book.store.data) == ["2026-10-20"]  # 10-01 已超出 7 天
+    assert book.row(date(2026, 10, 20), "group:1") == [10, 5, 3, 0.01]
+    assert book.row(date(2026, 10, 21), "group:1") == [0, 0, 0, 0.0]
 
 
 def test_usage_reset_only_restarts_the_quota(chat):

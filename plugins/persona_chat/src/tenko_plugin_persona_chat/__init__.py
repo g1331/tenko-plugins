@@ -1042,6 +1042,7 @@ class _Turn:
     bot_talk: bool = False
     searched: bool = False  # 这次先搜了再说
     commanded: bool = False  # 这次替人用了功能
+    asks: int = 0  # 这次问了模型几轮
 
 
 async def respond(
@@ -1071,6 +1072,7 @@ async def respond(
         if not _compose(turn, conversation, mood):
             return
         conversation.unseen = 0
+        before = usage_book.row(datetime.now().date(), key)
         thought = await _think(session, conversation, turn, force)
         if thought is None:
             return
@@ -1089,8 +1091,31 @@ async def respond(
         prompt_tokens = conversation.usage.get("prompt_tokens", 0)
         if not in_sandbox() and prompt_tokens > config.context_tokens:
             await _compress(key, conversation, prompt_tokens)
+        _log_spent(turn, mood, before, sent)
         _changed(key)
         _save()
+
+
+def _log_spent(turn: _Turn, mood: str, before: list[float], sent: bool) -> None:
+    """一次回复花了多少：用量账本只记每天的合计，看不出钱花在被叫、跟聊还是插话上、
+    花了有没有开口。这次的差额包括挑表情包、搜索和整理记录；跨零点时只算新一天的。"""
+
+    after = usage_book.row(datetime.now().date(), turn.key)
+    if after[3] < before[3]:
+        before = [0, 0, 0, 0.0]
+    miss, hit, out, cost = (a - b for a, b in zip(after, before, strict=True))
+    why = mood if turn.target else "跟聊" if turn.follow else "插话"
+    logger.info(
+        "AI群友在 {} {}：问了 {} 轮，未命中 {} 命中 {} 输出 {}，约 ${:.4f}，{}",
+        turn.key,
+        why,
+        turn.asks,
+        int(miss),
+        int(hit),
+        int(out),
+        cost,
+        "开口了" if sent else "没开口",
+    )
 
 
 def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
@@ -1151,6 +1176,7 @@ async def _think(
     async def ask(hint: str, force: bool, retry: bool = False) -> list[dict]:
         calls, usage = await _ask(conversation, hint, force=force, retry=retry)
         usages.append(usage)
+        turn.asks += 1
         if not in_sandbox():
             now = datetime.now()
             usage_book.add(now.date(), key, usage, estimate_cost(usage, now))

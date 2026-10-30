@@ -644,6 +644,11 @@ class UsageBook:
         row = today.get(key)
         return int(row[0] + row[2]) - today.get(_RESET + key, 0) if row else 0
 
+    def row(self, day: date, key: str) -> list[float]:
+        """``key`` 当天的 [未命中, 命中, 输出, 美元]，没用过是全 0。"""
+
+        return list(self.store.load(default={}).get(day.isoformat(), {}).get(key, [0, 0, 0, 0.0]))
+
     def reset(self, day: date, key: str) -> int:
         """从现在起重新计 ``key`` 当天的额度，返回清掉了多少。"""
 
