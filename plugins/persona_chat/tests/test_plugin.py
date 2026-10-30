@@ -549,7 +549,7 @@ async def test_follow_up_stops_after_a_few_until_called_again(module, fake_llm, 
         await feed(module, session([Text(f"那你说说{i}")], user=str(i % 2 + 2), message_id=f"f{i}"))
         if task := module._waiters.get("group:100"):
             await task
-    assert len(fake_llm.requests) == 1 + module._FOLLOW_STREAK
+    assert len(fake_llm.requests) == 1 + module.trigger.FOLLOW_STREAK
 
     # 再被叫到就重新算
     fake_llm.replies.append([{"text": "咋"}])
@@ -557,7 +557,7 @@ async def test_follow_up_stops_after_a_few_until_called_again(module, fake_llm, 
     fake_llm.replies.append([{"text": "嗯"}])
     await feed(module, session([Text("我觉得也是")], user="6", message_id="m10"))
     await module._waiters["group:100"]
-    assert len(fake_llm.requests) == 3 + module._FOLLOW_STREAK
+    assert len(fake_llm.requests) == 3 + module.trigger.FOLLOW_STREAK
 
 
 async def test_one_message_right_after_her_is_enough_to_follow(module, fake_llm):
@@ -845,8 +845,25 @@ async def test_private_reply_is_not_quoted(module, fake_llm):
     fake_llm.replies.append([{"text": "在呢", "reply_to": 99}])
     s = session([Text("你好")], group=None)
     await feed(module, s)
+    await module._waiters["private:1"]
     sent = s.send.call_args.args[0]
     assert isinstance(sent[0], Message) and not isinstance(sent[0], Quote)
+
+
+async def test_private_burst_is_answered_once_after_it_ends(module, fake_llm, monkeypatch):
+    # 私聊常把一句话拆成几条连着发：等对方停下来，一次回这一阵，不是只回第一条。
+    monkeypatch.setattr(module.config, "quiet_seconds", 0.2)
+    fake_llm.replies.append([{"text": "能 发来看看"}])
+    await feed(module, session([Text("在吗")], group=None, message_id="p1"))
+    waiter = module._waiters["private:1"]
+    await feed(module, session([Text("帮我看个报错")], group=None, message_id="p2"))
+    assert module._waiters["private:1"] is waiter  # 还在等，没有另起一轮
+    await waiter
+
+    ((messages, force),) = fake_llm.requests
+    assert force and "#2 在叫你：“帮我看个报错”" in messages[-1]["content"]
+    assert untimed(messages[-2]["content"]).endswith("#2 [群友1(1)] 帮我看个报错")
+    assert "private:1" not in module._waiters
 
 
 GIF = b"GIF89a" + b"0" * 20
@@ -1228,7 +1245,7 @@ def test_usage_in_a_group_only_shows_that_group(module):
 
 async def test_long_talk_with_one_person_gets_nudged_to_change_topic(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
-    monkeypatch.setattr(module, "_QUICK_SECONDS", 0)  # 不算防 bot 对聊的连轮
+    monkeypatch.setattr(module.trigger, "QUICK_SECONDS", 0)  # 不算防 bot 对聊的连轮
     for i in range(5):
         fake_llm.replies.append([{"text": f"嗯{i}"}])
         await feed(module, session([At("42"), Text(f" 第{i}句")], message_id=f"m{i}"))

@@ -19,7 +19,7 @@ import time
 from contextvars import ContextVar
 from datetime import datetime
 from importlib.metadata import entry_points
-from itertools import islice, pairwise
+from itertools import islice
 
 import httpx
 from arclet.alconna import Alconna, AllParam, Args, CommandMeta, command_manager
@@ -46,7 +46,7 @@ from tenko_api.perm import Permission, get_user_perm, require_perm
 from tenko_api.sandbox import in_sandbox
 from tenko_api.storage import Store
 
-from . import llm
+from . import llm, shaping, trigger
 from .chat import (
     GLOBAL,
     Conversation,
@@ -208,10 +208,6 @@ _MAX_SENDS = 2
 # 一次回复最多发几条字（表情包另算）：她一次连发 4 条以上的占 18%，活跃群友是 8%，
 # 只发一条的她 41%、群友 63%；提示里写了说短，照样两次 send_message 各分三行。
 _MAX_BUBBLES = 2
-# 搜完开口先交代“我搜了下”：日志里 133 条，提示怎么写都压不干净，群友不会每句都这么说。
-_SEARCHED = re.compile(r"^(?:我)?(?:刚)?(?:搜|查)了(?:一)?下[，,。：:\s]*")
-# 精力用到这么多倍时，只提到名字的不理；@ 她、引用她的再累也回。
-_TIRED_OUT = 1.5
 # 单独挑的表情包：候选到这个分（1-5）才算贴切；最好的一张有 5 分才一定发，只有 4 分时按概率发。
 # 一次给三张候选时模型打分放得很松，最好那张常有 4 分，4 分就发的话回放里四分之三的话都配图。
 _STICKER_SCORE = 4
@@ -239,18 +235,6 @@ _MAX_GIF_BYTES = 8 * 1024 * 1024  # 动图要整个下下来才能抽帧
 _SUMMARY_TOKENS = 1000
 _KEEP_IMAGE_TOKENS = 4000  # 压缩时只留最近这么多 token 的图：约 20 张低清或 4 张高清
 _TOOLS = json.dumps(llm.TOOLS, ensure_ascii=False)
-# 对方在 bot 刚说完几秒内又来叫，连续几轮后不再强制回复，再多就不理，防止和别的 bot 无限对聊。
-_QUICK_SECONDS = 10
-_STREAK_LOOSE = 3
-_STREAK_MUTE = 6
-# 跟聊时攒够这么多条新消息才问一次模型，不是每句都接。
-_FOLLOW_MIN_NEW = 2
-# 没人叫她时最多连着跟聊这么多次：她每接一句跟聊的窗口就重新计时，群友你一句我一句地聊，
-# 她就句句跟着点评，成了“评论员”。被叫到（@、引用、点名）后重新算。
-_FOLLOW_STREAK = 3
-# 日志里最活跃的群友大约说两成的话；最近 20 条里她开口（连着几条算一次）超过这个比例就不插嘴。
-_SHARE_WINDOW = 20
-_MAX_SHARE = 0.2
 
 client = httpx.AsyncClient(
     base_url=config.base_url,
@@ -659,68 +643,45 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     if spoken.lstrip().startswith(_command_prefixes()):
         return
 
+    if private:
+        # 私聊常把一句话拆成几条连着发：等对方停下来再一起回。以前每条都算叫她，
+        # 第一条一来就回，紧跟着的几条被个人冷却吞掉，她只回了半句话。
+        if key not in _waiters:
+            _waiters[key] = asyncio.create_task(
+                _wait_quiet(key, session, conversation, called=True)
+            )
+        return
     if calling:
         now = time.monotonic()
         if now - _cooldowns.get((key, user_id), float("-inf")) < config.user_cooldown_seconds:
             return
         _cooldowns[(key, user_id)] = now
-        quick = now - conversation.last_reply_at < _QUICK_SECONDS
-        streak = _streaks.get((key, user_id), 0) + 1 if quick else 0
-        _streaks[(key, user_id)] = streak
-        load = _load(conversation, now)
-        direct = private or at_me or reply_me or is_reply_me
-        # @ 她、引用她时一声不吭，群里就是“似了吧”“bot是不是下播了”：再累也简短回一句。
-        # 以前到两倍连 @ 也不理：一群人轮流叫她查战绩，她刚答应“马上查”就没了声。
-        if streak >= _STREAK_MUTE or not direct and load >= _TIRED_OUT:
-            return
-        mood = "again" if streak >= _STREAK_LOOSE else "tired" if load >= 1 else "call"
-        # 只是提到名字：很多人自己部署了同名的 AI，“我的大肥鱼”不一定在说她，让她自己判断。
-        if mood == "call" and not direct:
-            mood = "named"
-        force = mood == "call" or mood == "tired" and direct
-        await respond(session, conversation, line, force=force, mood=mood)
-    elif not private and not lookalike and not at_only and key not in _waiters:
+        direct = at_me or reply_me or is_reply_me
+        if decided := _decide_call(key, user_id, conversation, now, direct=direct):
+            mood, force = decided
+            await respond(session, conversation, line, force=force, mood=mood)
+    elif not lookalike and not at_only and key not in _waiters:
         now = time.monotonic()
-        # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
-        fresh = _load(conversation, now) * 3 < 2
-        # 紧跟在她后面打的字多半是在回她，一条就问；不然一对一聊着聊着就断了。
-        # 只发一张图、一个表情多半是群友自己的反应，不当成在回她。
-        # 引用、@ 了别人的是在跟别人说话，哪怕正好排在她后面。
-        answered = (
-            len(conversation.lines) > 1
-            and conversation.lines[-2].speaker is None
-            and bool(spoken.strip())
-            and not any(isinstance(e, (At, Quote)) for e in elements)
-            # 一字不差地重复别人刚说的话，多半是跟着问那个人，比如别人问图上“哪个是你”。
-            and not any(
-                other.speaker not in (None, speaker) and other.text.strip() == text.strip()
-                for other in islice(reversed(conversation.lines), 1, 12)
-            )
+        answered = trigger.answers_her(
+            conversation.lines,
+            speaker=speaker,
+            text=text,
+            typed=spoken,
+            addressed=any(isinstance(e, (At, Quote)) for e in elements),
         )
-        # 最近的话里她开口的次数已经比最活跃的群友还多时，别人没在回她就不插嘴。
-        recent = list(
-            islice(conversation.lines, max(len(conversation.lines) - _SHARE_WINDOW - 1, 0), None)
-        )
-        turns = sum(b.speaker is None and a.speaker is not None for a, b in pairwise(recent))
-        quiet = turns > _SHARE_WINDOW * _MAX_SHARE
-        follow = (
-            fresh
-            and now - conversation.last_reply_at < config.follow_seconds
-            and conversation.follows < _FOLLOW_STREAK
-            and (answered or (conversation.unseen >= _FOLLOW_MIN_NEW and not quiet))
-        )
-        cold = (
-            fresh
-            and not quiet
-            and 0 < config.batch_size <= conversation.unseen
-            and now - conversation.last_unprompted_at >= config.unprompted_interval_seconds
-            # 刚说过话（被叫到、跟聊）也算：跟聊到了上限，转头又主动插话就白封顶了。
-            and now - conversation.last_reply_at >= config.unprompted_interval_seconds
+        follow, cold = trigger.chime_in(
+            conversation,
+            now=now,
+            load=_load(conversation, now),
+            answered=answered,
+            follow_seconds=config.follow_seconds,
+            batch_size=config.batch_size,
+            interval=config.unprompted_interval_seconds,
         )
         if follow or cold:
             answer = line if follow and answered else None
             _waiters[key] = asyncio.create_task(
-                _wait_quiet(key, session, conversation, follow, answer)
+                _wait_quiet(key, session, conversation, follow=follow, answer=answer)
             )
 
 
@@ -925,14 +886,47 @@ def _load(conversation: Conversation, now: float) -> float:
 
 
 async def _wait_quiet(
-    key: str, session: Session, conversation: Conversation, follow: bool, answer: Line | None
+    key: str,
+    session: Session,
+    conversation: Conversation,
+    *,
+    follow: bool = False,
+    answer: Line | None = None,
+    called: bool = False,
 ) -> None:
+    """等群里安静 ``quiet_seconds`` 再开口；``called`` 是私聊里对方这一阵说完了、该回了。"""
+
     try:
         while (left := conversation.last_message_at + config.quiet_seconds - time.monotonic()) > 0:
             await asyncio.sleep(left)
-        await respond(session, conversation, None, follow=follow, answer=answer)
-    finally:
+        if not called:
+            await respond(session, conversation, None, follow=follow, answer=answer)
+            return
+        # 先让出位置：回这一阵的时候对方又发来的，另起一轮等着，排在这次后面回。
         _waiters.pop(key, None)
+        target = next(
+            (x for x in reversed(conversation.lines) if x.speaker not in (None, _TENKO)), None
+        )
+        now = time.monotonic()
+        if target is not None and (
+            decided := _decide_call(key, session.user.id, conversation, now, direct=True)
+        ):
+            mood, force = decided
+            await respond(session, conversation, target, force=force, mood=mood)
+    finally:
+        if _waiters.get(key) is asyncio.current_task():
+            _waiters.pop(key, None)
+
+
+def _decide_call(
+    key: str, user_id: str, conversation: Conversation, now: float, *, direct: bool
+) -> tuple[str, bool] | None:
+    """被叫到时记一轮“刚说完又来叫”的连击，返回 :func:`.trigger.call_mood` 的结果。"""
+
+    quick = now - conversation.last_reply_at < trigger.QUICK_SECONDS
+    streak = _streaks.get((key, user_id), 0) + 1 if quick else 0
+    _streaks[(key, user_id)] = streak
+    return trigger.call_mood(direct=direct, streak=streak, load=_load(conversation, now))
 
 
 def _over_budget(key: str) -> bool:
@@ -1033,6 +1027,23 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
         return await ask(0)
 
 
+@dataclasses.dataclass
+class _Turn:
+    """一次回复从拼提示到发出去一路带着的东西。"""
+
+    key: str
+    target: Line | None  # 叫她的那条；None 是没人叫她、她自己考虑开口
+    answer: Line | None  # 跟聊时紧跟在她后面接话的那条
+    follow: bool
+    hint: str = ""
+    # 没人叫她、最新一条只是图：只许回表情包。
+    pictured: bool = False
+    # 最新一条在说 bot、人机：只说一句，有贴切的表情包就只发表情包。
+    bot_talk: bool = False
+    searched: bool = False  # 这次先搜了再说
+    commanded: bool = False  # 这次替人用了功能
+
+
 async def respond(
     session: Session,
     conversation: Conversation,
@@ -1046,7 +1057,8 @@ async def respond(
     """``target`` 是叫 bot 的那条消息；为 ``None`` 时是主动说话：``follow`` 为真是跟聊
     （bot 刚说过话，``answer`` 是紧跟在她后面接话的那条），否则是累计够数后的插话。
 
-    ``force`` 时模型必须回复，否则由它决定说不说。
+    ``force`` 时模型必须回复，否则由它决定说不说。一次回复分四步：拼提示（:func:`_compose`）、
+    问模型（:func:`_think`）、改写（:func:`_shape`）、发出去（:func:`_deliver`）。
     """
 
     if target is None and conversation.lock.locked():
@@ -1055,243 +1067,18 @@ async def respond(
         key = _key(session)
         if _over_budget(key):
             return
-        if target is not None:
-            hint = mention_hint(target.number, mood, target.text, _persona()[3])
-        else:
-            hint = (
-                answer_hint(
-                    answer.number,
-                    answer.text,
-                    conversation.her_words_before(answer),
-                    any(
-                        x.number > answer.number and x.speaker not in (None, _TENKO)
-                        for x in conversation.lines
-                    ),
-                )
-                if answer
-                else FOLLOW_HINT
-                if follow
-                else UNPROMPTED_HINT
-            )
-        # 没人叫她、最新一条只是图：只许回表情包。
-        trigger = next(
-            (x for x in reversed(conversation.lines) if x.speaker not in (None, _TENKO)), None
-        )
-        pictured = target is None and trigger is not None and only_pictures(trigger.text)
-        if pictured:
-            hint += PICTURE_HINT
-        # 在说 bot、人机的只发第一句；不另加提示：实测一点明，别人说别的 bot 她也急着回
-        # “我不是机器人”。
-        bot_talk = trigger is not None and bool(BOT_TALK.search(trigger.text))
-        # 一群人接龙复读“这群怎么那么多机器人”：没人叫她就别对号入座，正常人不会出来回一句。
-        if target is None and bot_talk and conversation.repeated(trigger):
-            logger.info("AI群友在 {} 不接复读的 bot 话题：{}", key, trigger.text)
+        turn = _Turn(key, target, answer, follow)
+        if not _compose(turn, conversation, mood):
             return
-        if target is not None and target.role.endswith(_TRUSTED):
-            hint += boss_hint(target.number, target.role.split()[-1])
-        if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
-            hint += LONG_HINT
-        said = [line.text for line in conversation.lines if line.speaker is None][-30:]
-        others = [line.text for line in conversation.lines if line.speaker not in (None, _TENKO)][
-            -200:
-        ]
-        phrases = _persona()[2]
-        now = datetime.now()
-        weekday = "一二三四五六日"[now.weekday()]
-        hint = (
-            f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
-            f"{_recall(key, conversation)}{hint}{repeat_hint(said, [*phrases, *RULE_LINES])}"
-            f"{habit_hint(said, others)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
-        )
         conversation.unseen = 0
-        usages: list[dict] = []
-
-        async def ask(hint: str, force: bool, retry: bool = False) -> list[dict]:
-            calls, usage = await _ask(conversation, hint, force=force, retry=retry)
-            usages.append(usage)
-            if not in_sandbox():
-                now = datetime.now()
-                usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
-            return calls
-
-        # 被叫到时可以先搜、先用功能再回：第一轮不强制只能说话，没搜也没说话再强制一次。
-        # 搜完那轮也不强制，她才能照结果改表情包备注；没说话再强制补一句。
-        searching = target is not None and _search_left(key)
-        # 紧跟着她问“为啥我不能用”这类接话也能直接查，不然她只会学别的 bot 打“@Tenko 指令”。
-        running = (target or answer) is not None and bool(_commands())
-        try:
-            calls = await ask(hint, force and not (searching or running))
-            query = next((str(c.get("query", "")) for c in calls if c.get("tool") == "search"), "")
-            ran = next(
-                (str(c.get("command", "")) for c in calls if c.get("tool") == "run_command"), ""
-            )
-            found = []
-            if searching and query.strip():
-                found.append(search_hint(query, await _search(key, query)))
-            if running and ran.strip():
-                asker = (target or answer).speaker  # running 时两者必有其一
-                found.append(await _run_command(session, conversation, ran, asker))
-            searched = bool(found)
-            commanded = running and bool(ran.strip())
-            again = None
-            if searched:
-                again = "\n".join([hint, *found])
-            elif force and (searching or running or calls) and all("tool" in c for c in calls):
-                # 第一轮没强制（能搜，或眼前有表情包要能收藏）却没说话；或者强制了，
-                # DeepSeek 仍去调 search 之类的工具：点明只说话，再强制问一次。
-                again = hint
-            if again is not None:
-                kept = [c for c in calls if c.get("tool") in _STICKER_TOOLS]
-                if not searched:
-                    again = f"{again}\n{_STICKERS_DONE if kept else _JUST_TALK}"
-                calls = kept + await ask(again, force and not searched, retry=True)
-                if force and all("tool" in c for c in calls):
-                    # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
-                    calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
-        except httpx.HTTPStatusError as error:
-            if llm.content_risk(error):
-                # 不撤掉的话，触发审核的那条一直留在记录里，这个群以后每次请求都被拒，
-                # 只能手动重置。这次就不回了，原文写进日志，好补进违禁词。
-                dropped = [f"{line.speaker}：{line.text}" for line in conversation.drop_unchecked()]
-                logger.warning(
-                    "AI群友在 {} 的请求被内容审核拒绝，撤掉还没审过的 {} 条：{}",
-                    key,
-                    len(dropped),
-                    dropped,
-                )
-                _changed(key)
-                return
-            status = error.response.status_code
-            logger.warning("AI群友请求失败：HTTP {} {}", status, error.response.text[:200])
-            # 密钥失效、余额不足这类需要人处理的错误，每种只报告一次。
-            if status in (400, 401, 402, 403) and status not in _reported:
-                _reported.add(status)
-                await report_error(error, session)
+        thought = await _think(session, conversation, turn, force)
+        if thought is None:
             return
-        except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
-            logger.warning("AI群友请求失败：{!r}", error)
-            return
-        usage = conversation.usage = usages[-1]
-
-        saves = [c for c in calls if c.get("tool") == "save_sticker"]
-        edits = [c for c in calls if c.get("tool") == "edit_sticker"]
-        deletes = [c for c in calls if c.get("tool") == "delete_sticker"]
-        calls = [c for c in calls if "tool" not in c]
-        # 只说一句：用完功能时结果图大家都看得到，连发三条念数据（K/D、胜率、时长）一看就是 bot；
-        # 被说是 bot 时连着辩解（“欸 哪没活人感嘛 / 我这不是在陪你们聊吗”）越辩越像。
-        if (commanded or bot_talk) and (texts := [c["text"] for c in calls]):
-            first = next((x for t in texts for x in t.splitlines() if x.strip()), "")
-            calls = [{**calls[0], "text": first}]
-            if "\n".join(texts).strip() != first.strip():
-                logger.info("AI群友在 {} 只说一句，丢掉了：{}", key, texts)
-        if searched:
-            for c in calls:
-                c["text"] = _SEARCHED.sub("", c["text"])
-        # 要说的话含违禁词就整次不说：只删那几个字，剩下的话照样能看出在聊什么。
-        if word := next(
-            (w for c in calls[:_MAX_SENDS] if (w := banned(c["text"], config.banned_words))), None
-        ):
-            said = [c["text"] for c in calls]
-            logger.info("AI群友在 {} 想说的话含违禁词“{}”，没有发：{}", key, word, said)
-            calls = []
-        # 被说是 bot：有贴切的表情包就只发表情包，打字回什么都像在对号入座、变相承认。
-        await _add_sticker(conversation, calls[:_MAX_SENDS], key, sure=bot_talk)
-        if bot_talk and any(TOKEN.search(c["text"]) for c in calls):
-            for c in calls:
-                c["text"] = "\n".join(f"[表情:{name}]" for name in TOKEN.findall(c["text"]))
-        if pictured:
-            # 她想说的话先拿去挑了表情包，字不发：看图说话总在描述画面。
-            for c in calls:
-                c["text"] = "\n".join(f"[表情:{name}]" for name in TOKEN.findall(c["text"]))
-            if dropped := [c for c in calls if not c["text"]]:
-                logger.info("AI群友在 {} 回图只发表情包，丢掉了 {} 段字", key, len(dropped))
-            calls = [c for c in calls if c["text"]]
-        first = next((c["text"] for c in calls[:_MAX_SENDS] if c["text"].strip()), "")
-        if target is not None and first:
-            # 被叫到也别秒回：从那条消息到发出去，留出看消息、打字的时间。
-            # 等完再判断要不要引用，期间有人插话就会引用。
-            await asyncio.sleep(max(0.0, _reply_delay(first) - (time.time() - target.at)))
-        sent = 0
-        picked = False  # 一次最多发一张表情包
-        group = session.event.guild is not None
-        # 整个回复只有表情包时，最近发过的也照发，不然被叫到却一声不吭。
-        repeat = not any(TOKEN.sub("", c["text"]).strip() for c in calls[:_MAX_SENDS])
-        for arguments in calls[:_MAX_SENDS]:
-            if sent >= _MAX_BUBBLES:
-                logger.info("AI群友在 {} 一次说太多，后面的没发：{}", key, arguments["text"])
-                break
-            pieces = split(arguments["text"], max(config.max_reply_chars, 1), _MAX_BUBBLES - sent)
-            if not pieces:
-                continue
-            quoted = conversation.by_number(arguments.get("reply_to"))
-            if quoted is None and sent == 0:
-                # 被叫的那条被后面的话盖住了也照样引用，不然看不出她在回谁。跟聊的 answer 不这样猜：
-                # 它只是排队时紧跟在她后面的那条，等她开口时别人可能又接了她的话，
-                # 她回的常是新的那句，硬引用 answer 就成了对着错的人说话；
-                # 要回被盖住的话，提示让她自己标 reply_to。
-                quoted = target
-            # 按编号找人，模型只能 @ 窗口里说过话的群友，编不出 QQ 号也 @ 不了全体。
-            called = conversation.by_number(arguments.get("mention"))
-            # 叫别的 bot 时模型照群友的写法打“@昵称 指令”，要换成真的 @ 对方才会响应。
-            named, rest = conversation.called_in(pieces[0])
-            if group and named and (called is None or called.speaker == named.speaker):
-                called, pieces[0] = named, rest
-            for index, piece in enumerate(pieces):
-                before, sticker, after = _pick_sticker(
-                    conversation, piece, allowed=not picked, repeat=repeat
-                )
-                picked = picked or sticker is not None
-                text = before + (f"[表情:{sticker}]" if sticker else "") + after
-                if not text:
-                    continue
-                mention: list = []
-                # @ 和引用只放在连发的第一条上。
-                if index == 0 and group and called and called.speaker:
-                    name, _, user = called.speaker.rpartition("(")
-                    mention = [At(user.rstrip(")"), name=name)]
-                    before, text = " " + before, f"@{name} {text}"
-                content: list = [*mention, *(Text(part) for part in (before, after) if part)]
-                if sticker:
-                    content.insert(len(mention) + bool(before), Image(src=_sticker_url(sticker)))
-                # 只在接的那条已经被后面的消息盖住时才引用，像真人一样大多直接说。
-                quote = (
-                    index == 0
-                    and group
-                    and quoted
-                    and quoted.message_id
-                    and conversation.buried(quoted)
-                )
-                if quote:
-                    content = [Quote(quoted.message_id), *content]
-                if sent:
-                    await asyncio.sleep(_typing_delay(text))
-                message_id = await _send_sticker(session, content) if sticker else None
-                if message_id is None:
-                    # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
-                    token = _speaking.set(True)
-                    try:
-                        receipts = await _send(
-                            session, content if quote else [Message(content=content)]
-                        )
-                    finally:
-                        _speaking.reset(token)
-                    message_id = receipts[0].id if receipts else None
-                conversation.add(message_id or None, None, text)
-                if sticker:
-                    sticker_book.use(sticker)
-                sent += 1
-            # 一口气连发的几条算一句话。替人查完顺口说的结果不算累：查战绩一来就是一串，
-            # 算进去的话几个人轮流叫她查，十分钟就把她累趴了。
-            if not commanded:
-                conversation.spoken.append(time.monotonic())
-        for arguments in saves:
-            await _save_sticker(arguments, conversation)
-        for arguments in edits:
-            _edit_sticker(arguments, key)
-        trusted = target is not None and target.role.endswith(_TRUSTED)
-        said = "\n".join(c["text"] for c in calls[:_MAX_SENDS])
-        for arguments in deletes:
-            await _delete_sticker(str(arguments.get("name") or ""), key, trusted, said)
+        calls, conversation.usage = thought
+        tools = [c for c in calls if "tool" in c]
+        calls = await _shape(conversation, turn, [c for c in calls if "tool" not in c])
+        sent = await _deliver(session, conversation, turn, calls)
+        await _use_tools(conversation, turn, tools, calls)
         if calls and not sent:
             logger.info("AI群友在 {} 想说的话全被丢掉了：{}", key, [c["text"] for c in calls])
         if sent:
@@ -1299,10 +1086,265 @@ async def respond(
             conversation.follows = conversation.follows + 1 if follow else 0
         if target is None and sent and not follow:
             conversation.last_unprompted_at = time.monotonic()
-        if not in_sandbox() and usage.get("prompt_tokens", 0) > config.context_tokens:
-            await _compress(key, conversation, usage["prompt_tokens"])
+        prompt_tokens = conversation.usage.get("prompt_tokens", 0)
+        if not in_sandbox() and prompt_tokens > config.context_tokens:
+            await _compress(key, conversation, prompt_tokens)
         _changed(key)
         _save()
+
+
+def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
+    """拼这次请求末尾的提示，放进 ``turn.hint``；返回 ``False`` 是这次不该开口。"""
+
+    key, target, answer = turn.key, turn.target, turn.answer
+    if target is not None:
+        hint = mention_hint(target.number, mood, target.text, _persona()[3])
+    elif answer is not None:
+        newer = any(
+            x.number > answer.number and x.speaker not in (None, _TENKO) for x in conversation.lines
+        )
+        hint = answer_hint(answer.number, answer.text, conversation.her_words_before(answer), newer)
+    else:
+        hint = FOLLOW_HINT if turn.follow else UNPROMPTED_HINT
+    latest = next(
+        (x for x in reversed(conversation.lines) if x.speaker not in (None, _TENKO)), None
+    )
+    turn.pictured = target is None and latest is not None and only_pictures(latest.text)
+    if turn.pictured:
+        hint += PICTURE_HINT
+    # 在说 bot、人机的只发第一句；不另加提示：实测一点明，别人说别的 bot 她也急着回
+    # “我不是机器人”。
+    turn.bot_talk = latest is not None and bool(BOT_TALK.search(latest.text))
+    # 一群人接龙复读“这群怎么那么多机器人”：没人叫她就别对号入座，正常人不会出来回一句。
+    if target is None and turn.bot_talk and conversation.repeated(latest):
+        logger.info("AI群友在 {} 不接复读的 bot 话题：{}", key, latest.text)
+        return False
+    if target is not None and target.role.endswith(_TRUSTED):
+        hint += boss_hint(target.number, target.role.split()[-1])
+    if (who := target or answer) is not None and _rounds(key, who.speaker) % _LONG_ROUNDS == 0:
+        hint += LONG_HINT
+    said = [line.text for line in conversation.lines if line.speaker is None][-30:]
+    others = [line.text for line in conversation.lines if line.speaker not in (None, _TENKO)][-200:]
+    phrases = _persona()[2]
+    now = datetime.now()
+    weekday = "一二三四五六日"[now.weekday()]
+    turn.hint = (
+        f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
+        f"{_recall(key, conversation)}{hint}{repeat_hint(said, [*phrases, *RULE_LINES])}"
+        f"{habit_hint(said, others)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
+    )
+    return True
+
+
+async def _think(
+    session: Session, conversation: Conversation, turn: _Turn, force: bool
+) -> tuple[list[dict], dict] | None:
+    """问模型，返回它要说的话、要用的工具和最后一次的 usage；请求失败时返回 ``None``。
+
+    被叫到时可以先搜、先用功能再回：第一轮不强制只能说话，搜到了、用完了带着结果再问一轮；
+    该说话却没说时点明只说话、强制再问。
+    """
+
+    key, target, answer, hint = turn.key, turn.target, turn.answer, turn.hint
+    usages: list[dict] = []
+
+    async def ask(hint: str, force: bool, retry: bool = False) -> list[dict]:
+        calls, usage = await _ask(conversation, hint, force=force, retry=retry)
+        usages.append(usage)
+        if not in_sandbox():
+            now = datetime.now()
+            usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+        return calls
+
+    searching = target is not None and _search_left(key)
+    # 紧跟着她问“为啥我不能用”这类接话也能直接查，不然她只会学别的 bot 打“@Tenko 指令”。
+    running = (target or answer) is not None and bool(_commands())
+    try:
+        calls = await ask(hint, force and not (searching or running))
+        query = next((str(c.get("query", "")) for c in calls if c.get("tool") == "search"), "")
+        ran = next((str(c.get("command", "")) for c in calls if c.get("tool") == "run_command"), "")
+        found = []
+        if searching and query.strip():
+            found.append(search_hint(query, await _search(key, query)))
+        if running and ran.strip():
+            asker = (target or answer).speaker  # running 时两者必有其一
+            found.append(await _run_command(session, conversation, ran, asker))
+        turn.searched = bool(found)
+        turn.commanded = running and bool(ran.strip())
+        again = None
+        if turn.searched:
+            # 搜完那轮也不强制，她才能照结果改表情包备注；没说话再强制补一句。
+            again = "\n".join([hint, *found])
+        elif force and (searching or running or calls) and all("tool" in c for c in calls):
+            # 第一轮没强制（能搜，或眼前有表情包要能收藏）却没说话；或者强制了，
+            # DeepSeek 仍去调 search 之类的工具：点明只说话，再强制问一次。
+            again = hint
+        if again is not None:
+            kept = [c for c in calls if c.get("tool") in _STICKER_TOOLS]
+            if not turn.searched:
+                again = f"{again}\n{_STICKERS_DONE if kept else _JUST_TALK}"
+            calls = kept + await ask(again, force and not turn.searched, retry=True)
+            if force and all("tool" in c for c in calls):
+                # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
+                calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
+    except httpx.HTTPStatusError as error:
+        if llm.content_risk(error):
+            # 不撤掉的话，触发审核的那条一直留在记录里，这个群以后每次请求都被拒，
+            # 只能手动重置。这次就不回了，原文写进日志，好补进违禁词。
+            dropped = [f"{line.speaker}：{line.text}" for line in conversation.drop_unchecked()]
+            logger.warning(
+                "AI群友在 {} 的请求被内容审核拒绝，撤掉还没审过的 {} 条：{}",
+                key,
+                len(dropped),
+                dropped,
+            )
+            _changed(key)
+            return None
+        status = error.response.status_code
+        logger.warning("AI群友请求失败：HTTP {} {}", status, error.response.text[:200])
+        # 密钥失效、余额不足这类需要人处理的错误，每种只报告一次。
+        if status in (400, 401, 402, 403) and status not in _reported:
+            _reported.add(status)
+            await report_error(error, session)
+        return None
+    except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
+        logger.warning("AI群友请求失败：{!r}", error)
+        return None
+    return calls, usages[-1]
+
+
+async def _shape(conversation: Conversation, turn: _Turn, calls: list[dict]) -> list[dict]:
+    """把模型想说的话改成能发的样子：提示词压不住的几处在这里兜底，见 :mod:`.shaping`。"""
+
+    key = turn.key
+    if turn.commanded or turn.bot_talk:
+        texts = [c["text"] for c in calls]
+        calls = shaping.first_line(calls)
+        if calls and "\n".join(texts).strip() != calls[0]["text"].strip():
+            logger.info("AI群友在 {} 只说一句，丢掉了：{}", key, texts)
+    if turn.searched:
+        calls = shaping.unsearched(calls)
+    if word := shaping.banned_word(calls[:_MAX_SENDS], config.banned_words):
+        said = [c["text"] for c in calls]
+        logger.info("AI群友在 {} 想说的话含违禁词“{}”，没有发：{}", key, word, said)
+        calls = []
+    # 被说是 bot：有贴切的表情包就只发表情包，打字回什么都像在对号入座、变相承认。
+    await _add_sticker(conversation, calls[:_MAX_SENDS], key, sure=turn.bot_talk)
+    if turn.bot_talk and any(TOKEN.search(c["text"]) for c in calls):
+        calls = shaping.stickers_only(calls)
+    if turn.pictured:
+        # 她想说的话先拿去挑了表情包，字不发：看图说话总在描述画面。
+        kept = shaping.stickers_only(calls)
+        if len(kept) < len(calls):
+            logger.info("AI群友在 {} 回图只发表情包，丢掉了 {} 段字", key, len(calls) - len(kept))
+        calls = kept
+    return calls
+
+
+async def _deliver(
+    session: Session, conversation: Conversation, turn: _Turn, calls: list[dict]
+) -> int:
+    """照打字的节奏发出去、记进记录，返回发了几条。"""
+
+    key, target = turn.key, turn.target
+    first = next((c["text"] for c in calls[:_MAX_SENDS] if c["text"].strip()), "")
+    if target is not None and first:
+        # 被叫到也别秒回：从那条消息到发出去，留出看消息、打字的时间。
+        # 等完再判断要不要引用，期间有人插话就会引用。
+        await asyncio.sleep(max(0.0, _reply_delay(first) - (time.time() - target.at)))
+    sent = 0
+    picked = False  # 一次最多发一张表情包
+    group = session.event.guild is not None
+    # 整个回复只有表情包时，最近发过的也照发，不然被叫到却一声不吭。
+    repeat = not any(TOKEN.sub("", c["text"]).strip() for c in calls[:_MAX_SENDS])
+    for arguments in calls[:_MAX_SENDS]:
+        if sent >= _MAX_BUBBLES:
+            logger.info("AI群友在 {} 一次说太多，后面的没发：{}", key, arguments["text"])
+            break
+        pieces = split(arguments["text"], max(config.max_reply_chars, 1), _MAX_BUBBLES - sent)
+        if not pieces:
+            continue
+        quoted = conversation.by_number(arguments.get("reply_to"))
+        if quoted is None and sent == 0:
+            # 被叫的那条被后面的话盖住了也照样引用，不然看不出她在回谁。跟聊的 answer 不这样猜：
+            # 它只是排队时紧跟在她后面的那条，等她开口时别人可能又接了她的话，
+            # 她回的常是新的那句，硬引用 answer 就成了对着错的人说话；
+            # 要回被盖住的话，提示让她自己标 reply_to。
+            quoted = target
+        # 按编号找人，模型只能 @ 窗口里说过话的群友，编不出 QQ 号也 @ 不了全体。
+        called = conversation.by_number(arguments.get("mention"))
+        # 叫别的 bot 时模型照群友的写法打“@昵称 指令”，要换成真的 @ 对方才会响应。
+        named, rest = conversation.called_in(pieces[0])
+        if group and named and (called is None or called.speaker == named.speaker):
+            called, pieces[0] = named, rest
+        for index, piece in enumerate(pieces):
+            before, sticker, after = _pick_sticker(
+                conversation, piece, allowed=not picked, repeat=repeat
+            )
+            picked = picked or sticker is not None
+            text = before + (f"[表情:{sticker}]" if sticker else "") + after
+            if not text:
+                continue
+            mention: list = []
+            # @ 和引用只放在连发的第一条上。
+            if index == 0 and group and called and called.speaker:
+                name, _, user = called.speaker.rpartition("(")
+                mention = [At(user.rstrip(")"), name=name)]
+                before, text = " " + before, f"@{name} {text}"
+            content: list = [*mention, *(Text(part) for part in (before, after) if part)]
+            if sticker:
+                content.insert(len(mention) + bool(before), Image(src=_sticker_url(sticker)))
+            # 只在接的那条已经被后面的消息盖住时才引用，像真人一样大多直接说。
+            quote = (
+                index == 0
+                and group
+                and quoted
+                and quoted.message_id
+                and conversation.buried(quoted)
+            )
+            if quote:
+                content = [Quote(quoted.message_id), *content]
+            if sent:
+                await asyncio.sleep(_typing_delay(text))
+            message_id = await _send_sticker(session, content) if sticker else None
+            if message_id is None:
+                # 包在独立的 <message> 里，宿主就不会自动引用触发消息。
+                token = _speaking.set(True)
+                try:
+                    receipts = await _send(
+                        session, content if quote else [Message(content=content)]
+                    )
+                finally:
+                    _speaking.reset(token)
+                message_id = receipts[0].id if receipts else None
+            conversation.add(message_id or None, None, text)
+            if sticker:
+                sticker_book.use(sticker)
+            sent += 1
+        # 一口气连发的几条算一句话。替人查完顺口说的结果不算累：查战绩一来就是一串，
+        # 算进去的话几个人轮流叫她查，十分钟就把她累趴了。
+        if not turn.commanded:
+            conversation.spoken.append(time.monotonic())
+    return sent
+
+
+async def _use_tools(
+    conversation: Conversation, turn: _Turn, tools: list[dict], calls: list[dict]
+) -> None:
+    """说完话再收藏、改、删表情包；``calls`` 是她这次说的话，删图时看她嘴上答应了没有。"""
+
+    for arguments in tools:
+        if arguments["tool"] == "save_sticker":
+            await _save_sticker(arguments, conversation)
+    for arguments in tools:
+        if arguments["tool"] == "edit_sticker":
+            _edit_sticker(arguments, turn.key)
+    target = turn.target
+    trusted = target is not None and target.role.endswith(_TRUSTED)
+    said = "\n".join(c["text"] for c in calls[:_MAX_SENDS])
+    for arguments in tools:
+        if arguments["tool"] == "delete_sticker":
+            await _delete_sticker(str(arguments.get("name") or ""), turn.key, trusted, said)
 
 
 async def _add_sticker(
