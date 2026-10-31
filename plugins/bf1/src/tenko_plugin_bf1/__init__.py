@@ -48,7 +48,7 @@ class Bf1Config(BasicConfModel):
 plugin.metadata(
     "战地一查询",
     author=["13"],
-    version="0.1.15",
+    version="0.1.16",
     description=(
         "经 bf-manager 查询战地一玩家战绩、武器、载具、最近对局和服务器，"
         "带百科、小贴士（被戳时随机发）和入群审核。"
