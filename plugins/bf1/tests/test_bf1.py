@@ -564,6 +564,8 @@ def _alconna(name):
         ("bf1ss", ["bf1ss", "ss", "搜服务器"]),
         ("bf1pl", ["bf1pl", "ds", "详细服务器"]),
         ("bf1", ["bf1", "bfstat"]),
+        ("bf1wiki", ["bf1百科", "百科", "wiki"]),
+        ("bf1tip", ["bf1tip", "tip", "小贴士"]),
     ],
 )
 def test_old_command_names_reach_the_same_handler(module, handler, names):
@@ -583,6 +585,8 @@ def test_old_names_take_the_same_arguments(module):
     assert _alconna("最近").parse("/最近 abc").query("name") == "abc"
     assert _alconna("stat").parse("/stat").matched
     assert _alconna("ss").parse("/ss sakula").matched
+    assert _alconna("百科").parse("/百科").matched
+    assert _alconna("tip").parse("/tip 伦敦的呼唤").matched
 
 
 def _round(id, kills, deaths, *, status="finished", won=True, seconds=600, weapons=None):
@@ -687,3 +691,101 @@ async def test_no_recent_rounds(module, rounds, rendered):
     reply = await module._answer(module.recent_reply("abc", None))
     assert reply.startswith("还没有记录到 abc 的对局")
     assert "template" not in rendered
+
+
+def test_wiki_search(module):
+    codex = module.codex
+    assert len(codex.WIKI) == 310 and len(codex.TIPS) == 390
+    # 旧 bot 的序号照用
+    assert [e.name for e in codex.search_wiki("3")] == ["HELLRIEGEL 1915"]
+    assert codex.search_wiki("311") == [] and codex.search_wiki("0") == []
+    assert len(codex.search_wiki("武器")) == 123
+    # 名字完全对上就只要这一条；不分大小写、不管空格
+    assert [e.title for e in codex.search_wiki("mp 18")] == ["MP18 冲锋枪"]
+    a7v = codex.search_wiki("a7v")[0]
+    assert (a7v.title, a7v.taglines[0]) == ("A7V 坦克", "首款德式坦克")
+    assert len(codex.search_wiki("坦克")) > 1
+    # 名字里没有就搜正文
+    assert [e.name for e in codex.search_wiki("托尔金")] == ["名人"]
+
+
+def test_tip_search_covers_map_names(module):
+    tips = module.codex.search_tips("亚眠")
+    assert any("亚眠" in t.tags and "亚眠" not in t.text for t in tips)
+    assert all("亚眠" in t.tags or "亚眠" in t.text for t in tips)
+    assert module.format_tip(module.codex.Tip("记得防守旗帜！", ("征服", "抢攻"))) == (
+        "【征服·抢攻】记得防守旗帜！"
+    )
+
+
+async def test_wiki_reply(module, rendered):
+    rendered["result"] = b"jpeg"
+    reply = await module.wiki_reply("托尔金", object())
+    assert isinstance(reply[0], Image) and len(reply) == 1
+    assert rendered["template"] == "wiki.html" and rendered["context"]["total"] == 310
+    rendered["result"] = None
+    text = await module.wiki_reply("mp18", None)
+    assert text.startswith("#") and "解锁：用 MP18 冲锋枪进行" in text
+    listed = await module.wiki_reply("坦克", None)
+    assert listed.startswith("“坦克”找到") and "\n#" in listed
+    catalog = await module.wiki_reply("全世界", None)
+    assert catalog.startswith("“全世界”找到 17 条") and "、" in catalog
+    missing = await module._answer(module.wiki_reply("不存在的东西", None))
+    assert missing.startswith("百科里没找到“不存在的东西”")
+    assert (await module.wiki_reply("", None)).startswith("#")
+
+
+def test_tip_reply(module):
+    assert module.tip_reply("")
+    many = module.tip_reply("凡尔登")
+    assert many.startswith("带“凡尔登”的小贴士有") and many.count("\n· ") == module.TIP_LIST
+    with pytest.raises(module.Bf1Error):
+        module.tip_reply("不存在的东西")
+
+
+@pytest.fixture
+def bots(module, monkeypatch):
+    """群 100 里两个 bot 号：1 收到事件，2 是被戳的那个。"""
+
+    sent = []
+
+    def bot(self_id):
+        async def send_message(channel, message):
+            sent.append((self_id, channel, list(message)))
+
+        return SimpleNamespace(
+            self_id=self_id,
+            platform="qq-client",
+            protocol=SimpleNamespace(send_message=send_message),
+        )
+
+    accounts = [bot("1"), bot("2")]
+    monkeypatch.setattr(module, "accounts_for_group", lambda group, platform: accounts)
+    monkeypatch.setattr(module, "feature_enabled", lambda feature, group: True)
+    monkeypatch.setattr(module, "_poked", {})
+    return SimpleNamespace(accounts=accounts, sent=sent)
+
+
+async def test_poking_a_bot_gets_a_tip_or_wiki_entry(module, bots, rendered, monkeypatch):
+    receiver = bots.accounts[0]
+    poke = {"group_id": 100, "user_id": 10, "target_id": 2}
+    tip = module.codex.TIPS[0]
+    monkeypatch.setattr(module.codex, "pick", lambda: tip)
+    assert await module.poked(receiver, poke, None)
+    # 被戳的号来回，@ 戳的人
+    assert bots.sent == [("2", "100", [module.At("10"), Text(f"\n{module.format_tip(tip)}")])]
+    # 冷却期内再戳不回
+    assert not await module.poked(receiver, poke, None)
+    monkeypatch.setattr(module.codex, "pick", lambda: module.codex.WIKI[2])
+    rendered["result"] = b"jpeg"
+    assert await module.poked(receiver, {**poke, "user_id": 11}, None)
+    assert isinstance(bots.sent[-1][2][-1], Image)
+
+
+async def test_pokes_that_are_not_for_us(module, bots, rendered):
+    receiver = bots.accounts[0]
+    # 戳群友、bot 互戳、私聊戳
+    assert not await module.poked(receiver, {"group_id": 100, "user_id": 10, "target_id": 9}, None)
+    assert not await module.poked(receiver, {"group_id": 100, "user_id": 1, "target_id": 2}, None)
+    assert not await module.poked(receiver, {"user_id": 10, "target_id": 2}, None)
+    assert bots.sent == []

@@ -46,7 +46,7 @@
 <div class="page">
   <div class="bg"><i style="background-image: url({{ background }})"></i></div>
   {% block body %}{% endblock %}
-  <footer><span class="d">BF-MANAGER</span> · {{ source }} · <span class="d">{{ now }}</span></footer>
+  {% block footer %}<footer><span class="d">BF-MANAGER</span> · {{ source }} · <span class="d">{{ now }}</span></footer>{% endblock %}
 </div>
 </body>
 </html>

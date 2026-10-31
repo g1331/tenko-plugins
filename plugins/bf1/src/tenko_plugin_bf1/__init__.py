@@ -1,12 +1,13 @@
-"""战地一查询：战绩、武器、载具、最近对局和服务器，以及入群审核。
+"""战地一查询：战绩、武器、载具、最近对局和服务器，百科和小贴士，以及入群审核。
 
-数据全部来自 bf-manager 的公开查询接口；这里解析命令、取数据，图片排版在 :mod:`.pages`，
-渲染不了时回文字。
+查询数据来自 bf-manager 的公开查询接口，百科和小贴士在 :mod:`.codex`；这里解析命令、取数据，
+图片排版在 :mod:`.pages`，渲染不了时回文字。
 """
 
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import time
 from typing import Any
@@ -23,7 +24,7 @@ from arclet.entari import (
     plugin,
 )
 from arclet.entari.command import Query
-from arclet.entari.event.base import GuildMemberAddedEvent
+from arclet.entari.event.base import GuildMemberAddedEvent, InternalEvent
 from loguru import logger
 from satori import At, Author, Element, Image, Quote, Text
 from sqlalchemy import BigInteger, String, select
@@ -34,7 +35,7 @@ from tenko_api.perm import Permission, require_perm
 from tenko_api.render import RenderService
 from tenko_api.storage import Model, Store, get_session
 
-from . import pages
+from . import codex, pages
 
 
 class Bf1Config(BasicConfModel):
@@ -48,7 +49,10 @@ plugin.metadata(
     "战地一查询",
     author=["13"],
     version="0.1.15",
-    description="经 bf-manager 查询战地一玩家战绩、武器、载具、最近对局和服务器，带入群审核。",
+    description=(
+        "经 bf-manager 查询战地一玩家战绩、武器、载具、最近对局和服务器，"
+        "带百科、小贴士（被戳时随机发）和入群审核。"
+    ),
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/bf1",
         "repository": "https://github.com/g1331/tenko-plugins",
@@ -611,6 +615,141 @@ async def bf1pl(
 @_commands(["bf1", "bfstat"], Args(), "战地一全服在线人数、地区分布和热门地图", "bf1", "/bf1")
 async def bf1(session: Session, *, render_service: RenderService):
     return await _answer(overview_reply(render_service))
+
+
+# —— 百科和小贴士：游戏里的典籍和载入画面小贴士，被戳时随机发一条 ——
+
+WIKI_LIST = 20
+TIP_LIST = 5
+POKE_COOLDOWN = 10
+_WIKI_HINT = "可以搜武器、载具、地名、战役、人物，或者发分类名：" + "、".join(codex.CATEGORIES)
+
+
+def format_entry(entry: codex.Entry) -> str:
+    lines = [f"#{entry.no} {entry.title}（{entry.category}）", *entry.taglines]
+    return "\n".join([*lines, f"解锁：{entry.unlock}", entry.description])
+
+
+def _wiki_line(entry: codex.Entry) -> str:
+    tagline = f" · {entry.taglines[0]}" if entry.taglines else ""
+    return f"#{entry.no} {entry.title}{tagline}（{entry.category}）"
+
+
+def format_tip(tip: codex.Tip) -> str:
+    return f"【{'·'.join(tip.tags)}】{tip.text}" if tip.tags else tip.text
+
+
+async def _wiki_card(entry: codex.Entry, service) -> MessageChain | str:
+    context = pages.wiki_page(entry, len(codex.WIKI))
+    return await _reply(service, "wiki.html", context, format_entry(entry))
+
+
+async def wiki_reply(keyword: str, service) -> MessageChain | str:
+    if not keyword:
+        return await _wiki_card(codex.random_entry(), service)
+    entries = codex.search_wiki(keyword)
+    if not entries:
+        raise Bf1Error(f"百科里没找到“{keyword}”。{_WIKI_HINT}")
+    if len(entries) == 1:
+        return await _wiki_card(entries[0], service)
+    head = f"“{keyword}”找到 {len(entries)} 条，发 /百科 序号 查看"
+    if keyword.strip() in codex.CATEGORIES:
+        return f"{head}：\n" + "、".join(f"{e.no} {e.name}" for e in entries)
+    lines = [_wiki_line(e) for e in entries[:WIKI_LIST]]
+    if len(entries) > WIKI_LIST:
+        lines.append(f"……还有 {len(entries) - WIKI_LIST} 条，换个更准的词")
+    return f"{head}：\n" + "\n".join(lines)
+
+
+def tip_reply(keyword: str) -> str:
+    if not keyword:
+        return format_tip(codex.random_tip())
+    tips = codex.search_tips(keyword)
+    if not tips:
+        raise Bf1Error(f"没有带“{keyword}”的小贴士，可以搜地图名、模式名或者正文里的词")
+    if len(tips) <= TIP_LIST:
+        head = f"带“{keyword}”的小贴士有 {len(tips)} 条："
+    else:
+        head = f"带“{keyword}”的小贴士有 {len(tips)} 条，随机 {TIP_LIST} 条："
+        tips = random.sample(tips, TIP_LIST)
+    return head + "".join(f"\n· {format_tip(t)}" for t in tips)
+
+
+async def poke_reply(user_id: str, service) -> list[Element]:
+    """@ 戳的人，跟一条随机的小贴士或百科卡片。"""
+
+    item = codex.pick()
+    if isinstance(item, codex.Tip):
+        return [At(user_id), Text(f"\n{format_tip(item)}")]
+    card = await _wiki_card(item, service)
+    return [At(user_id), Text("\n"), *_chain(card)]
+
+
+@_commands(
+    ["bf1百科", "百科", "wiki"],
+    Args["keyword?", AllParam],
+    "战地一游戏里的百科（典籍）；不带关键词随机看一条",
+    "bf1百科 [序号 | 分类 | 关键词]",
+    "/bf1百科 MP18",
+)
+async def bf1wiki(
+    session: Session,
+    keyword: Query[list] = Query("keyword"),  # noqa: B008
+    *,
+    render_service: RenderService,
+):
+    text = _keyword(keyword) if keyword.available else ""
+    return await _answer(wiki_reply(text, render_service))
+
+
+@_commands(
+    ["bf1tip", "tip", "小贴士"],
+    Args["keyword?", AllParam],
+    "战地一载入画面的小贴士；不带关键词随机看一条，可以按地图、模式或正文搜",
+    "bf1tip [关键词]",
+    "/bf1tip 亚眠",
+)
+async def bf1tip(session: Session, keyword: Query[list] = Query("keyword")):  # noqa: B008
+    text = _keyword(keyword) if keyword.available else ""
+    try:
+        return tip_reply(text)
+    except Bf1Error as error:
+        return str(error)
+
+
+_poked: dict[tuple[str, str], float] = {}
+
+
+@plugin.listen(InternalEvent)
+async def on_poke(event: InternalEvent, *, render_service: RenderService):
+    # satori 的 onebot11 适配器不转换戳一戳，原样作为 INTERNAL 事件送来
+    origin = event._origin
+    data = getattr(origin, "_data", None)
+    if getattr(origin, "_type", None) == "notice.notify.poke" and isinstance(data, dict):
+        await poked(event.account, data, render_service)
+
+
+async def poked(receiver: Account, data: dict[str, Any], service) -> bool:
+    """群里有人戳 bot 时回一条；回了返回 True。"""
+
+    if data.get("group_id") is None:
+        return False
+    group, user, target = (str(data.get(k)) for k in ("group_id", "user_id", "target_id"))
+    if not feature_enabled("bf1", group):
+        return False
+    # 宿主按群选路，事件只交给一个号；被戳的可能是群里另一个 bot 号，由它来回
+    accounts = {str(a.self_id): a for a in accounts_for_group(group, platform=receiver.platform)}
+    accounts.setdefault(str(receiver.self_id), receiver)
+    if target not in accounts or user in accounts:
+        return False
+    now = time.monotonic()
+    if now - _poked.get((group, user), -POKE_COOLDOWN) < POKE_COOLDOWN:
+        return False
+    if len(_poked) > 1000:
+        _poked.clear()
+    _poked[(group, user)] = now
+    await accounts[target].protocol.send_message(group, await poke_reply(user, service))
+    return True
 
 
 # —— 入群审核：申请时把申请者填的 EA 名字查一遍发到群里，管理员回复这条消息同意或拒绝 ——

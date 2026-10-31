@@ -616,6 +616,64 @@ def overview_page(overview: dict[str, Any], source: str) -> dict[str, Any]:
     }
 
 
+# 百科卡片照游戏里的典籍页和 v3：左边配图卡片，右边正文；高度固定为卡片高，正文越长图越宽
+WIKI_CARD = 400  # 640×901 的配图缩到这个宽
+WIKI_FONT = 19
+WIKI_LINE = WIKI_FONT * 1.6
+WIKI_PAD = 36
+WIKI_GAP = 44
+
+
+def _ems(text: str, latin: float = 0.56) -> float:
+    """按字宽折算成多少个汉字宽。"""
+
+    return sum(1 if ord(c) > 0x2E7F else latin for c in text)
+
+
+def _lines(em: float, size: float, width: int) -> float:
+    # 右边留 30px 给竖线；两端对齐和标点避头尾会挤掉一点
+    return -(-em // ((width - 30) / size * 0.97))
+
+
+def _wiki_text_width(entry: Any, paragraphs: list[str]) -> int:
+    """正文区要多宽，右边的字才能和卡片一样高：标题、解锁条件和每段正文分别估行数。"""
+
+    card = WIKI_CARD * 901 / 640
+    ems = [_ems(p) for p in paragraphs]
+    width = 520
+    while width < 2800:
+        # 分类、间距固定 72px；标题 38px、解锁条件 19px（前面有个勾选框图标）
+        head = 72 + 36 * len(entry.taglines) + 47.5 * _lines(_ems(entry.title, 0.68), 38, width)
+        head += 30 * _lines(_ems(entry.unlock) + 1.5, WIKI_FONT, width)
+        body = sum(_lines(em, WIKI_FONT, width) for em in ems) * WIKI_LINE
+        if head + body + WIKI_FONT * 0.6 * (len(ems) - 1) <= card:
+            break
+        width += 20
+    return width
+
+
+def wiki_page(entry: Any, total: int) -> dict[str, Any]:
+    """百科条目：左边游戏里的典籍配图，右边标题、解锁条件和正文；背景是配图本身虚化。"""
+
+    paragraphs = [p.strip() for p in entry.description.split("\n") if p.strip()]
+    text = _wiki_text_width(entry, paragraphs)
+    return {
+        **_common("游戏内典籍"),
+        "background": entry.image,
+        "width": WIKI_PAD * 2 + WIKI_CARD + WIKI_GAP + text,
+        "card": WIKI_CARD,
+        "no": entry.no,
+        "total": total,
+        "category": entry.category,
+        "name": entry.name,
+        "title": entry.title,
+        "taglines": entry.taglines,
+        "unlock": entry.unlock,
+        "paragraphs": paragraphs,
+        "image": entry.image,
+    }
+
+
 def _host_font(service: Any) -> str | None:
     # 宿主自带思源黑体 GB2312 子集；拿不到时用系统字体。
     path = Path(getattr(service, "template_dir", "")) / "assets/fonts/NotoSansSC-GB2312.woff2"

@@ -1,0 +1,44 @@
+{% extends "_base.html" %}
+{#- 百科条目，照游戏里的典籍页和 v3 的百科图：背景是配图虚化，左边配图卡片（左下角分类和名字、底边金条），
+    右边分类、标题、解锁条件和正文。高度跟卡片一样，正文长时由插件把图加宽，正文不往下拉长。 -#}
+{% block style %}
+  .page { padding: 36px; }
+  .bg i { inset: -80px; filter: blur(36px) saturate(1.1); background-position: center; }
+  .bg::before { background: linear-gradient(90deg, rgba(0,0,0,.35), rgba(0,0,0,.55) 40%, rgba(0,0,0,.6)); }
+  .entry { display: flex; gap: 44px; align-items: flex-start; }
+  .card { position: relative; width: {{ card }}px; flex: none; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+  .card img { display: block; width: 100%; aspect-ratio: 640 / 901; object-fit: cover; background: #2a2a2e; }
+  .card .cap { position: absolute; left: 0; right: 0; bottom: 14px; padding: 60px 24px 18px;
+    background: linear-gradient(transparent, rgba(0,0,0,.82)); text-shadow: 0 1px 6px rgba(0,0,0,.8); }
+  .card .cap small { display: block; font-size: 22px; color: #b8aa78; }
+  .card .cap b { display: block; margin-top: 2px; font-size: 34px; font-weight: 400; line-height: 1.2; color: #d9cb96; }
+  .card::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 14px; background: #a99a68; }
+  .text { min-width: 0; flex: 1; padding: 4px 30px 0 0; border-right: 1px solid rgba(255,255,255,.35);
+    min-height: calc({{ card }}px * 901 / 640); }
+  .cat { font-size: 21px; letter-spacing: .08em; color: rgba(255,255,255,.82); }
+  h1 { margin: 4px 0 0; font-size: 38px; font-weight: 400; line-height: 1.25; }
+  .sub { margin-top: 4px; font-size: 20px; color: rgba(255,255,255,.7); }
+  .unlock { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 19px; color: #d6b25e; }
+  .unlock .icon { width: 18px; height: 18px; stroke-width: 1.8; }
+  .body { margin-top: 22px; }
+  .body p { margin: 0 0 {{ (19 * 0.6)|round|int }}px; font-size: 19px; line-height: 1.6; color: rgba(255,255,255,.93); text-align: justify; }
+  .page > .sign { position: absolute; top: 10px; right: 36px; font-size: 15px; color: rgba(255,255,255,.5); }
+{% endblock %}
+{% block body %}
+<div class="sign"><span class="d">#{{ no }}/{{ total }}</span> · 发 /百科 关键词 搜索</div>
+<div class="entry">
+  <div class="card">
+    <img src="{{ image }}">
+    <div class="cap"><small>{{ category }}</small><b>{{ name }}</b></div>
+  </div>
+  <div class="text">
+    <div class="cat">{{ category }}</div>
+    <h1>{{ title }}</h1>
+    {% for line in taglines %}<div class="sub">{{ line }}</div>{% endfor %}
+    <div class="unlock"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m8 12 3 3 5-6"/></svg>{{ unlock }}</div>
+    <div class="body">{% for p in paragraphs %}<p>{{ p }}</p>{% endfor %}</div>
+  </div>
+</div>
+{% endblock %}
+{% block footer %}{% endblock %}
