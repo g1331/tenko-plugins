@@ -309,13 +309,14 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
                 "avg_rank": 75.5,
                 "rank_150_count": 1,
                 "players": [
-                    {"display_name": "low", "rank": 3, "stats": None},
+                    {"display_name": "low", "rank": 3, "stats": None, "loading": True},
                     {"display_name": "top", "rank": 150, "is_admin": True, "stats": {"kd": 2.5}},
                 ],
             }
         ],
         "queued": [{"display_name": "wait", "rank": 91}],
-        "spectators": [],
+        "spectators": [{"display_name": "eye", "rank": 40, "loading": True}],
+        "summary": {"loading_count": 3},
         "operation": {
             "maps": [
                 {"name": "法欧堡", "sectors": 3},
@@ -343,10 +344,17 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
     op = ctx["operation"]
     assert [m["sectors"] for m in op["track"]] == [[True] * 3, [True, False, False, False], []]
     assert (op["where"], op["next"], op["defender"]) == ("区域 2/4 · 第 2/3 张图", "西奈沙漠", None)
-    assert "美国（2）：low、top" in reply and reply.endswith(
-        "其他 1 个：/bf1ss test\nhttps://bfm.umrbotech.com/bf1/server/7#players"
-    )
-    assert ctx["waiting"] == [("排队", "#34d399", [("wait", 91)])] and "排队（1）：wait" in reply
+    assert reply.endswith("其他 1 个：/bf1ss test\nhttps://bfm.umrbotech.com/bf1/server/7#players")
+    assert ctx["waiting"] == [
+        ("排队", "#34d399", [("wait", 91, False)]),
+        ("观战", "#f87171", [("eye", 40, True)]),
+    ]
+    assert "排队（1）：wait" in reply and "观战（1）：eye（载入中）" in reply
+    # 载入中：名字调暗、后面标出来；图例人数用 bf-manager 的计数（含没进名单的人）
+    assert [p["loading"] for p in team["players"]] == [False, True] and ctx["loading"] == 3
+    assert "美国（2）：low（载入中）、top" in reply and "载入中 3 人" in reply
+    page = module.pages.html("server.html", ctx)
+    assert page.count('class="ld"') == 2 and "载入中：3" in page
 
     def down(**_):
         raise module.Bf1Error("x")

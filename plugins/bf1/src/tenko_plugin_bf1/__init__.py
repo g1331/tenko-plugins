@@ -650,13 +650,20 @@ def format_server(detail: dict[str, Any], players: dict[str, Any] | None) -> str
         f"服主 {owner}",
     ]
     for team in (players or {}).get("teams") or []:
-        names = "、".join(p.get("display_name") or "-" for p in team.get("players") or [])
+        names = "、".join(map(_roster_name, team.get("players") or []))
         lines.append(f"{team.get('faction') or '-'}（{len(team.get('players') or [])}）：{names}")
     for label, key in [("排队", "queued"), ("观战", "spectators")]:
         if waiting := (players or {}).get(key):
-            names = "、".join(p.get("display_name") or "-" for p in waiting)
+            names = "、".join(map(_roster_name, waiting))
             lines.append(f"{label}（{len(waiting)}）：{names}")
+    if loading := ((players or {}).get("summary") or {}).get("loading_count"):
+        lines.append(f"载入中 {loading} 人")
     return "\n".join(lines)
+
+
+def _roster_name(p: dict[str, Any]) -> str:
+    name = p.get("display_name") or "-"
+    return f"{name}（载入中）" if p.get("loading") else name
 
 
 async def server_reply(keyword: str, service) -> MessageChain | str:

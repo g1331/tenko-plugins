@@ -781,6 +781,8 @@ def _team(team: dict[str, Any], first: int) -> dict[str, Any]:
                 "language": p.get("language") or "",
                 "admin": bool(p.get("is_admin")),
                 "vip": bool(p.get("is_vip")),
+                # 已占队位、还在载入地图（bf-manager 按 Blaze 的 STAT 判断，通常十几秒）
+                "loading": bool(p.get("loading")),
             }
         )
     win = _mean(wins)
@@ -827,6 +829,16 @@ def _operation(op: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _loading_count(players: dict[str, Any] | None, teams: list[dict[str, Any]]) -> int:
+    count = ((players or {}).get("summary") or {}).get("loading_count")
+    if isinstance(count, int):
+        return count
+    spectators = (players or {}).get("spectators") or []
+    return sum(p["loading"] for t in teams for p in t["players"]) + sum(
+        bool(p.get("loading")) for p in spectators
+    )
+
+
 def server_page(
     detail: dict[str, Any], players: dict[str, Any] | None, source: str
 ) -> dict[str, Any]:
@@ -852,7 +864,14 @@ def server_page(
         ],
         "teams": teams,
         "waiting": [
-            (label, color, [(p.get("display_name") or "-", p.get("rank") or 0) for p in people])
+            (
+                label,
+                color,
+                [
+                    (p.get("display_name") or "-", p.get("rank") or 0, bool(p.get("loading")))
+                    for p in people
+                ],
+            )
             for label, color, key in [
                 ("排队", "#34d399", "queued"),
                 ("观战", "#f87171", "spectators"),
@@ -860,6 +879,8 @@ def server_page(
             if (people := (players or {}).get(key))
         ],
         "players_missing": players is None,
+        # 载入中的人数用 bf-manager 的计数，和网页一致；它还算上了没分到队、不在名单里的人
+        "loading": _loading_count(players, teams),
         "online": [
             ("管理", sum(p["admin"] for t in teams for p in t["players"])),
             ("VIP", sum(p["vip"] for t in teams for p in t["players"])),
