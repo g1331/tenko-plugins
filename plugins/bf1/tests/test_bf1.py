@@ -1338,3 +1338,106 @@ async def test_stats_card_equipped_dogtags(module, player, rendered):
     await module.stats_reply("abc", object())
     assert rendered["context"]["equipped"] == []
     assert not html_has(module, rendered["context"], 'class="worn"')
+
+
+def test_item_search_and_sort_flags(module):
+    """旧 bot 的 -n 名字、-s 排序，和类别、名字、-c/-r/-t 一起用，位置随意。"""
+
+    result = _alconna("武器").parse("/武器 步枪 abc -s 爆头率 -n gew -t")
+    assert (result.query("first"), result.query("second")) == ("步枪", "abc")
+    assert (result.query("search.keyword"), result.query("sort.sort")) == ("gew", "爆头率")
+    assert result.query("text") is not None
+    result = _alconna("步枪").parse('/步枪 -n "gewehr 98" -sort kpm -c 3')
+    assert result.matched and result.query("name") is None
+    assert (result.query("search.keyword"), result.query("sort.sort")) == ("gewehr 98", "kpm")
+    assert result.query("cols.cols") == 3
+    result = _alconna("载具").parse("/载具 -s 摧毁 abc")
+    assert (result.query("first"), result.query("sort.sort")) == ("abc", "摧毁")
+    assert "-n" in _alconna("bf1w").meta.description
+
+
+def test_item_sorts_and_name_search(module):
+    pages = module.pages
+    assert pages.find_sort("weapons", "HS").key == "headshots"
+    assert pages.find_sort("weapons", "命中").key == "accuracy"
+    assert pages.find_sort("vehicles", "摧毁").key == "destroyed"
+    assert pages.find_sort("vehicles", "爆头率") is None
+    match = pages.name_matches
+    assert match("gew98", "Gewehr 98（狙击手）") is False  # 不是子串，短词也不模糊
+    assert match("gewehr98", "Gewehr 98（狙击手）")
+    assert match("m.95", "Gewehr M.95（步兵）") and match("mg0815", "MG 08/15") is False
+    assert match("08/15", "MG 08/15") and match("费德洛夫", "費德洛夫自動步槍")
+    assert match("smle mkiii(步兵", "SMLE MKIII（步兵）")
+    # 长一点的词错一个字也认
+    assert match("费德洛夫自动步枪壕沟战", "费德洛夫自动步枪（壕沟站）")
+    assert not match("", "MG 08/15")
+
+
+def _gun(name, kills, headshots=0, accuracy=None, seconds=600):
+    return {
+        "name": name,
+        "category": "步枪",
+        "kills": kills,
+        "headshots": headshots,
+        "accuracy": accuracy,
+        "time_seconds": seconds,
+    }
+
+
+async def test_items_sorted_by_a_rate_need_enough_kills(module, player, rendered):
+    rendered["result"] = b"jpeg"
+    player["/stats/2/weapons"] = {
+        "weapons": [
+            _gun("A", 500, headshots=50, accuracy=20.0),
+            _gun("B", 9, headshots=9, accuracy=90.0),  # 击杀不够，比率再高也不排
+            _gun("C", 10, headshots=5, accuracy=30.0),
+            _gun("D", 0, seconds=0),
+        ]
+    }
+    await module.items_reply("weapons", "abc", object(), sort_word="爆头率")
+    ctx = rendered["context"]
+    assert [i["name"] for i in ctx["items"]] == ["C", "A"]
+    assert ctx["highlight"] == 3 and ctx["note"] == ["按爆头率排序 · 击杀 ≥ 10"]
+    assert 'class="stat hl"><div class="label">爆头率' in module.pages.html("items.html", ctx)
+    rendered["result"] = None
+    text = await module.items_reply("weapons", "abc", None, sort_word="acc")
+    assert text.startswith("abc 的武器按命中率排前 2（击杀不少于 10 的）\n1. C · ")
+    # 默认按击杀，卡片上不写说明
+    await module.items_reply("weapons", "abc", None)
+    assert rendered["context"]["highlight"] == 0 and rendered["context"]["note"] == []
+    wrong = await module._answer(module.items_reply("vehicles", "abc", None, sort_word="爆头"))
+    assert wrong == "载具没有「爆头」这种排法，可以按 击杀、KPM、摧毁、时长 排"
+    player["/stats/2/weapons"] = {"weapons": [_gun("B", 9, headshots=9)]}
+    assert await module.items_reply("weapons", "abc", None, sort_word="kpm") == (
+        "abc 还没有击杀满 10 的武器"
+    )
+
+
+async def test_item_search_lists_unused_ones_too(module, player, rendered):
+    rendered["result"] = b"jpeg"
+    player["/stats/2/weapons"] = {
+        "weapons": [
+            _gun("Gewehr 98（步兵）", 300, headshots=30),
+            _gun("Gewehr 98（狙击手）", 5, headshots=5),
+            _gun("Gewehr M.95（步兵）", None, seconds=0),
+            _gun("SMLE MKIII（步兵）", 900),
+        ]
+    }
+    await module.items_reply("weapons", "abc", object(), keyword="gewehr", sort_word="hs")
+    ctx = rendered["context"]
+    # 样本够的先按爆头率，剩下的按击杀接在后面；没用过的也列
+    assert [i["name"] for i in ctx["items"]] == [
+        "Gewehr 98（步兵）",
+        "Gewehr 98（狙击手）",
+        "Gewehr M.95（步兵）",
+    ]
+    assert ctx["items"][2]["stats"][:2] == ["0", "-"]
+    assert [i["muted"] for i in ctx["items"]] == [False, True, True]
+    assert ctx["note"] == ["名字含「gewehr」· 3 件", "按爆头率排序 · 击杀不到 10 的置后"]
+    rendered["result"] = None
+    text = await module.items_reply("weapons", "abc", None, layout=(1, 2), keyword="gewehr")
+    assert text.startswith("abc 的武器里名字含「gewehr」的有 3 件，按击杀排前 2\n")
+    assert "爆头 -" not in text.split("\n")[2]
+    rifles = module.groups.find("weapons", "步枪")
+    missing = await module.items_reply("weapons", "abc", None, group=rifles, keyword="mp18")
+    assert missing == "abc 的步枪里没有名字含「mp18」的"

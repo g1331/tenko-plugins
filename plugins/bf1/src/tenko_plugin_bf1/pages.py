@@ -9,7 +9,12 @@ import asyncio
 import base64
 import mimetypes
 import random
+import re
+import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
+from difflib import SequenceMatcher
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -95,9 +100,129 @@ def _rarity(value: int, gold: int, blue: int) -> str:
     return GOLD if value >= gold else BLUE if value >= blue else WHITE
 
 
+@dataclass(frozen=True)
+class Sort:
+    """武器、载具的一种排法；column 是卡片上要高亮的那一列。"""
+
+    key: str
+    label: str
+    column: int
+    value: Callable[[dict[str, Any]], float | None]
+    words: tuple[str, ...]
+    # 比率类：击杀太少的武器会凭一两个击杀排到最前面，要设样本门槛
+    rate: bool = False
+
+
+# 按爆头率、命中率、KPM 排时，击杀不到这个数的不参与排名
+MIN_RATE_KILLS = 10
+
+
+def _kills(item: dict[str, Any]) -> int:
+    return item.get("kills") or 0
+
+
+def _per_minute(item: dict[str, Any]) -> float | None:
+    seconds = item.get("time_seconds")
+    return _kills(item) / (seconds / 60) if seconds else None
+
+
+def _headshot_rate(item: dict[str, Any]) -> float | None:
+    return (item.get("headshots") or 0) / _kills(item) if _kills(item) else None
+
+
+def _seconds(item: dict[str, Any]) -> float:
+    return item.get("time_seconds") or 0
+
+
+_BY_KILLS = Sort("kills", "击杀", 0, _kills, ("击杀", "kills", "kill"))
+_BY_KPM = Sort("kpm", "KPM", 1, _per_minute, ("kpm",), rate=True)
+# 列序和 _weapon_stats、_vehicle_stats 一致；词沿用旧 bot 的 -s
+SORTS = {
+    "weapons": (
+        _BY_KILLS,
+        _BY_KPM,
+        Sort("accuracy", "命中率", 2, lambda i: i.get("accuracy"), ("命中率", "命中", "acc"), True),
+        Sort("headshots", "爆头率", 3, _headshot_rate, ("爆头率", "爆头", "hs"), True),
+        Sort("time", "时长", 4, _seconds, ("时长", "时间", "time")),
+    ),
+    "vehicles": (
+        _BY_KILLS,
+        _BY_KPM,
+        Sort(
+            "destroyed",
+            "摧毁",
+            2,
+            lambda i: i.get("destroyed") or 0,
+            ("摧毁", "destroyed", "destroy"),
+        ),
+        Sort("time", "时长", 3, _seconds, ("时长", "时间", "time")),
+    ),
+}
+
+
+def find_sort(kind: str, word: str) -> Sort | None:
+    word = word.strip().casefold()
+    return next((s for s in SORTS[kind] if word in s.words), None)
+
+
+def _fold(text: str | None) -> str:
+    """搜武器名前统一写法：全角转半角、繁转简、大写，去掉空格和 - · . 这些分隔。"""
+
+    text = cn(unicodedata.normalize("NFKC", text or "")).upper()
+    return re.sub(r"[\s\-·.]", "", text)
+
+
+def _partial_ratio(short: str, long: str) -> float:
+    """短串和长串里同长度各段的最高相似度（0–100），同 rapidfuzz 的 partial_ratio。"""
+
+    if len(short) > len(long):
+        short, long = long, short
+    if not short:
+        return 0
+    return 100 * max(
+        SequenceMatcher(None, short, long[i : i + len(short)]).ratio()
+        for i in range(len(long) - len(short) + 1)
+    )
+
+
+def name_matches(keyword: str, name: str | None) -> bool:
+    """旧 bot 的 -n：子串匹配，或者相似度超过 90（长一点的词错一个字也认）。"""
+
+    keyword, name = _fold(keyword), _fold(name)
+    return bool(keyword) and (keyword in name or _partial_ratio(keyword, name) > 90)
+
+
+def rank_items(
+    items: list[dict[str, Any]], sort: Sort = _BY_KILLS, keyword: str | None = None
+) -> list[dict[str, Any]]:
+    """按 sort 排好的全部武器或载具，调用方自己截前几个。
+
+    不搜索时只列这一项有数的（比率类还要击杀够门槛）；搜索时匹配到的都列，
+    没用过、样本不够的按击杀排在后面，同旧 bot。
+    """
+
+    pool = [i for i in items if name_matches(keyword, i.get("name"))] if keyword else items
+
+    def order(item: dict[str, Any]) -> tuple[float, int]:
+        return sort.value(item) or 0, _kills(item)
+
+    top = sorted((i for i in pool if ranked(i, sort)), key=order, reverse=True)
+    if keyword:
+        top += sorted((i for i in pool if not ranked(i, sort)), key=_kills, reverse=True)
+    return top
+
+
+def ranked(item: dict[str, Any], sort: Sort) -> bool:
+    """这一项有数（比率类还要击杀够门槛），参与排名。"""
+
+    value = sort.value(item)
+    if sort.rate:
+        return value is not None and _kills(item) >= MIN_RATE_KILLS
+    return bool(value)
+
+
 def top_kills(items: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
-    played = [i for i in items if i.get("kills")]
-    return sorted(played, key=lambda i: i["kills"], reverse=True)[:count]
+    return rank_items(items)[:count]
 
 
 def _common(source: str) -> dict[str, Any]:
@@ -516,7 +641,7 @@ def stats_page(
 
 
 def _weapon_stats(w: dict[str, Any]) -> list[str]:
-    kills = w["kills"]
+    kills = _kills(w)
     return [
         _int(kills),
         _kpm(kills, w.get("time_seconds")),
@@ -528,8 +653,8 @@ def _weapon_stats(w: dict[str, Any]) -> list[str]:
 
 def _vehicle_stats(v: dict[str, Any]) -> list[str]:
     return [
-        _int(v["kills"]),
-        _kpm(v["kills"], v.get("time_seconds")),
+        _int(_kills(v)),
+        _kpm(_kills(v), v.get("time_seconds")),
         _int(v.get("destroyed") or 0),
         _duration(v.get("time_seconds")),
     ]
@@ -550,11 +675,15 @@ def items_page(
     cols: int = ITEM_COLS,
     rows: int = ITEM_ROWS,
     title: str | None = None,
+    sort: Sort = _BY_KILLS,
+    note: list[str] | None = None,
 ) -> dict[str, Any]:
+    """items 是 rank_items 排好的；note 是排序和搜索条件，一条一行写在名字右边。"""
+
     weapon = kind == "weapons"
     cards = []
-    for item in top_kills(items, cols * rows):
-        stars = item["kills"] // 100
+    for item in items[: cols * rows]:
+        stars = _kills(item) // 100
         cards.append(
             {
                 "name": cn(item.get("name")),
@@ -565,6 +694,8 @@ def items_page(
                 "stars": stars,
                 "star_color": _rarity(stars, 100, 60),
                 "stats": _weapon_stats(item) if weapon else _vehicle_stats(item),
+                # 搜索时接在后面的：没用过或样本不够，不参与排名
+                "muted": not ranked(item, sort),
             }
         )
     # 不够一行就按实际张数收窄，免得右边空一大块
@@ -578,6 +709,8 @@ def items_page(
         "columns": ["击杀", "KPM", "命中率", "爆头率", "时长"]
         if weapon
         else ["击杀", "KPM", "摧毁", "时长"],
+        "highlight": sort.column,
+        "note": note or [],
         "items": cards,
         "cols": shown,
         "width": PAGE_PAD + shown * ITEM_CARD + (shown - 1) * ITEM_GAP,

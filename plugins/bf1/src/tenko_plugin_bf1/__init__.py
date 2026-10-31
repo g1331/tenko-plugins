@@ -225,38 +225,53 @@ def _career_lines(stats: dict[str, Any]) -> list[str]:
     return lines
 
 
-def format_weapons(
-    name: str, weapons: list[dict[str, Any]], label: str = "武器", count: int = TOP
-) -> str:
-    top = pages.top_kills(weapons, count)
-    if not top:
-        return f"{name} 还没有{label}击杀记录"
-    lines = [f"{name} 的{label}击杀前 {len(top)}"]
-    for index, w in enumerate(top, 1):
-        accuracy = f"{w['accuracy']:.1f}%" if w.get("accuracy") is not None else "-"
-        headshot = f"{(w.get('headshots') or 0) / w['kills']:.1%}"
-        lines.append(
-            f"{index}. {pages.cn(w.get('name'))} · {pages.cn(w.get('category')) or '-'}\n"
-            f"   击杀 {w['kills']} | KPM {_kpm(w['kills'], w.get('time_seconds'))} | "
-            f"命中 {accuracy} | 爆头 {headshot} | {_hours(w.get('time_seconds'))}"
-        )
-    return "\n".join(lines)
+def _weapon_line(w: dict[str, Any]) -> str:
+    kills = w.get("kills") or 0
+    accuracy = f"{w['accuracy']:.1f}%" if w.get("accuracy") is not None else "-"
+    headshot = f"{(w.get('headshots') or 0) / kills:.1%}" if kills else "-"
+    return (
+        f"{pages.cn(w.get('name'))} · {pages.cn(w.get('category')) or '-'}\n"
+        f"   击杀 {kills} | KPM {_kpm(kills, w.get('time_seconds'))} | "
+        f"命中 {accuracy} | 爆头 {headshot} | {_hours(w.get('time_seconds'))}"
+    )
 
 
-def format_vehicles(
-    name: str, vehicles: list[dict[str, Any]], label: str = "载具", count: int = TOP
-) -> str:
-    top = pages.top_kills(vehicles, count)
-    if not top:
-        return f"{name} 还没有{label}击杀记录"
-    lines = [f"{name} 的{label}击杀前 {len(top)}"]
-    for index, v in enumerate(top, 1):
-        lines.append(
-            f"{index}. {pages.cn(v.get('name'))} · {pages.cn(v.get('category')) or '-'}\n"
-            f"   击杀 {v['kills']} | KPM {_kpm(v['kills'], v.get('time_seconds'))} | "
-            f"摧毁 {v.get('destroyed') or 0} | {_hours(v.get('time_seconds'))}"
-        )
-    return "\n".join(lines)
+def _vehicle_line(v: dict[str, Any]) -> str:
+    kills = v.get("kills") or 0
+    return (
+        f"{pages.cn(v.get('name'))} · {pages.cn(v.get('category')) or '-'}\n"
+        f"   击杀 {kills} | KPM {_kpm(kills, v.get('time_seconds'))} | "
+        f"摧毁 {v.get('destroyed') or 0} | {_hours(v.get('time_seconds'))}"
+    )
+
+
+def format_items(kind: str, heading: str, items: list[dict[str, Any]]) -> str:
+    line = _weapon_line if kind == "weapons" else _vehicle_line
+    return "\n".join([heading, *(f"{i}. {line(item)}" for i, item in enumerate(items, 1))])
+
+
+def _items_heading(
+    name: str, label: str, sort: pages.Sort, keyword: str | None, shown: int, total: int
+) -> tuple[str, list[str]]:
+    """文字版的第一行，和卡片名字右边的排序、搜索说明；默认按击杀排时卡片上不写。"""
+
+    least = pages.MIN_RATE_KILLS
+    floor = ""
+    if sort.rate:
+        # 搜索时样本不够的也列，置灰接在后面
+        floor = f"击杀不到 {least} 的置后" if keyword else f"击杀 ≥ {least}"
+    note = [f"名字含「{keyword}」· {total} 件"] if keyword else []
+    if keyword or sort.key != "kills":
+        note.append(" · ".join(x for x in (f"按{sort.label}排序", floor) if x))
+    if keyword:
+        top = f"前 {shown}" if total > shown else ""
+        later = f"，击杀不到 {least} 的排在后面" if sort.rate else ""
+        found = f"{name} 的{label}里名字含「{keyword}」的有 {total} 件"
+        return f"{found}，按{sort.label}排{top}{later}", note
+    if sort.key == "kills":
+        return f"{name} 的{label}击杀前 {shown}", note
+    floor = f"（击杀不少于 {least} 的）" if sort.rate else ""
+    return f"{name} 的{label}按{sort.label}排前 {shown}{floor}", note
 
 
 def format_servers(keyword: str, servers: list[dict[str, Any]], total: int) -> str:
@@ -377,27 +392,45 @@ async def items_reply(
     user_id: str = "",
     group: groups.Group | None = None,
     layout: tuple[int, int] = (pages.ITEM_COLS, pages.ITEM_ROWS),
+    keyword: str | None = None,
+    sort_word: str | None = None,
 ) -> MessageChain | str:
-    """武器或载具击杀排行；给了分组（步枪、突击兵、坦克……）就只排这一组。
+    """武器或载具排行；给了分组（步枪、突击兵、坦克……）就只排这一组。
 
-    layout 是卡片的列数和行数，文字版也按列 × 行的数量列。
+    layout 是卡片的列数和行数，文字版也按列 × 行的数量列；keyword 是旧 bot 的 -n 名字搜索，
+    sort_word 是 -s 的排序方式。
     """
 
+    whole = "武器" if kind == "weapons" else "载具"
+    sort = pages.SORTS[kind][0]
+    if sort_word and not (sort := pages.find_sort(kind, sort_word)):
+        choices = "、".join(s.label for s in pages.SORTS[kind])
+        raise Bf1Error(f"{whole}没有「{sort_word}」这种排法，可以按 {choices} 排")
     persona = await _player(name, user_id)
     pid = persona["persona_id"]
     result, platoon = await asyncio.gather(
         _get(f"/stats/{pid}/{kind}"), _optional(f"/stats/{pid}/platoon")
     )
     items = result[kind]
-    whole = "武器" if kind == "weapons" else "载具"
     if group:
         items = [i for i in items if i in group]
-    title = f"{whole} · {group.label}" if group else whole
+    label = group.label if group else whole
+    ranked = pages.rank_items(items, sort, keyword)
+    display = persona["display_name"]
+    if not ranked:
+        if keyword:
+            return f"{display} 的{label}里没有名字含「{keyword}」的"
+        if sort.rate:
+            return f"{display} 还没有击杀满 {pages.MIN_RATE_KILLS} 的{label}"
+        return f"{display} 还没有{label}击杀记录"
     cols, rows = layout
-    context = pages.items_page(kind, persona, platoon, items, _source(), cols, rows, title)
-    text = (format_weapons if kind == "weapons" else format_vehicles)(
-        persona["display_name"], items, group.label if group else whole, cols * rows
+    shown = ranked[: cols * rows]
+    heading, note = _items_heading(display, label, sort, keyword, len(shown), len(ranked))
+    title = f"{whole} · {group.label}" if group else whole
+    context = pages.items_page(
+        kind, persona, platoon, shown, _source(), cols, rows, title, sort, note
     )
+    text = format_items(kind, heading, shown)
     return await _reply(service, "items.html", context, text, _player_link(pid, kind))
 
 
@@ -733,6 +766,18 @@ TEXT = Option("-t|-text|--text", help_text="只回文字，不出图")
 ROWS = Option("-r|-row|-行", Args["rows", int], dest="rows", help_text="排几行，最多 10")
 COLS = Option("-c|-col|-列", Args["cols", int], dest="cols", help_text="排几列，最多 8")
 
+# 旧 bot 的 -n 按名字搜、-s 排序（Alconna 自带 -h、-sct、-cp，不和这些撞）
+SEARCH = Option(
+    "-n|-name|-名字", Args["keyword", str], dest="search", help_text="按名字搜，没用过的也列出"
+)
+SORT = Option(
+    "-s|-sort|-排序",
+    Args["sort", str],
+    dest="sort",
+    help_text="排序：击杀、时长、KPM、命中率、爆头率（载具是击杀、时长、KPM、摧毁）",
+)
+ITEM_OPTIONS = (TEXT, COLS, ROWS, SEARCH, SORT)
+
 
 def _layout(cols: Query[int], rows: Query[int]) -> tuple[int, int]:
     """没给的用默认，超出范围的夹到 1 和上限之间。"""
@@ -826,13 +871,12 @@ def _items_commands(kind: str, names: list[str]):
         names,
         Args["first?", str]["second?", str],
         f"查询战地一玩家的{what}击杀排行，可以按类别或兵种筛选（{sample}等，也可以直接发 /"
-        f"{groups.GROUPS[kind][0].names[0]}）；绑定过可以不带名字，-c 几列 -r 几行自己排，"
+        f"{groups.GROUPS[kind][0].names[0]}）；绑定过可以不带名字，-n 按名字搜，"
+        f"-s 换排序（{'、'.join(s.label for s in pages.SORTS[kind])}），-c 几列 -r 几行自己排，"
         "加 -t 只回文字",
-        f"{names[0]} [类别] [EA 名字] [-c 列] [-r 行] [-t]",
-        f"/{names[0]} {sample.split('、')[0]} SHlSAN13 -c 3 -r 4",
-        TEXT,
-        COLS,
-        ROWS,
+        f"{names[0]} [类别] [EA 名字] [-n 名字] [-s 排序] [-c 列] [-r 行] [-t]",
+        f"/{names[0]} {sample.split('、')[0]} SHlSAN13 -s KPM",
+        *ITEM_OPTIONS,
     )
 
 
@@ -844,11 +888,19 @@ def _items_answer(
     text: Query[Any],
     cols: Query[int],
     rows: Query[int],
+    search: Query[str],
+    sort: Query[str],
     render_service: RenderService,
 ):
     service = _service(text, render_service)
     layout = _layout(cols, rows)
-    return _answer(items_reply(kind, name, service, session.user.id, group, layout))
+    # 旧 bot 的用法里常给名字加引号
+    keyword = _name(search).strip("\"'“”") if search.available else None
+    return _answer(
+        items_reply(
+            kind, name, service, session.user.id, group, layout, keyword or None, _name(sort)
+        )
+    )
 
 
 @_items_commands("weapons", ["bf1w", "wp", "weapon", "武器"])
@@ -859,11 +911,15 @@ async def bf1w(
     text: Query[Any] = Query("text"),  # noqa: B008
     cols: Query[int] = Query("cols.cols"),  # noqa: B008
     rows: Query[int] = Query("rows.rows"),  # noqa: B008
+    search: Query[str] = Query("search.keyword"),  # noqa: B008
+    sort: Query[str] = Query("sort.sort"),  # noqa: B008
     *,
     render_service: RenderService,
 ):
     group, name = _group_and_name("weapons", first, second)
-    return await _items_answer("weapons", group, name, session, text, cols, rows, render_service)
+    return await _items_answer(
+        "weapons", group, name, session, text, cols, rows, search, sort, render_service
+    )
 
 
 @_items_commands("vehicles", ["bf1v", "vc", "vehicle", "载具"])
@@ -874,11 +930,15 @@ async def bf1v(
     text: Query[Any] = Query("text"),  # noqa: B008
     cols: Query[int] = Query("cols.cols"),  # noqa: B008
     rows: Query[int] = Query("rows.rows"),  # noqa: B008
+    search: Query[str] = Query("search.keyword"),  # noqa: B008
+    sort: Query[str] = Query("sort.sort"),  # noqa: B008
     *,
     render_service: RenderService,
 ):
     group, name = _group_and_name("vehicles", first, second)
-    return await _items_answer("vehicles", group, name, session, text, cols, rows, render_service)
+    return await _items_answer(
+        "vehicles", group, name, session, text, cols, rows, search, sort, render_service
+    )
 
 
 def _group_command(kind: str, group: groups.Group):
@@ -890,22 +950,24 @@ def _group_command(kind: str, group: groups.Group):
         text: Query[Any] = Query("text"),  # noqa: B008
         cols: Query[int] = Query("cols.cols"),  # noqa: B008
         rows: Query[int] = Query("rows.rows"),  # noqa: B008
+        search: Query[str] = Query("search.keyword"),  # noqa: B008
+        sort: Query[str] = Query("sort.sort"),  # noqa: B008
         *,
         render_service: RenderService,
     ):
         return await _items_answer(
-            kind, group, _name(name), session, text, cols, rows, render_service
+            kind, group, _name(name), session, text, cols, rows, search, sort, render_service
         )
 
     what = "武器" if kind == "weapons" else "载具"
     for word in group.names:
         meta = CommandMeta(
             f"查询战地一玩家的{group.label}{'' if group.label.endswith(what) else what}击杀排行",
-            usage=f"{word} [EA 名字] [-c 列] [-r 行] [-t]",
+            usage=f"{word} [EA 名字] [-n 名字] [-s 排序] [-c 列] [-r 行] [-t]",
             hide=True,
         )
         args = Args["name?", str]
-        command.on(Alconna(word, args, TEXT, COLS, ROWS, meta=meta))(handler)
+        command.on(Alconna(word, args, *ITEM_OPTIONS, meta=meta))(handler)
     return handler
 
 

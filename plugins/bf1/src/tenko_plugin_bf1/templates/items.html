@@ -23,7 +23,10 @@
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 10px; margin-top: 14px;
     padding-top: 14px; border-top: 1px solid var(--line); }
   .stat .v { font-family: "Oswald", sans-serif; font-size: 28px; font-weight: 500; line-height: 1.2; }
-  .stat:first-child .v { color: var(--amber); font-weight: 700; }
+  .stat.hl .v { color: var(--amber); font-weight: 700; }
+  .stat.hl .label { color: var(--amber); }
+  .note { margin-left: auto; align-self: flex-end; text-align: right; font-size: 18px; line-height: 1.6; color: var(--muted); }
+  .card.muted { opacity: .55; }
   .empty { padding: 30px 0; text-align: center; color: var(--muted); }
 {% endblock %}
 {% block body %}
@@ -33,11 +36,12 @@
     <div class="eyebrow">Battlefield 1 · {{ title }}</div>
     <h1>{% if tag %}<span class="tag">[{{ tag }}]</span>{% endif %}{{ name }}</h1>
   </div>
+  {% if note %}<div class="note">{% for line in note %}<div>{{ line }}</div>{% endfor %}</div>{% endif %}
 </div>
 <div class="cards">
   {% for i in items %}
   {#- 60 星以上底边染成稀有度色，其余用分隔线色。 -#}
-  <div class="card" style="--accent: {{ i.star_color if i.stars >= 60 else 'rgba(255,255,255,.14)' }}">
+  <div class="card{{ ' muted' if i.muted }}" style="--accent: {{ i.star_color if i.stars >= 60 else 'rgba(255,255,255,.14)' }}">
     <div class="pic">
       <span class="rank{{ ' top' if loop.index <= 3 }}">#{{ loop.index }}</span>
       {% if i.stars %}<span class="stars" style="color: {{ i.star_color }}">{{ star(i.star_color) }}{{ i.stars }}</span>{% endif %}
@@ -47,7 +51,7 @@
       <div class="name">{{ i.name }}</div>
       <div class="sub">{% if i.skin %}<span class="rarity-{{ i.rarity }}">{{ i.skin }}</span> · {% endif %}{{ i.category }}</div>
       <div class="stats">
-        {% for label in columns %}<div class="stat"><div class="label">{{ label }}</div><div class="v">{{ i.stats[loop.index0] }}</div></div>{% endfor %}
+        {% for label in columns %}<div class="stat{{ ' hl' if loop.index0 == highlight }}"><div class="label">{{ label }}</div><div class="v">{{ i.stats[loop.index0] }}</div></div>{% endfor %}
       </div>
     </div>
   </div>
