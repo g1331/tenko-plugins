@@ -1,0 +1,100 @@
+{% extends "_base.html" %}
+{% from "_macros.html" import avatar %}
+{#- 玩家信息：旧 bot 的 -info 和天眼查合在一起。头部照战绩卡，下面是私服身份和最近玩过的服。 -#}
+{% block style %}
+  .hero { position: relative; padding: 26px 30px 28px; background: var(--panel);
+    clip-path: polygon(0 22px, 22px 0, 100% 0, 100% calc(100% - 22px), calc(100% - 22px) 100%, 0 100%); }
+  .hero::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+    background: linear-gradient(90deg, var(--amber-deep), rgba(245,158,11,.2) 60%, transparent); }
+  .hero.banned::after { background: linear-gradient(90deg, var(--red), rgba(239,68,68,.3) 60%, transparent); }
+  .warn { margin-bottom: 16px; padding: 8px 16px; background: #b91c1c; font-weight: 700; font-size: 20px; }
+  .status { display: flex; flex-wrap: wrap; gap: 10px; font-size: 18px; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; background: rgba(255,255,255,.1); color: var(--soft); }
+  .chip .dot { width: 10px; height: 10px; border-radius: 50%; background: #a1a1aa; }
+  .chip.on { background: rgba(16,185,129,.22); color: #a7f3d0; }
+  .chip.on .dot { background: #34d399; }
+  .ban { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px 0 6px; font-weight: 700; background: rgba(255,255,255,.1); }
+  .ban img { width: 26px; height: 26px; border-radius: 50%; }
+  .ban.clean .src { color: #6ee7b7; }
+  .ban .st { font-weight: 400; color: var(--muted); }
+  .ban.hit { background: rgba(185,28,28,.55); }
+  .ban.hit .st { color: #fecaca; font-weight: 900; }
+  .who { display: flex; align-items: center; gap: 22px; margin-top: 22px; }
+  .platoon { display: flex; align-items: center; gap: 10px; font-size: 19px; color: var(--soft); }
+  .platoon img { width: 32px; height: 32px; object-fit: contain; }
+  .platoon .ok { color: var(--amber); font-size: 17px; }
+  h1 { margin: 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 50px; line-height: 1.15; font-weight: 700; word-break: break-all; }
+  h1 .tag { color: var(--muted); margin-right: 12px; }
+  .pid { margin-top: 6px; font-size: 19px; color: var(--soft); }
+  section.panel { margin-top: 18px; }
+  .counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .count { padding: 12px 16px; background: rgba(255,255,255,.05); }
+  .count .v { font-family: "Oswald", sans-serif; font-size: 40px; font-weight: 700; line-height: 1.15; }
+  .count.some .v { color: var(--amber); }
+  .count.role-ban.some .v { color: #f87171; }
+  .role { margin-top: 20px; }
+  .role h3 { margin: 0 0 6px; font-size: 20px; font-weight: 700; color: var(--soft); }
+  .role h3 small { margin-left: 8px; font-size: 17px; font-weight: 400; color: var(--muted); }
+  .srv { display: flex; align-items: baseline; gap: 16px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 19px; }
+  .srv .n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .srv .m { flex: none; font-size: 17px; color: var(--muted); }
+  .more { padding-top: 6px; font-size: 17px; color: var(--muted); }
+  .empty { padding: 6px 0; font-size: 18px; color: var(--muted); }
+  .list { column-count: {{ columns }}; column-gap: 40px; }
+  .list .srv { break-inside: avoid; }
+  .srv .i { flex: none; min-width: 34px; font-family: "Oswald", sans-serif; font-size: 17px; color: var(--muted); }
+{% endblock %}
+{% block body %}
+<section class="hero{{ ' banned' if banned }}">
+  {% if banned %}<div class="warn">该玩家已被 {{ banned_by }} 判定作弊</div>{% endif %}
+  <div class="status">
+    {% if online is none %}<span class="chip"><span class="dot"></span>状态未知</span>
+    {% elif online %}<span class="chip on"><span class="dot"></span>{{ '正在游戏 · ' ~ online_server if online_server else '在线' }}</span>
+    {% else %}<span class="chip"><span class="dot"></span>离线</span>{% endif %}
+    {% for b in bans %}
+    <span class="ban {{ b.state }}"><img src="{{ b.logo }}"><span class="src">{{ b.source }}</span>
+      {%- if b.state == "hit" %}<span class="st">{{ b.hit_text }}</span>{% elif b.state == "unknown" %}<span class="st">无信息</span>{% endif %}</span>
+    {% endfor %}
+  </div>
+  <div class="who">
+    {{ avatar(avatar_url, online, 108) }}
+    <div style="min-width: 0">
+      {% if platoon %}
+      <div class="platoon">
+        {% if platoon.emblem_url %}<img src="{{ platoon.emblem_url }}">{% endif %}
+        <span>{{ platoon.name or platoon.tag }}{% if platoon.size %} · {{ platoon.size }} 人{% endif %}</span>
+        {% if platoon.verified %}<span class="ok">已认证</span>{% endif %}
+      </div>
+      {% endif %}
+      <h1>{% if platoon and platoon.tag %}<span class="tag">[{{ platoon.tag }}]</span>{% endif %}{{ name }}</h1>
+      <div class="pid">PID <span class="d">{{ pid }}</span></div>
+    </div>
+  </div>
+</section>
+<section class="panel">
+  <div class="sh">私服身份{% if rsp %}<span class="aside">bf-manager 收录的 {{ tracked }} 个私服</span>{% endif %}</div>
+  {% if rsp %}
+  <div class="counts">
+    {% for r in roles %}<div class="count role-{{ r.key }}{{ ' some' if r.total }}"><div class="label">{{ r.label }}</div><div class="v">{{ r.total }}</div></div>{% endfor %}
+  </div>
+  {% for r in roles if r.rows or r.full %}
+  <div class="role">
+    <h3>{{ r.label }}<small>{{ r.total }} 个</small></h3>
+    <div class="{{ 'list' if r.full }}">
+    {% for s in r.rows %}<div class="srv">{% if r.full %}<span class="i">{{ loop.index }}</span>{% endif %}<span class="n">{{ s.name }}</span>{% if s.map or s.players %}<span class="m">{{ [s.map, s.players]|select|join(' · ') }}</span>{% endif %}</div>
+    {% else %}<div class="empty">收录的私服里没有{{ '被封禁' if r.key == 'ban' else '当' ~ r.label }}的记录</div>{% endfor %}
+    </div>
+    {% if r.more %}<div class="more">还有 {{ r.more }} 个没列出，加 -{{ r.key[0] }} 全部列出</div>{% endif %}
+  </div>
+  {% endfor %}
+  {% else %}<div class="empty">暂时查不到私服身份，稍后再试</div>{% endif %}
+</section>
+{% if not full %}
+<section class="panel">
+  <div class="sh">最近游玩<span class="aside">bf-manager 跟踪到的对局，保留 90 天</span></div>
+  {% for s in recent %}
+  <div class="srv"><span class="n">{{ s.name }}</span><span class="m"><span class="d">{{ s.when }}</span> · {{ s.rounds }} 局{% if s.where %} · 最后一局 {{ s.where }}{% endif %}</span></div>
+  {% else %}<div class="empty">{{ '90 天内没有跟踪到对局' if rounds else '对局记录暂时查不到，稍后再试' }}</div>{% endfor %}
+</section>
+{% endif %}
+{% endblock %}

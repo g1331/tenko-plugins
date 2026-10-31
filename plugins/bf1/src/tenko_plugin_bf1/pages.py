@@ -141,6 +141,20 @@ def _split(title, left_label, left, left_color, right_label, right, right_color)
     }
 
 
+def _bans(ban: dict[str, Any] | None) -> tuple[list[dict[str, Any]], str]:
+    """BFBAN、BFEAC 两个标记，和判定作弊的来源（没有则为空）。"""
+
+    ban = ban or {}
+    bans = [
+        {"source": "BFBAN", "logo": asset("bfban.webp"), "hit_text": "实锤"},
+        {"source": "BFEAC", "logo": asset("bfeac.webp"), "hit_text": "已封禁"},
+    ]
+    for b in bans:
+        state = ban.get(b["source"].lower())
+        b["state"] = state if state in ("hit", "clean") else "unknown"
+    return bans, " / ".join(b["source"] for b in bans if b["state"] == "hit")
+
+
 def stats_page(
     persona: dict[str, Any],
     stats: dict[str, Any],
@@ -162,15 +176,7 @@ def stats_page(
     played_hours = (s.get("time_played_seconds") or 0) / 3600
     rank = s.get("rank")
     longest = s.get("longest_headshot_meters")
-    ban = ban or {}
-    bans = [
-        {"source": "BFBAN", "logo": asset("bfban.webp"), "hit_text": "实锤"},
-        {"source": "BFEAC", "logo": asset("bfeac.webp"), "hit_text": "已封禁"},
-    ]
-    for b in bans:
-        state = ban.get(b["source"].lower())
-        b["state"] = state if state in ("hit", "clean") else "unknown"
-    banned_by = " / ".join(b["source"] for b in bans if b["state"] == "hit")
+    bans, banned_by = _bans(ban)
 
     def per_hour(value: int | None) -> str:
         return f"{(value or 0) / played_hours:.1f}" if played_hours else "-"
@@ -265,19 +271,27 @@ def _vehicle_stats(v: dict[str, Any]) -> list[str]:
     ]
 
 
+# 武器、载具卡片默认 2 列 5 行；旧 bot 的 -c/-r 自己排，上限也沿用旧 bot 的 8 列 10 行
+ITEM_COLS, ITEM_ROWS = 2, 5
+MAX_COLS, MAX_ROWS = 8, 10
+ITEM_CARD, ITEM_GAP, PAGE_PAD = 467, 18, 48
+
+
 def items_page(
     kind: str,
     persona: dict[str, Any],
     platoon: dict[str, Any] | None,
     items: list[dict[str, Any]],
     source: str,
-    count: int,
+    cols: int = ITEM_COLS,
+    rows: int = ITEM_ROWS,
+    title: str | None = None,
 ) -> dict[str, Any]:
     weapon = kind == "weapons"
-    rows = []
-    for item in top_kills(items, count):
+    cards = []
+    for item in top_kills(items, cols * rows):
         stars = item["kills"] // 100
-        rows.append(
+        cards.append(
             {
                 "name": cn(item.get("name")),
                 "category": cn(item.get("category")),
@@ -289,16 +303,135 @@ def items_page(
                 "stats": _weapon_stats(item) if weapon else _vehicle_stats(item),
             }
         )
+    # 不够一行就按实际张数收窄，免得右边空一大块
+    shown = min(cols, len(cards)) if cards else cols
     return {
         **_common(source),
-        "title": "武器" if weapon else "载具",
+        "title": title or ("武器" if weapon else "载具"),
         "name": persona["display_name"],
         "tag": (platoon or {}).get("tag"),
         "avatar_url": persona.get("avatar_url") or "",
         "columns": ["击杀", "KPM", "命中率", "爆头率", "时长"]
         if weapon
         else ["击杀", "KPM", "摧毁", "时长"],
-        "items": rows,
+        "items": cards,
+        "cols": shown,
+        "width": PAGE_PAD + shown * ITEM_CARD + (shown - 1) * ITEM_GAP,
+    }
+
+
+ROLES = (("owner", "服主"), ("admin", "管理"), ("vip", "VIP"), ("ban", "封禁"))
+# 全部列出时按最长的那类分栏：服名长，一栏至少六百来像素才放得下
+FULL_COLUMNS = ((16, 1), (60, 2), (10**9, 3))
+FULL_WIDTHS = {1: WIDTH, 2: 1400, 3: 1900}
+
+
+def _played_servers(items: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """把最近的对局按服务器归并：最后一次在哪玩、玩了几局。排队、观战、进服就走的不算。"""
+
+    servers: dict[Any, dict[str, Any]] = {}
+    for item in items:  # 新的在前
+        r, p = item["round"], item["player"]
+        if not (p.get("kills") or 0) + (p.get("deaths") or 0):
+            continue
+        key = r.get("server_game_id") or r.get("server_name")
+        if key not in servers:
+            if len(servers) == count:
+                continue
+            servers[key] = {
+                "name": r.get("server_name") or "-",
+                "when": datetime.fromtimestamp(r["ended_at"]).strftime("%Y-%m-%d %H:%M"),
+                "where": " · ".join(
+                    x for x in (r.get("map_display_name"), r.get("mode_display_name")) if x
+                ),
+                "rounds": 0,
+            }
+        servers[key]["rounds"] += 1
+    return list(servers.values())
+
+
+def info_page(
+    persona: dict[str, Any],
+    rsp: dict[str, Any] | None,
+    rounds: list[dict[str, Any]] | None,
+    ban: dict[str, Any] | None,
+    online: dict[str, Any] | None,
+    platoon: dict[str, Any] | None,
+    source: str,
+    count: int,
+    full: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """玩家信息（旧 bot 的 -info 加天眼查）：在哪些私服有身份、最近玩过的服、战队和封禁标记。
+
+    最近玩过的服用 bf-manager 跟踪到的对局归并：EA 的“最近游玩”不准。
+    full 里的身份（旧 bot 天眼查的 -o/-a/-v/-b）全部列出、多了分栏，其他身份只留个数，不列最近游玩。
+    """
+
+    bans, banned_by = _bans(ban)
+    roles = []
+    for key, label in ROLES:
+        servers = (rsp or {}).get(key) or []
+        shown = servers if key in full else [] if full else servers[:count]
+        rows = [
+            {
+                "name": srv.get("name") or "-",
+                "map": srv.get("map_display_name"),
+                "players": f"{srv['player_count']}/{srv.get('max_player_count') or '-'}"
+                if srv.get("player_count") is not None
+                else None,
+            }
+            for srv in shown
+        ]
+        roles.append(
+            {
+                "key": key,
+                "label": label,
+                "total": len(servers),
+                "rows": rows,
+                "more": len(servers) - len(shown) if not full else 0,
+                "full": key in full,
+            }
+        )
+    longest = max((r["total"] for r in roles if r["full"]), default=0)
+    columns = next(c for limit, c in FULL_COLUMNS if longest <= limit)
+    return {
+        **_common(source),
+        "name": persona["display_name"],
+        "pid": persona["persona_id"],
+        "avatar_url": persona.get("avatar_url") or "",
+        "online": online.get("is_online") if online else None,
+        "online_server": (online or {}).get("server_name"),
+        "platoon": platoon,
+        "bans": bans,
+        "banned": bool(banned_by),
+        "banned_by": banned_by,
+        "rsp": rsp is not None,
+        "tracked": (rsp or {}).get("tracked_servers") or 0,
+        "roles": roles,
+        "rounds": rounds is not None,
+        "recent": _played_servers(rounds or [], count),
+        "full": bool(full),
+        "columns": columns,
+        "width": FULL_WIDTHS[columns],
+    }
+
+
+def catalog_page(category: str, entries: list[Any]) -> dict[str, Any]:
+    """百科某个分类的目录，照旧 bot 的目录图分栏列出序号和名字；背景是其中一条的配图。"""
+
+    columns = (
+        1 if len(entries) <= 12 else 2 if len(entries) <= 44 else 3 if len(entries) <= 90 else 4
+    )
+    rows = -(-len(entries) // columns)
+    return {
+        **_common("游戏内典籍"),
+        "background": random.choice(entries).image,
+        "width": 120 + 430 * columns,
+        "category": category,
+        "columns": [
+            [(e.no, e.name) for e in entries[i * rows : (i + 1) * rows]] for i in range(columns)
+        ],
+        "count": len(entries),
     }
 
 

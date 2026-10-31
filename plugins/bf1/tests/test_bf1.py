@@ -565,6 +565,7 @@ def _alconna(name):
         ("bf1pl", ["bf1pl", "ds", "详细服务器"]),
         ("bf1", ["bf1", "bfstat"]),
         ("bf1wiki", ["bf1百科", "百科", "wiki"]),
+        ("bf1info", ["bf1info", "info", "信息", "tyc", "天眼查"]),
         ("bf1tip", ["bf1tip", "tip", "小贴士"]),
     ],
 )
@@ -587,6 +588,20 @@ def test_old_names_take_the_same_arguments(module):
     assert _alconna("ss").parse("/ss sakula").matched
     assert _alconna("百科").parse("/百科").matched
     assert _alconna("tip").parse("/tip 伦敦的呼唤").matched
+
+
+def test_text_flag(module):
+    """旧 bot 的 -t：玩家类命令加上就只回文字，放名字前后都行。"""
+
+    for line in ["/info -t abc", "/天眼查 abc -t", "/stat -text", "/武器 步枪 abc -t", "/步枪 -t"]:
+        result = _alconna(line[1:].split()[0]).parse(line)
+        assert result.matched and result.query("text") is not None, line
+    assert _alconna("info").parse("/info abc").query("text") is None
+    assert _alconna("info").parse("/info -t abc").query("name") == "abc"
+    service = object()
+    assert module._service(_query(), service) is service
+    assert module._service(_query(...), service) is None
+    assert "-t" in _alconna("bf1info").meta.description
 
 
 def _round(id, kills, deaths, *, status="finished", won=True, seconds=600, weapons=None):
@@ -789,3 +804,231 @@ async def test_pokes_that_are_not_for_us(module, bots, rendered):
     assert not await module.poked(receiver, {"group_id": 100, "user_id": 1, "target_id": 2}, None)
     assert not await module.poked(receiver, {"user_id": 10, "target_id": 2}, None)
     assert bots.sent == []
+
+
+def test_weapon_and_vehicle_groups(module):
+    groups = module.groups
+    assault = groups.find("weapons", "土鸡")
+    assert assault.label == "突击兵"
+    assert {"category": "衝鋒槍", "name": "MP18"} in assault
+    assert {"category": "配備", "name": "炸藥"} in assault  # 繁体也认
+    assert {"category": "配备", "name": "弹药箱"} not in assault
+    assert {"category": "制式步枪", "name": "SMLE MKIII"} in groups.find("weapons", "狙击枪")
+    ground = groups.find("vehicles", "地面")
+    assert {"category": "机械巨兽", "name": "Char 2C"} in ground
+    assert {"category": "机械巨兽", "name": "无畏舰"} not in ground
+    assert groups.find("weapons", "坦克") is None and groups.find("vehicles", "坦克")
+    # 每个旧名字只属于一组
+    for kind_groups in groups.GROUPS.values():
+        words = [w for g in kind_groups for w in g.names]
+        assert len(words) == len(set(words))
+
+
+def test_group_names_are_their_own_commands(module):
+    for kind, word, label in [
+        ("weapons", "步枪", "步枪"),
+        ("weapons", "斟茶", "侦察兵"),
+        ("vehicles", "飞艇", "飞船"),
+    ]:
+        targets = [_commands.subscribers[i] for i in _commands.trie[f"/{word}"]]
+        handler = module.GROUP_HANDLERS[(kind, label)]
+        assert [t.callable_target for t in targets] == [handler]
+        assert _alconna(word).meta.hide
+    assert "/突击兵" in _alconna("bf1w").meta.description
+    assert _alconna("武器").parse("/武器 步枪 abc").matched
+
+
+def _query(value=None):
+    return SimpleNamespace(available=value is not None, result=value)
+
+
+def test_category_and_name_in_either_order(module):
+    split = module._group_and_name
+    assert split("weapons", _query("步枪"), _query("abc"))[0].label == "步枪"
+    group, name = split("weapons", _query("abc"), _query("突击兵"))
+    assert (group.label, name) == ("突击兵", "abc")
+    assert split("weapons", _query("abc"), _query()) == (None, "abc")
+    assert split("vehicles", _query(), _query()) == (None, None)
+
+
+async def test_items_by_group(module, player, rendered):
+    rendered["result"] = b"jpeg"
+    medic = module.groups.find("weapons", "医疗")
+    await module.items_reply("weapons", "abc", object(), group=medic)
+    ctx = rendered["context"]
+    assert ctx["title"] == "武器 · 医疗兵"
+    assert [i["name"] for i in ctx["items"]] == ["费德洛夫自动步枪"]
+    rendered["result"] = None
+    text = await module.items_reply(
+        "vehicles", "abc", None, group=module.groups.find("vehicles", "飞机")
+    )
+    assert text.startswith("abc 还没有飞机击杀记录")
+
+
+def test_item_layout_flags(module):
+    """旧 bot 的 -c 几列 -r 几行，中文的 -列 -行 也认，位置随意。"""
+
+    result = _alconna("武器").parse("/武器 步枪 abc -c 3 -r 4")
+    assert (result.query("first"), result.query("second")) == ("步枪", "abc")
+    assert (result.query("cols.cols"), result.query("rows.rows")) == (3, 4)
+    result = _alconna("步枪").parse("/步枪 -行 2 -列 1 abc")
+    assert (result.query("name"), result.query("cols.cols"), result.query("rows.rows")) == (
+        "abc",
+        1,
+        2,
+    )
+    assert _alconna("载具").parse("/载具 -c 4").matched
+    layout = module._layout
+    assert layout(_query(), _query()) == (2, 5)
+    assert layout(_query(3), _query(4)) == (3, 4)
+    assert layout(_query(99), _query(0)) == (8, 1)
+
+
+async def test_items_in_columns_and_rows(module, player, rendered):
+    rendered["result"] = b"jpeg"
+    many = [
+        {"name": f"W{i}", "category": "步枪", "kills": 100 - i, "time_seconds": 600}
+        for i in range(30)
+    ]
+    player["/stats/2/weapons"] = {"weapons": many}
+    await module.items_reply("weapons", "abc", object(), layout=(3, 4))
+    ctx = rendered["context"]
+    assert len(ctx["items"]) == 12 and ctx["cols"] == 3 and ctx["width"] == 1485
+    await module.items_reply("weapons", "abc", object())
+    assert rendered["context"]["width"] == 1000 and len(rendered["context"]["items"]) == 10
+    # 不够一行就收窄
+    player["/stats/2/weapons"] = {"weapons": many[:2]}
+    await module.items_reply("weapons", "abc", object(), layout=(4, 2))
+    assert rendered["context"]["cols"] == 2 and rendered["context"]["width"] == 1000
+    rendered["result"] = None
+    player["/stats/2/weapons"] = {"weapons": many}
+    text = await module.items_reply("weapons", "abc", None, layout=(1, 3))
+    assert text.startswith("abc 的武器击杀前 3\n") and "\n3. W2 · " in text
+
+
+async def test_players_by_pid(module, player, rendered):
+    player["/players/2"] = PERSONA
+    text = await module.stats_reply("#2", None)
+    assert text.startswith("abc")
+    wrong = await module._answer(module.stats_reply("#x2", None))
+    assert wrong == "PID 只能是数字，例如 #1004198901469"
+
+
+INFO_SERVERS = {
+    "owner": [],
+    "admin": [
+        {
+            "server_id": i,
+            "game_id": i,
+            "name": f"S{i}",
+            "refreshed_at": 0,
+            "player_count": 60 if i == 0 else None,
+            "max_player_count": 64,
+            "map_display_name": "亚眠" if i == 0 else None,
+        }
+        for i in range(10)
+    ],
+    "vip": [],
+    "ban": [{"server_id": 99, "game_id": 99, "name": "B", "refreshed_at": 0}],
+    "tracked_servers": 369,
+}
+
+
+def _elsewhere(item, game_id, name):
+    return {**item, "round": {**item["round"], "server_game_id": game_id, "server_name": name}}
+
+
+async def test_player_info(module, player, rendered):
+    player["/stats/2/servers"] = INFO_SERVERS
+    # 新的在前：S1 两局（中间夹一局进服就走的不算），然后去了 R2
+    rounds = [ROUNDS[0], ROUNDS[1], _elsewhere(ROUNDS[2], 7, "R2"), ROUNDS[3]]
+    player["/stats/2/rounds"] = lambda limit: {"items": rounds[:limit], "next_before": None}
+    rendered["result"] = b"jpeg"
+    reply = await module.info_reply("abc", object())
+    # 名字和 PID 用文字跟在图后面，好复制
+    assert isinstance(reply[0], Image)
+    caption = str(reply[1])
+    assert caption.startswith("玩家名：abc\nPID：2\nhttp") and caption.endswith("/bf1/player/2")
+    ctx = rendered["context"]
+    assert rendered["template"] == "info.html" and ctx["platoon"]["tag"] == "EA"
+    admin = dict((r["key"], r) for r in ctx["roles"])["admin"]
+    assert (admin["total"], len(admin["rows"]), admin["more"]) == (10, 8, 2)
+    assert admin["rows"][0] == {"name": "S0", "map": "亚眠", "players": "60/64"}
+    recent = [(r["name"], r["rounds"], r["where"]) for r in ctx["recent"]]
+    assert recent == [("S1", 2, "亚眠 · 征服"), ("R2", 1, "亚眠 · 征服")]
+    assert ctx["recent"][0]["when"].startswith("2026-")
+    rendered["result"] = None
+    text = await module.info_reply("abc", None)
+    assert text.startswith("abc（PID 2）\n战队：[EA] Electronic Arts\n正在游戏：S1 | ")
+    assert "BFBAN 实锤 | BFEAC 无信息" in text
+    assert "私服身份（bf-manager 收录的 369 个私服）：服主 0 · 管理 10 · VIP 0 · 封禁 1" in text
+    assert "……还有 2 个，加 -a 全部列出" in text and "\n· R2（2026-" in text and "，1 局）" in text
+    assert "玩家名：" not in text and text.endswith("/bf1/player/2")
+
+
+def test_info_role_flags(module):
+    """旧 bot 天眼查的 -o/-a/-v/-b，中文 -服主/-管理/-封禁 也认。"""
+
+    info = _alconna("天眼查")
+    result = info.parse("/天眼查 abc -b -管理")
+    assert result.query("name") == "abc"
+    assert [k for k in ("owner", "admin", "vip", "ban") if result.query(k) is not None] == [
+        "admin",
+        "ban",
+    ]
+    assert info.parse("/天眼查 -v -t").query("vip") is not None
+    assert info.parse("/天眼查 abc").query("ban") is None
+
+
+async def test_player_info_full_list(module, player, rendered):
+    player["/stats/2/servers"] = INFO_SERVERS
+
+    def unused(limit):
+        raise AssertionError("全部列出时不查最近游玩")
+
+    player["/stats/2/rounds"] = unused
+    rendered["result"] = b"jpeg"
+    await module.info_reply("abc", object(), full=("admin", "vip"))
+    ctx = rendered["context"]
+    roles = {r["key"]: r for r in ctx["roles"]}
+    assert len(roles["admin"]["rows"]) == 10 and roles["admin"]["more"] == 0
+    assert roles["vip"]["full"] and not roles["vip"]["rows"]
+    # 没要的只留个数
+    assert roles["ban"]["total"] == 1 and not roles["ban"]["rows"] and not roles["ban"]["full"]
+    assert ctx["full"] and not ctx["recent"] and (ctx["columns"], ctx["width"]) == (1, 1000)
+    many = {**INFO_SERVERS, "ban": INFO_SERVERS["admin"] * 7}
+    player["/stats/2/servers"] = many
+    await module.info_reply("abc", object(), full=("ban",))
+    assert (rendered["context"]["columns"], rendered["context"]["width"]) == (3, 1900)
+    rendered["result"] = None
+    player["/stats/2/servers"] = INFO_SERVERS
+    text = await module.info_reply("abc", None, full=("admin", "vip"))
+    assert "管理：\n1. S0\n" in text and "\n10. S9\n" in text and "VIP：没有" in text
+    assert "还有" not in text and "最近游玩" not in text
+
+
+async def test_player_info_without_rsp(module, player, rendered):
+    def down():
+        raise module.Bf1Error("查询服务暂时连不上，稍后再试")
+
+    player["/stats/2/servers"] = down
+    player["/stats/2/rounds"] = lambda limit: down()
+    rendered["result"] = b"jpeg"
+    await module.info_reply("abc", object())
+    assert not rendered["context"]["rounds"] and rendered["context"]["recent"] == []
+    rendered["result"] = None
+    text = await module.info_reply("abc", None)
+    assert "私服身份暂时查不到" in text and "最近游玩" not in text
+
+
+async def test_wiki_catalog(module, rendered):
+    rendered["result"] = b"jpeg"
+    reply = await module.wiki_reply("武器", object())
+    assert isinstance(reply[0], Image)
+    ctx = rendered["context"]
+    assert rendered["template"] == "catalog.html" and ctx["count"] == 123
+    assert len(ctx["columns"]) == 4 and ctx["columns"][0][0] == (1, "MP18")
+    assert sum(len(c) for c in ctx["columns"]) == 123
+    assert module.pages.catalog_page("全世界", module.codex.search_wiki("全世界"))["width"] == 980
+    overview = await module.wiki_reply("目录", None)
+    assert overview.startswith("百科共 310 条：武器 123 条、载具 40 条")

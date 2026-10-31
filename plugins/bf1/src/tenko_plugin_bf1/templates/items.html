@@ -5,7 +5,7 @@
   .who { display: flex; align-items: center; gap: 20px; margin-bottom: 20px; padding: 18px 22px; background: var(--panel); }
   .who h1 { margin: 2px 0 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 44px; line-height: 1.15; word-break: break-all; }
   .who h1 .tag { color: var(--muted); margin-right: 10px; }
-  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .cards { display: grid; grid-template-columns: repeat({{ cols }}, 1fr); gap: 18px; }
   .card { position: relative; background: var(--panel);
     clip-path: polygon(0 18px, 18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%); }
   .pic { position: relative; height: 124px; display: flex; align-items: center; justify-content: center;

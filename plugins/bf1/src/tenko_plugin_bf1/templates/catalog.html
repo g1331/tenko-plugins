@@ -1,0 +1,26 @@
+{% extends "_base.html" %}
+{#- 百科某个分类的目录，照旧 bot 的目录图：虚化背景、金色分类名，序号和名字分栏排。 -#}
+{% block style %}
+  .page { padding: 44px 60px 40px; }
+  .bg i { inset: -80px; filter: blur(40px) saturate(1.1); background-position: center; }
+  .bg::before { background: rgba(0,0,0,.6); }
+  .head { display: flex; align-items: baseline; gap: 28px; }
+  .head h1 { margin: 0; font-size: 56px; font-weight: 400; color: #e3c27a; }
+  .head span { font-size: 24px; color: rgba(227,194,122,.85); }
+  .cols { display: flex; gap: 30px; margin-top: 26px; }
+  .col { width: 400px; }
+  .item { display: flex; gap: 10px; font-size: 23px; line-height: 1.75; color: rgba(255,255,255,.93);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .no { flex: none; min-width: 52px; font-family: "Oswald", sans-serif; color: rgba(255,255,255,.55); }
+  .page > .sign { position: absolute; right: 40px; bottom: 14px; font-size: 15px; color: rgba(255,255,255,.45); }
+{% endblock %}
+{% block body %}
+<div class="head"><h1>{{ category }}</h1><span>{{ count }} 条 · 发 /百科 序号 查看</span></div>
+<div class="cols">
+  {% for col in columns %}
+  <div class="col">{% for no, name in col %}<div class="item"><span class="no">{{ no }}</span><span>{{ name }}</span></div>{% endfor %}</div>
+  {% endfor %}
+</div>
+<div class="sign">游戏内典籍</div>
+{% endblock %}
+{% block footer %}{% endblock %}
