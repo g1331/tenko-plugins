@@ -25,3 +25,11 @@
 {% if url %}<img class="avatar{{ ' online' if online }}" src="{{ url }}" style="width: {{ size }}px; height: {{ size }}px">
 {%- else %}<div class="avatar{{ ' online' if online }}" style="width: {{ size }}px; height: {{ size }}px"></div>{% endif %}
 {%- endmacro %}
+
+{#- 勋带图原图 256 见方，勋带只占中间一条（x 17–239，y 约 90–167），照网页图鉴的裁法按高度等比裁出这一条。 -#}
+{% macro ribbon(url, height=28) -%}
+{%- set k = height / 42 -%}
+<span class="ribbon" style="display: block; flex: none; position: relative; overflow: hidden; height: {{ height }}px; width: {{ (122 * k)|round|int }}px">
+  {%- if url %}<img src="{{ url }}" style="position: absolute; max-width: none; top: {{ -49 * k }}px; left: {{ -9 * k }}px; width: {{ 141 * k }}px; height: {{ 141 * k }}px">{% endif -%}
+</span>
+{%- endmacro %}

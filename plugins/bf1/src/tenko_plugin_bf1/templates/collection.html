@@ -1,0 +1,89 @@
+{% extends "_base.html" %}
+{% from "_macros.html" import avatar, ribbon %}
+{#- 照 bf-manager 网页战绩页的「收藏」：佩戴的狗牌、勋章墙、狗牌墙，加上勋带墙；没拿到的置灰。 -#}
+{% block style %}
+  .who { display: flex; align-items: center; gap: 20px; padding: 18px 22px; background: var(--panel); }
+  .who h1 { margin: 2px 0 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 44px; line-height: 1.15; word-break: break-all; }
+  .who h1 .tag { color: var(--muted); margin-right: 10px; }
+  .who .main { flex: 1; min-width: 0; }
+  .worn { display: flex; gap: 22px; }
+  .worn .t { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 132px; text-align: center; font-size: 16px; color: var(--soft); }
+  .worn img { width: 104px; height: 104px; border-radius: 50%; filter: drop-shadow(0 8px 12px rgba(0,0,0,.6)); }
+  .counts { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 2px; padding: 16px 22px; background: var(--panel); border-top: 1px solid var(--line); }
+  .counts .v { font-family: "Oswald", sans-serif; font-size: 34px; font-weight: 600; line-height: 1.2; }
+  .counts .v small { font-size: 20px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+  section.panel { margin-top: 18px; }
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 18px; }
+  .col > :first-child { margin-top: 0; }
+  .group + .group { margin-top: 16px; }
+  .group .gt { margin-bottom: 8px; font-size: 16px; color: var(--muted); }
+  .medals { display: grid; grid-template-columns: repeat(10, 1fr); gap: 10px; }
+  .medal { position: relative; }
+  .medal img { width: 100%; aspect-ratio: 1; object-fit: contain; }
+  .off img { opacity: .25; filter: grayscale(1); }
+  .medal .p { position: absolute; right: 0; top: 0; padding: 0 5px; background: rgba(0,0,0,.75); font-family: "Oswald", sans-serif; font-size: 16px; line-height: 22px; color: var(--amber-soft); }
+  .tags { display: grid; grid-template-columns: repeat(14, 1fr); gap: 8px; }
+  .tag img { display: block; width: 100%; aspect-ratio: 1; border-radius: 50%; }
+  .tag .bar { height: 3px; margin: 3px 4px 0; background: rgba(255,255,255,.1); }
+  .tag .bar i { display: block; height: 100%; background: rgba(251,191,36,.7); }
+  .rbs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 18px; }
+  .rb { display: flex; align-items: center; gap: 8px; font-size: 16px; color: var(--soft); }
+  .rb.off { opacity: .3; filter: grayscale(1); }
+  .rb .d { font-size: 18px; }
+{% endblock %}
+{% block body %}
+<div class="who">
+  {{ avatar(avatar_url, false, 84) }}
+  <div class="main">
+    <div class="eyebrow">Battlefield 1 · 收藏</div>
+    <h1>{% if tag %}<span class="tag">[{{ tag }}]</span>{% endif %}{{ name }}</h1>
+  </div>
+  {% if equipped %}
+  <div class="worn">{% for t in equipped %}<div class="t"><img src="{{ t.image }}">{{ t.name }}</div>{% endfor %}</div>
+  {% endif %}
+</div>
+<div class="counts">
+  <div><div class="label">勋章</div><div class="v">{{ medals_got }}<small>/ {{ medals_total }}</small></div></div>
+  <div><div class="label">狗牌</div><div class="v">{{ dogtags_got }}<small>/ {{ dogtags_total }}</small></div></div>
+  {% if ribbons %}
+  <div><div class="label">勋带种类</div><div class="v">{{ ribbons_got }}<small>/ {{ ribbons_total }}</small></div></div>
+  <div><div class="label">勋带总数</div><div class="v">{{ "{:,}".format(ribbons_sum) }}</div></div>
+  {% endif %}
+</div>
+
+{#- 左栏勋章和勋带，右栏狗牌：狗牌三百多块，单独占一栏 -#}
+<div class="cols">
+<div class="col">
+<section class="panel">
+  <div class="sh">勋章<span class="aside">没拿到的置灰，角上是已完成的阶段</span></div>
+  {% for category, items in medals %}
+  <div class="group"><div class="gt">{{ category }}</div>
+    <div class="medals">{% for m in items %}<div class="medal{{ '' if m.got else ' off' }}"><img src="{{ m.image }}">{% if m.progress %}<span class="p">{{ m.progress }}</span>{% endif %}</div>{% endfor %}</div>
+  </div>
+  {% endfor %}
+</section>
+
+{% if ribbons %}
+<section class="panel">
+  <div class="sh">勋带<span class="aside">生涯里各拿过几次</span></div>
+  {% for category, items in ribbons %}
+  <div class="group"><div class="gt">{{ category }}</div>
+    <div class="rbs">{% for r in items %}<div class="rb{{ '' if r.count else ' off' }}">{{ ribbon(r.image, 26) }}{% if r.count %}×<span class="d">{{ "{:,}".format(r.count) }}</span>{% endif %}</div>{% endfor %}</div>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+</div>
+<div class="col">
+<section class="panel">
+  <div class="sh">狗牌<span class="aside">没拿到的置灰，下面的细条是解锁进度</span></div>
+  {% for category, items in dogtags %}
+  <div class="group"><div class="gt">{{ category }}</div>
+    <div class="tags">{% for t in items %}<div class="tag{{ '' if t.got else ' off' }}"><img src="{{ t.image }}">{% if t.progress %}<div class="bar"><i style="width: {{ t.progress }}%"></i></div>{% endif %}</div>{% endfor %}</div>
+  </div>
+  {% endfor %}
+</section>
+</div>
+</div>
+{% endblock %}

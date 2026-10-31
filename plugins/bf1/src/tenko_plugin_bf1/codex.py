@@ -11,41 +11,9 @@ import random
 from dataclasses import dataclass
 from typing import Any
 
+from .names import MAPS, MODES
 from .pages import ASSETS
 
-# 与 bf-manager 网页 apps/web/lib/bf1/catalog.ts 一致
-MAPS = {
-    "MP_MountainFort": "格拉巴山",
-    "MP_Forest": "阿尔贡森林",
-    "MP_ItalianCoast": "帝国边境",
-    "MP_Chateau": "流血宴厅",
-    "MP_Scar": "圣康坦的伤痕",
-    "MP_Desert": "西奈沙漠",
-    "MP_Amiens": "亚眠",
-    "MP_Suez": "苏伊士",
-    "MP_FaoFortress": "法欧堡",
-    "MP_Giant": "庞然暗影",
-    "MP_Fields": "苏瓦松",
-    "MP_Graveyard": "决裂",
-    "MP_Underworld": "法乌克斯要塞",
-    "MP_Verdun": "凡尔登高地",
-    "MP_Trench": "尼维尔之夜",
-    "MP_ShovelTown": "攻占托尔",
-    "MP_Offensive": "索姆河",
-    "MP_Hell": "帕斯尚尔",
-    "MP_River": "卡波雷托",
-    "MP_Alps": "剃刀边缘",
-    "MP_Blitz": "伦敦的呼唤：夜袭",
-    "MP_London": "伦敦的呼唤：灾祸",
-}
-MODES = {
-    "Conquest": "征服",
-    "Breakthrough": "闪击行动",
-    "Domination": "抢攻",
-    "Possession": "战争信鸽",
-    "Rush": "突袭",
-    "TeamDeathMatch": "团队死斗",
-}
 CATEGORIES = ("武器", "载具", "战略", "战争", "全世界")
 
 

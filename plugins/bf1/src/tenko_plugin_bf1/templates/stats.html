@@ -1,5 +1,5 @@
 {% extends "_base.html" %}
-{% from "_macros.html" import icon, avatar %}
+{% from "_macros.html" import icon, avatar, ribbon %}
 {#- 内容对照 bf-manager 网页的 PlayerHeroBanner 与 CareerOverview，排版改成整宽纵向，方便手机看。 -#}
 {% block style %}
   .hero { position: relative; overflow: hidden; min-height: 400px; background: var(--panel);
@@ -27,9 +27,21 @@
   .ban.hit { background: rgba(185,28,28,.55); }
   .ban.hit .st { color: #fecaca; font-weight: 900; }
   .who { display: flex; align-items: center; gap: 22px; margin-top: 22px; }
-  .platoon { display: flex; align-items: center; gap: 10px; font-size: 19px; color: var(--soft); }
-  .platoon img { width: 32px; height: 32px; object-fit: contain; }
-  .platoon .ok { color: var(--amber); font-size: 17px; }
+  .who .main { flex: 1; min-width: 0; }
+  .worn { display: flex; flex: none; gap: 14px; }
+  .worn .t { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 124px; text-align: center; font-size: 15px; line-height: 1.3; color: var(--soft); }
+  .worn img { width: 96px; height: 96px; border-radius: 50%; filter: drop-shadow(0 8px 12px rgba(0,0,0,.6)); }
+  .platoon { display: flex; align-items: center; gap: 26px; }
+  .platoon .body { flex: 1; min-width: 0; }
+  .platoon .pn { font-size: 30px; font-weight: 700; line-height: 1.3; word-break: break-all; }
+  .platoon .pn .tag { margin-right: 10px; color: var(--amber); font-family: "Oswald", "SC", sans-serif; }
+  .platoon .meta2 { display: flex; align-items: center; gap: 14px; margin-top: 4px; font-size: 18px; color: var(--soft); }
+  .platoon .ok { padding: 0 8px; background: rgba(251,191,36,.16); color: var(--amber-soft); font-size: 16px; line-height: 26px; }
+  .platoon .desc { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 18px; line-height: 1.6; color: var(--soft);
+    white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+  .platoon .emblem { width: 150px; height: 150px; flex: none; object-fit: contain; filter: drop-shadow(0 6px 14px rgba(0,0,0,.6)); }
+  .tip { font-size: 19px; line-height: 1.7; color: var(--soft); }
+  .tip .tags { margin-top: 8px; font-size: 16px; color: var(--muted); }
   h1 { margin: 0; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 50px; line-height: 1.15; font-weight: 700; word-break: break-all; }
   h1 .tag { color: var(--muted); margin-right: 12px; }
   .meta { display: flex; align-items: center; gap: 18px; margin-top: 6px; font-size: 19px; color: var(--soft); }
@@ -38,9 +50,13 @@
   .core { display: flex; align-items: flex-end; gap: 36px; margin-top: 24px; }
   .core .kd-t { font-size: 18px; color: var(--amber); letter-spacing: .1em; }
   .core .kd { font-family: "Oswald", sans-serif; font-size: 104px; line-height: .95; font-weight: 700; color: var(--amber); margin-top: 4px; }
-  .kpis { display: grid; grid-template-columns: repeat(2, auto); gap: 10px 36px; padding-bottom: 4px; }
+  .kpis { display: grid; grid-template-columns: repeat({{ kpis|length if wide else 3 if kpis|length > 4 else 2 }}, auto); gap: 10px {{ 48 if wide else 28 if kpis|length > 4 else 36 }}px; padding-bottom: 4px; }
   .kpis .v { font-family: "Oswald", sans-serif; font-size: 36px; font-weight: 700; line-height: 1.15; }
   section.panel { margin-top: 18px; }
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 18px; }
+  .cols.single { grid-template-columns: minmax(0, 1fr); }
+  .cols.single .col + .col > :first-child { margin-top: 18px; }
+  .col > :first-child { margin-top: 0; }
   .splits { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; }
   .split .track { display: flex; gap: 4px; height: 14px; margin-top: 10px; }
   .split .track i { display: block; }
@@ -65,19 +81,45 @@
   .cls .badge { margin-left: 8px; background: var(--amber); color: #000; font-size: 14px; font-weight: 700; line-height: 20px; padding: 0 5px; vertical-align: 2px; }
   .cls .share { margin-left: 8px; font-size: 16px; color: var(--muted); }
   .cls .n { font-family: "Oswald", sans-serif; font-size: 20px; }
-  .gear-row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
+  .gear-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 18px; }
   .gear-row .panel { margin: 0; }
   .gear-item + .gear-item { margin-top: 16px; }
   .gear-item .line { display: flex; align-items: center; gap: 14px; }
-  .gear-item .img { width: 176px; height: 78px; flex: none; display: flex; align-items: center; justify-content: center;
+  .gear-item .img { width: 160px; height: 78px; flex: none; display: flex; align-items: center; justify-content: center;
     background: #7e7e84; }
   .gear-item .img img { max-width: 100%; max-height: 100%; object-fit: contain; padding: 4px; }
   .gear-item .body { flex: 1; min-width: 0; }
-  .gear-item .name { font-size: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gear-item .name { font-size: 20px; line-height: 1.25; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+  .gear-item .skin { margin-top: 2px; font-size: 16px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .gear-item .k { font-family: "Oswald", sans-serif; font-size: 24px; font-weight: 700; color: var(--amber); }
   .gear-item .k small { font-family: "SC", sans-serif; font-size: 17px; color: var(--muted); font-weight: 400; margin-left: 4px; }
   .gear-item .bar { margin-top: 6px; height: 6px; }
   .empty { padding: 18px 0; text-align: center; font-size: 18px; color: var(--muted); }
+  .details { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px 24px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+  .details .label { font-size: 16px; }
+  .details .v { font-family: "Oswald", sans-serif; font-size: 25px; font-weight: 500; line-height: 1.2; }
+  .cls.sub { margin-top: 10px; }
+  .modes { width: 100%; border-collapse: collapse; font-size: 19px; }
+  .modes th { padding: 0 0 8px; font-size: 16px; font-weight: 400; color: var(--muted); text-align: right; }
+  .modes th:first-child, .modes td:first-child { text-align: left; }
+  .modes td { padding: 7px 0; border-top: 1px solid var(--line); text-align: right; color: var(--soft); }
+  .modes td:first-child { color: var(--text); }
+  .modes .d { font-size: 20px; }
+  .modes td + td, .modes th + th { padding-left: 14px; }
+  .honors { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px 18px; }
+  .ribbons { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px 30px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .rb { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .rb .body { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex: 1; min-width: 0; }
+  .rb .n { font-size: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rb .c { flex: none; font-size: 20px; color: var(--amber-soft); }
+  .honors .v { font-family: "Oswald", "SC", sans-serif; font-size: 32px; font-weight: 700; line-height: 1.2; }
+  .maps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .map { position: relative; aspect-ratio: 16 / 9; overflow: hidden; background: rgba(255,255,255,.06); }
+  .map img { width: 100%; height: 100%; object-fit: cover; }
+  .map::after { content: ""; position: absolute; inset: 0; background: linear-gradient(0deg, rgba(0,0,0,.9), rgba(0,0,0,.25) 55%, transparent); }
+  .map .cap { position: absolute; left: 12px; right: 12px; bottom: 8px; z-index: 1; }
+  .map .n { font-size: 20px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .map .t { display: flex; justify-content: space-between; font-size: 16px; color: var(--soft); }
 {% endblock %}
 {% block body %}
 <section class="hero{{ ' banned' if banned }}">
@@ -96,20 +138,15 @@
     </div>
     <div class="who">
       {{ avatar(avatar_url, online, 108) }}
-      <div style="min-width: 0">
-        {% if platoon %}
-        <div class="platoon">
-          {% if platoon.emblem_url %}<img src="{{ platoon.emblem_url }}">{% endif %}
-          <span>{{ platoon.name or platoon.tag }}{% if platoon.size %} · {{ platoon.size }} 人{% endif %}</span>
-          {% if platoon.verified %}<span class="ok">已认证</span>{% endif %}
-        </div>
-        {% endif %}
+      <div class="main">
         <h1>{% if platoon and platoon.tag %}<span class="tag">[{{ platoon.tag }}]</span>{% endif %}{{ name }}</h1>
         <div class="meta">
           <span class="lv" style="color: {{ rank_color }}; border-color: {{ rank_color }}">Lv. {{ rank }}</span>
           <span>{{ icon("clock") }}{{ hours }}</span>
         </div>
       </div>
+      {#- 装备着的两块狗牌，和收藏页一样取自 bf-manager 的收藏接口 -#}
+      {% if equipped %}<div class="worn">{% for t in equipped %}<div class="t"><img src="{{ t.image }}">{{ t.name }}</div>{% endfor %}</div>{% endif %}
     </div>
     <div class="core">
       <div><div class="kd-t">K / D</div><div class="kd">{{ kd }}</div></div>
@@ -120,6 +157,9 @@
   </div>
 </section>
 
+{#- 有生涯扩展数据时左右两栏：左边战斗和兵种，右边常用装备、荣誉、模式和地图；没有时照旧一栏 -#}
+<div class="cols{{ '' if wide else ' single' }}">
+<div class="col">
 <section class="panel">
   <div class="sh">战斗<span class="aside d">PID {{ pid }}</span></div>
   <div class="splits">
@@ -142,27 +182,12 @@
     <div><div class="label">{{ icon(ico) }}{{ label }}</div><div class="v">{{ value }}<span class="rate">{{ rate }}/时</span></div></div>
     {% endfor %}
   </div>
+  {% if details %}
+  <div class="details">
+    {% for label, value in details %}<div><div class="label">{{ label }}</div><div class="v">{{ value }}</div></div>{% endfor %}
+  </div>
+  {% endif %}
 </section>
-
-<div class="gear-row">
-  {% for title, items in gear %}
-  <section class="panel">
-    <div class="sh">{{ title }}</div>
-    {% for g in items %}
-    <div class="gear-item">
-      <div class="line">
-        <div class="img">{% if g.image %}<img src="{{ g.image }}">{% endif %}</div>
-        <div class="body">
-          <div class="name">{{ g.name }}</div>
-          <div class="k">{{ g.kills }}<small>击杀</small></div>
-        </div>
-      </div>
-      <div class="bar"><i style="width: {{ g.ratio }}%"></i></div>
-    </div>
-    {% else %}<div class="empty">暂无记录</div>{% endfor %}
-  </section>
-  {% endfor %}
-</div>
 
 <section class="panel classes">
   <div class="sh">兵种<span class="aside">按游玩时长排序</span></div>
@@ -174,5 +199,93 @@
     <span class="n">{{ c.time }}</span><span class="n">{{ c.kills }}</span><span class="n">{{ c.kpm }}</span>
   </div>
   {% endfor %}
+  {% if elite %}
+  <div class="cls head sub"><span></span><span>精英兵</span><span>时长</span><span>击杀</span><span>KPM</span></div>
+  {% for k in elite %}
+  <div class="cls row elite">
+    <div></div><span>{{ k.name }}</span>
+    <span class="n">{{ k.time }}</span><span class="n">{{ k.kills }}</span><span class="n">{{ k.kpm }}</span>
+  </div>
+  {% endfor %}
+  {% endif %}
 </section>
+{#- 照旧 bot：战队单独一块，列出人数和描述；没加入战队时放一条小贴士 -#}
+<section class="panel">
+  {% if platoon %}
+  <div class="sh">战队</div>
+  <div class="platoon">
+    <div class="body">
+      <div class="pn">{% if platoon.tag %}<span class="tag">[{{ platoon.tag }}]</span>{% endif %}{{ platoon.name or '' }}</div>
+      <div class="meta2">{% if platoon.size %}<span>{{ platoon.size }} 人</span>{% endif %}{% if platoon.verified %}<span class="ok">EA 认证</span>{% endif %}</div>
+      {% if platoon.description %}<div class="desc">{{ platoon.description }}</div>{% endif %}
+    </div>
+    {% if platoon.emblem_url %}<img class="emblem" src="{{ platoon.emblem_url }}">{% endif %}
+  </div>
+  {% else %}
+  <div class="sh">小贴士<span class="aside">没有加入战队</span></div>
+  <div class="tip">{{ tip.text }}{% if tip.tags %}<div class="tags">{{ tip.tags|join(' · ') }}</div>{% endif %}</div>
+  {% endif %}
+</section>
+
+</div>
+<div class="col">
+<div class="gear-row">
+  {% for title, items in gear %}
+  <section class="panel">
+    <div class="sh">{{ title }}</div>
+    {% for g in items %}
+    <div class="gear-item">
+      <div class="line">
+        <div class="img">{% if g.image %}<img src="{{ g.image }}">{% endif %}</div>
+        <div class="body">
+          <div class="name">{{ g.name }}</div>
+          {% if g.skin %}<div class="skin rarity-{{ g.rarity }}">{{ g.skin }}</div>{% endif %}
+          <div class="k">{{ g.kills }}<small>击杀</small></div>
+        </div>
+      </div>
+      <div class="bar"><i style="width: {{ g.ratio }}%"></i></div>
+    </div>
+    {% else %}<div class="empty">暂无记录</div>{% endfor %}
+  </section>
+  {% endfor %}
+</div>
+
+{% if honors %}
+<section class="panel">
+  <div class="sh">荣誉{% if ribbons %}<span class="aside">拿得最多的勋带</span>{% endif %}</div>
+  <div class="honors">
+    {% for label, value in honors %}<div><div class="label">{{ label }}</div><div class="v">{{ value }}</div></div>{% endfor %}
+  </div>
+  {% if ribbons %}
+  <div class="ribbons">
+    {% for r in ribbons %}<div class="rb">{{ ribbon(r.image, 30) }}<div class="body"><div class="n">{{ r.name }}</div><div class="c">×<span class="d"> {{ "{:,}".format(r.count) }}</span></div></div></div>{% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if modes %}
+<section class="panel">
+  <div class="sh">模式<span class="aside">目标得分只算占点、炸弹、信鸽这类目标分</span></div>
+  <table class="modes">
+    <tr><th>模式</th><th>胜 / 负</th><th>胜率</th><th>目标得分</th></tr>
+    {% for m in modes %}<tr><td>{{ m.name }}</td><td class="d">{{ m.record }}</td><td class="d">{{ m.rate }}</td><td class="d">{{ m.score }}</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
+
+{% if maps %}
+<section class="panel">
+  <div class="sh">常玩地图<span class="aside">按游玩时长</span></div>
+  <div class="maps">
+    {% for m in maps %}
+    <div class="map">{% if m.image %}<img src="{{ m.image }}">{% endif %}
+      <div class="cap"><div class="n">{{ m.name }}</div><div class="t"><span class="d">{{ m.hours }}</span><span class="d">{{ m.share }}</span></div></div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+</div>
+</div>
 {% endblock %}

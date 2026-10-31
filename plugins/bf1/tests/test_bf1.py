@@ -70,6 +70,9 @@ def api(module, monkeypatch):
     routes = {}
 
     async def fake_get(path, **params):
+        # 和真接口一样：查不到的（比如没准备的单局详情）报 Bf1Error
+        if path not in routes:
+            raise module.Bf1Error(f"测试里没有 {path}")
         handler = routes[path]
         return handler(**params) if callable(handler) else handler
 
@@ -146,7 +149,11 @@ async def test_stats_renders_the_real_account_as_an_image(module, player, render
     assert ctx["team"][0] == ("复活", "6,202", "heart", "7.0")
     best_weapon = ctx["gear"][0][1][0]
     assert (best_weapon["name"], best_weapon["image"]) == ("费德洛夫自动步枪", "s.png")
-    assert html_has(module, ctx, "e.png", "正在游戏 · S1", "[EA]")
+    assert (best_weapon["skin"], best_weapon["rarity"]) == ("克伦斯基", "gold")
+    assert not ctx["gear"][0][1][1]["skin"]  # 没装皮肤的不写
+    assert html_has(
+        module, ctx, "e.png", "正在游戏 · S1", "[EA]", 'class="skin rarity-gold">克伦斯基'
+    )
 
 
 def html_has(module, ctx, *parts):
@@ -567,6 +574,7 @@ def _alconna(name):
         ("bf1wiki", ["bf1百科", "百科", "wiki"]),
         ("bf1info", ["bf1info", "info", "信息", "tyc", "天眼查"]),
         ("bf1tip", ["bf1tip", "tip", "小贴士"]),
+        ("bf1c", ["bf1c", "收藏", "勋章", "狗牌", "collection"]),
     ],
 )
 def test_old_command_names_reach_the_same_handler(module, handler, names):
@@ -1032,3 +1040,293 @@ async def test_wiki_catalog(module, rendered):
     assert module.pages.catalog_page("全世界", module.codex.search_wiki("全世界"))["width"] == 980
     overview = await module.wiki_reply("目录", None)
     assert overview.startswith("百科共 310 条：武器 123 条、载具 40 条")
+
+
+CAREER = {
+    "honors": {"mvp": 109, "ace_squad": 426, "ribbons": 51487, "medals": 82},
+    "combat": {"headshot_rate": 0.0947, "accuracy": 0.28, "squad_wipes": 2364},
+    "teamwork": {"flag_captures": 4083, "resupplies": 57872},
+    "modes": [
+        {"mode": "rush", "wins": 3, "losses": 7, "win_rate": 0.3, "score": 14000},
+        {"mode": "conquest", "wins": 1036, "losses": 1101, "win_rate": 0.4848, "score": 7816460},
+        {"mode": "air_assault", "wins": 0, "losses": 0, "win_rate": None, "score": None},
+    ],
+    "elite_kits": [
+        {"kit": "flamethrower", "kills": 52, "time_seconds": 2678},
+        {"kit": "sentry", "kills": None, "time_seconds": 3838},
+        {"kit": "infiltrator", "kills": 0, "time_seconds": 0},
+    ],
+    "maps": [
+        {"map": "MP_Underworld", "time_seconds": 7200},
+        {"map": "MP_Ridge", "time_seconds": 3600},
+    ],
+    "ribbons": [
+        {"code": "r13", "count": 6872},
+        {"code": "r01", "count": 4097},
+        {"code": "r05", "count": 0},
+    ],
+    "misc": {"rounds_completed": 3268, "rounds_played": 4299, "completion_rate": 0.76},
+}
+
+
+def test_collection_data(module):
+    c = module.collection
+    assert (len(c.RIBBONS), len(c.MEDALS), len(c.DOGTAGS)) == (47, 60, 320)
+    assert c.RIBBON["r13"].name and c.grouped(c.RIBBONS)[0][0] == "载具"
+    assert c.image("dogtags", "df082", "https://x/") == "https://x/bf1/codex/dogtags/df082.webp"
+    assert len(module.names.MAPS) == 32 and module.names.MAPS["MP_Ridge"] == "阿奇巴巴"
+
+
+async def test_stats_card_career_extras(module, player, rendered):
+    player["/stats/2"] = {**STATS, **CAREER}
+    rendered["result"] = b"jpeg"
+    await module.stats_reply("abc", object())
+    ctx = rendered["context"]
+    kpis = dict(ctx["kpis"])
+    assert (kpis["MVP"], kpis["王牌小队"]) == ("109", "426")
+    details = dict(ctx["details"])
+    assert (details["爆头率"], details["命中率"], details["团灭"]) == ("9.5%", "28.0%", "2,364")
+    assert details["占点"] == "4,083" and details["压制助攻"] == "-"
+    # 按局数排，没玩过的不列；目标得分到百万级用“万”
+    assert [(m["name"], m["score"]) for m in ctx["modes"]] == [
+        ("征服", "782 万"),
+        ("突袭", "1.4 万"),
+    ]
+    assert [(k["name"], k["kills"], k["kpm"]) for k in ctx["elite"]] == [
+        ("哨兵", "-", "-"),
+        ("喷火兵", "52", "1.17"),
+    ]
+    assert [(m["name"], m["share"]) for m in ctx["maps"]] == [
+        ("法乌克斯要塞", "66.7%"),
+        ("阿奇巴巴", "33.3%"),
+    ]
+    assert ctx["maps"][0]["image"].endswith("/bf1/codex/maps-480/MP_Underworld.webp")
+    assert (ctx["wide"], ctx["width"]) == (True, 1760)
+    assert [r["count"] for r in ctx["ribbons"]] == [6872, 4097]
+    assert dict(ctx["honors"])["完成率"] == "76.0%"
+    rendered["result"] = None
+    text = await module.stats_reply("abc", None)
+    assert "MVP 109 | 王牌小队 426 | 勋带 51487 | 勋章 82 | 完成率 76.0%" in text
+    assert "模式：征服 1,036 / 1,101（48.5%）；突袭 3 / 7（30.0%）" in text
+    assert "常玩地图：法乌克斯要塞 2 小时；阿奇巴巴 1 小时" in text
+
+
+async def test_stats_card_without_career_extras(module, player, rendered):
+    """旧的接口没有这些字段：对应部分不画，也不出错。"""
+
+    rendered["result"] = b"jpeg"
+    await module.stats_reply("abc", object())
+    ctx = rendered["context"]
+    assert len(ctx["kpis"]) == 4 and not ctx["details"] and not ctx["modes"]
+    assert not ctx["maps"] and not ctx["elite"] and not ctx["honors"] and not ctx["ribbons"]
+    # 没有扩展数据时照旧一栏
+    assert (ctx["wide"], ctx["width"]) == (False, 1000)
+
+
+def _detailed(item, **player):
+    """单局详情：所有人一个列表，本人那一行多了生涯对比。"""
+
+    other = {**item["player"], "persona_id": 9}
+    return {**item["round"], "players": [other, {**item["player"], **player}]}
+
+
+async def test_recent_rounds_with_honors_and_career(module, rounds, rendered):
+    rounds["/rounds/5"] = _detailed(
+        ROUNDS[0],
+        battle_score=7700,
+        mvp=True,
+        ribbons=[{"code": "r05", "count": 3}, {"code": "r15", "count": 1}],
+        rank_to=87,
+        kit_ranks=["scout"],
+        records={"longest_headshot": 312},
+        medals=1,
+        stars=[{"kind": "weapon", "name": "罗斯 MKIII（步兵）", "stars": 3}],
+        skill_delta=-2.5,
+        combat={"shots": 200, "hits": 50, "headshots": 6},
+        score_parts={
+            "general": 5770,
+            "team": 168,
+            "squad": 1015,
+            "objective": 750,
+            "other": -3,
+            "award": 2500,
+            "bonus": 0,
+        },
+        career={"kd": 2.0, "kpm": 1.5, "spm": 900.0, "accuracy": 0.2, "headshot_rate": 0.1},
+        career_after={
+            "kd": 2.01,
+            "kpm": 1.5,
+            "spm": 899.0,
+            "accuracy": 0.2002,
+            "headshot_rate": 0.1,
+        },
+    )
+    rendered["result"] = b"jpeg"
+    await module.recent_reply("abc", object())
+    first, left = rendered["context"]["rounds"][:2]
+    assert first["mvp"] and not first["ace"]
+    # 不是正数的项（“其他”的负零头、没有的结算奖励）不画；总经验是含奖励的总分
+    segments = first["parts"]["segments"]
+    assert [x["label"] for x in segments] == ["战斗", "团队", "小队", "目标", "勋带勋章"]
+    assert round(sum(x["pct"] for x in segments)) == 100 and first["parts"]["total"] == "10,000"
+    stats = {c["label"]: c for c in first["stats"]}
+    assert stats["得分"]["value"] == "7,700"
+    kd = stats["KD"]["compare"]
+    assert (kd["career"], kd["shift"], kd["trend"]) == ("2.00", "+0.50%", "up")
+    assert stats["KPM"]["compare"]["shift"] == "持平"
+    assert stats["SPM"]["compare"]["trend"] == "down"
+    assert stats["命中率"]["value"] == "25.0%" and stats["爆头率"]["value"] == "20.0%"
+    assert [text for text, _ in first["growth"]] == [
+        "升到 87 级",
+        "侦察兵升级",
+        "最远爆头新纪录 312 米",
+        "完成勋章 1",
+        "罗斯 MKIII（步兵） ★3",
+        "技巧值 -2.5",
+    ]
+    assert [r["name"] for r in first["ribbons"]] == [
+        module.collection.RIBBON["r05"].name,
+        module.collection.RIBBON["r15"].name,
+    ]
+    rendered["result"] = None
+    text = await module.recent_reply("abc", None)
+    assert "胜利 MVP\n" in text and "得分 7,700" in text
+    assert "对比生涯：KD 3.00（生涯 2.00 +0.50%）；KPM 3.00（生涯 1.50 持平）" in text
+    assert "升到 87 级、侦察兵升级" in text and "×3" in text
+    assert (
+        "得分构成：战斗 5,770 | 团队 168 | 小队 1,015 | 目标 750 | 勋带勋章 2,500 | 总经验 10,000"
+        in text
+    )
+    # 没取到详情的局：得分用总分，不比生涯
+    assert {c["label"]: c["value"] for c in left["stats"]}["得分"] == "10,000"
+    assert (
+        all(c["compare"] is None for c in left["stats"])
+        and not left["growth"]
+        and not left["parts"]
+    )
+
+
+COLLECTION = {
+    "persona_id": 2,
+    "medals": [
+        {"code": "m05", "unlocked": True, "stages_done": 0, "stages_total": 5},
+        {"code": "m06", "unlocked": False, "stages_done": 2, "stages_total": 5},
+    ],
+    "dogtags": [
+        {"id": "df082", "unlocked": True, "acquired": None, "needed": None},
+        {"id": "dbxp516", "unlocked": False, "acquired": 30, "needed": 120},
+    ],
+    "equipped": ["df082", "nope"],
+}
+
+
+async def test_collection_card(module, player, rendered):
+    player["/stats/2/collection"] = COLLECTION
+    player["/stats/2"] = {**STATS, **CAREER}
+    rendered["result"] = b"jpeg"
+    reply = await module.collection_reply("abc", object())
+    assert str(reply[1]).startswith("玩家名：abc\nPID：2\n")
+    ctx = rendered["context"]
+    assert rendered["template"] == "collection.html"
+    assert [t["name"] for t in ctx["equipped"]] == [module.collection.DOGTAG["df082"].name]
+    medals = {m["name"]: m for _, items in ctx["medals"] for m in items}
+    m05, m06 = (medals[module.collection.MEDAL[c].name] for c in ("m05", "m06"))
+    assert (m05["got"], m05["progress"]) == (True, "") and m06["progress"] == "2/5"
+    tags = {t["name"]: t for _, items in ctx["dogtags"] for t in items}
+    assert tags[module.collection.DOGTAG["dbxp516"].name]["progress"] == 25
+    assert (ctx["medals_got"], ctx["dogtags_got"], ctx["ribbons_got"]) == (1, 1, 2)
+    assert ctx["ribbons_sum"] == 6872 + 4097 and len(ctx["ribbons"]) == 6
+    rendered["result"] = None
+    text = await module.collection_reply("abc", None)
+    assert "勋章 1/60" in text and "进行中：" in text and "2/5" in text
+    assert "狗牌 1/320：" in text and "勋带 2/47 种，共 10,969 次" in text
+
+
+async def test_collection_without_ribbons_or_data(module, player, rendered):
+    player["/stats/2/collection"] = COLLECTION
+    player["/stats/2"] = STATS  # 旧接口没有勋带
+    rendered["result"] = b"jpeg"
+    await module.collection_reply("abc", object())
+    assert rendered["context"]["ribbons"] == []
+    del player["/stats/2/collection"]
+    reply = await module._answer(module.collection_reply("abc", None))
+    assert reply.startswith("测试里没有")
+
+
+def test_weapon_against_its_own_career(module):
+    """命中率开火满 50 发才比，KPM 要用满 3 分钟；差不到 5% 不标箭头。"""
+
+    compare = module.pages._gear_compare
+    gun = {
+        "kind": "weapon",
+        "kills": 6,
+        "hits": 30,
+        "shots": 200,
+        "seconds": 240,
+        "career_accuracy": 0.1,
+        "career_kpm": 1.48,
+    }
+    rows = {r["label"]: r for r in compare(gun)}
+    assert (rows["命中"]["value"], rows["命中"]["career"], rows["命中"]["trend"]) == (
+        "15.0%",
+        "10.0%",
+        "up",
+    )
+    assert (rows["KPM"]["value"], rows["KPM"]["trend"]) == ("1.50", None)
+    assert compare({**gun, "shots": 49, "seconds": 179}) == []
+    # 载具不比命中率；没有生涯值（不是单局详情）也不比
+    assert [r["label"] for r in compare({**gun, "kind": "vehicle"})] == ["KPM"]
+    assert compare({**gun, "career_accuracy": None, "career_kpm": None}) == []
+
+
+async def test_recent_rounds_two_columns(module, rounds, rendered):
+    rendered["result"] = b"jpeg"
+    await module.recent_reply("abc", object())
+    assert (rendered["context"]["columns"], rendered["context"]["width"]) == (2, 1760)
+    rounds["/stats/2/rounds"] = {"items": [ROUNDS[0]], "next_before": None}
+    await module.recent_reply("abc", object())
+    assert (rendered["context"]["columns"], rendered["context"]["width"]) == (1, 1000)
+
+
+async def test_stats_card_platoon_panel(module, player, rendered):
+    """照旧 bot：战队单独一块，带人数和描述；没加入战队时那一块放小贴士。"""
+
+    player["/stats/2/platoon"] = {
+        "tag": "EA",
+        "name": "Electronic Arts",
+        "size": 77,
+        "description": "Employees of Electronic Arts - Invite Only.",
+        "verified": True,
+    }
+    rendered["result"] = b"jpeg"
+    await module.stats_reply("abc", object())
+    platoon = rendered["context"]["platoon"]
+    assert platoon["description"].startswith("Employees") and platoon["emblem_url"] is None
+    assert not rendered["context"]["tip"]["text"]
+    rendered["result"] = None
+    text = await module.stats_reply("abc", None)
+    assert "战队：[EA] Electronic Arts（77 人，EA 认证）\n战队描述：Employees of" in text
+    player["/stats/2/platoon"] = None
+    rendered["result"] = b"jpeg"
+    await module.stats_reply("abc", object())
+    assert rendered["context"]["platoon"] is None and rendered["context"]["tip"]["text"]
+
+
+async def test_stats_card_equipped_dogtags(module, player, rendered):
+    """装备的狗牌放在名字旁边，取自收藏接口；收藏接口取不到时不画、不报错。"""
+
+    name = module.collection.DOGTAG["df082"].name
+    player["/stats/2/collection"] = COLLECTION
+    rendered["result"] = b"jpeg"
+    await module.stats_reply("abc", object())
+    ctx = rendered["context"]
+    assert [t["name"] for t in ctx["equipped"]] == [name]
+    assert ctx["equipped"][0]["image"].endswith("/bf1/codex/dogtags/df082.webp")
+    assert html_has(module, ctx, 'class="worn"', name)
+    rendered["result"] = None
+    assert f"装备狗牌：{name}\n" in await module.stats_reply("abc", None)
+    del player["/stats/2/collection"]
+    rendered["result"] = b"jpeg"
+    await module.stats_reply("abc", object())
+    assert rendered["context"]["equipped"] == []
+    assert not html_has(module, rendered["context"], 'class="worn"')

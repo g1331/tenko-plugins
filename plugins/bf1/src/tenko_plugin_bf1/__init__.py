@@ -50,7 +50,7 @@ plugin.metadata(
     author=["13"],
     version="0.1.17",
     description=(
-        "经 bf-manager 查询战地一玩家战绩、武器、载具、最近对局、玩家信息和服务器，"
+        "经 bf-manager 查询战地一玩家战绩、武器、载具、最近对局、玩家信息、收藏和服务器，"
         "带百科、小贴士（被戳时随机发）和入群审核。"
     ),
     urls={
@@ -154,7 +154,12 @@ def _n(value: Any) -> Any:
     return "-" if value is None else value
 
 
-def format_stats(name: str, stats: dict[str, Any]) -> str:
+def format_stats(
+    name: str,
+    stats: dict[str, Any],
+    platoon: dict[str, Any] | None = None,
+    dogtags: list[str] | None = None,
+) -> str:
     s = stats["summary"]
     wins, losses = s.get("wins") or 0, s.get("losses") or 0
     win_rate = f"{wins / (wins + losses):.1%}" if wins + losses else "-"
@@ -175,8 +180,49 @@ def format_stats(name: str, stats: dict[str, Any]) -> str:
             f"狗牌 {_n(s.get('dogtags'))} | 最高连杀 {_n(s.get('max_killstreak'))} | "
             f"最远爆头 {f'{longest:.1f} 米' if longest is not None else '-'}",
             f"最佳兵种 {best}",
+            *([f"装备狗牌：{' / '.join(dogtags)}"] if dogtags else []),
+            *_platoon_lines(platoon),
+            *_career_lines(stats),
         ]
     )
+
+
+def _platoon_lines(platoon: dict[str, Any] | None) -> list[str]:
+    if not platoon:
+        return []
+    head = f"战队：[{platoon.get('tag') or '-'}] {platoon.get('name') or ''}".rstrip()
+    if platoon.get("size"):
+        head += f"（{platoon['size']} 人{'，EA 认证' if platoon.get('verified') else ''}）"
+    description = " ".join((platoon.get("description") or "").split())
+    return [head, *([f"战队描述：{description}"] if description else [])]
+
+
+def _career_lines(stats: dict[str, Any]) -> list[str]:
+    """荣誉、细项、模式、精英兵、常玩地图；接口没给的部分不写。"""
+
+    lines = []
+    honors, misc = stats.get("honors"), stats.get("misc")
+    if honors:
+        honor = (
+            f"MVP {_n(honors.get('mvp'))} | 王牌小队 {_n(honors.get('ace_squad'))} | "
+            f"勋带 {_n(honors.get('ribbons'))} | 勋章 {_n(honors.get('medals'))}"
+        )
+        if misc and misc.get("completion_rate") is not None:
+            honor += f" | 完成率 {misc['completion_rate']:.1%}"
+        lines.append(honor)
+    if details := pages.career_details(stats):
+        lines.append(" | ".join(f"{label} {value}" for label, value in details))
+    if elite := pages.elite_kits(stats.get("elite_kits") or []):
+        lines.append(
+            "精英兵：" + "；".join(f"{k['name']} {k['time']} 击杀 {k['kills']}" for k in elite)
+        )
+    if modes := pages.career_modes(stats.get("modes") or []):
+        lines.append(
+            "模式：" + "；".join(f"{m['name']} {m['record']}（{m['rate']}）" for m in modes)
+        )
+    if maps := pages.career_maps(stats.get("maps"), ""):
+        lines.append("常玩地图：" + "；".join(f"{m['name']} {m['hours']}" for m in maps))
+    return lines
 
 
 def format_weapons(
@@ -290,14 +336,17 @@ async def _stats_card(persona: dict[str, Any], service) -> tuple[MessageChain | 
     """战绩卡片，连同取到的生涯数据和封禁状态（入群审核要用）。"""
 
     pid = persona["persona_id"]
-    stats, weapons, vehicles, ban, platoon, online = await asyncio.gather(
+    stats, weapons, vehicles, ban, platoon, online, found = await asyncio.gather(
         _get(f"/stats/{pid}"),
         _get(f"/stats/{pid}/weapons"),
         _get(f"/stats/{pid}/vehicles"),
         _optional(f"/stats/{pid}/ban"),
         _optional(f"/stats/{pid}/platoon"),
         _optional(f"/stats/{pid}/online"),
+        _optional(f"/stats/{pid}/collection"),
     )
+    # 装备的狗牌只有收藏接口给，取不到就不画
+    dogtags = pages.equipped_dogtags((found or {}).get("equipped"), config.base_url)
     context = pages.stats_page(
         persona,
         stats,
@@ -307,12 +356,15 @@ async def _stats_card(persona: dict[str, Any], service) -> tuple[MessageChain | 
         platoon,
         online,
         _source(),
+        config.base_url,
+        None if platoon else codex.random_tip(),
+        dogtags,
     )
     reply = await _reply(
         service,
         "stats.html",
         context,
-        format_stats(persona["display_name"], stats),
+        format_stats(persona["display_name"], stats, platoon, [t["name"] for t in dogtags]),
         _player_link(pid),
     )
     return reply, stats, ban
@@ -423,9 +475,32 @@ def format_recent(name: str, context: dict[str, Any]) -> str:
     ]
     for index, r in enumerate(rounds, 1):
         gear = "、".join(f"{g['name']} {g['kills']} 杀" for g in r["gear"])
+        badges = "".join(f" {b}" for b, on in (("MVP", r["mvp"]), ("王牌", r["ace"])) if on)
+        score = next(c["value"] for c in r["stats"] if c["label"] == "得分")
+        honors = [text for text, _ in r["growth"]]
+        honors += [f"{x['name']}×{x['count']}" for x in r["ribbons"]]
+        compare = [
+            f"{c['label']} {c['value']}（生涯 {c['compare']['career']}"
+            + (f" {c['compare']['shift']}" if c["compare"]["shift"] else "")
+            + "）"
+            for c in r["stats"]
+            if c["compare"]
+        ]
         lines += [
-            f"{index}. {r['when']} {r['map']}·{r['mode'] or '-'} {r['outcome']}",
-            f"   {r['kd']} | KD {r['ratio']} | KPM {r['kpm']} | {r['minutes']} | {r['kit']}",
+            f"{index}. {r['when']} {r['map']}·{r['mode'] or '-'} {r['outcome']}{badges}",
+            f"   {r['kd']} | KD {r['ratio']} | KPM {r['kpm']} | 得分 {score} | "
+            f"{r['minutes']} | {r['kit']}",
+            *([f"   对比生涯：{'；'.join(compare)}"] if compare else []),
+            *(
+                [
+                    "   得分构成："
+                    + " | ".join(f"{x['label']} {x['value']}" for x in r["parts"]["segments"])
+                    + f" | 总经验 {r['parts']['total']}"
+                ]
+                if r["parts"]
+                else []
+            ),
+            *([f"   {'、'.join(honors)}"] if honors else []),
             *([f"   {gear}"] if gear else []),
             f"   {r['server']}",
         ]
@@ -442,7 +517,13 @@ async def _recent_card(
     result, platoon = await asyncio.gather(
         _get(f"/stats/{pid}/rounds", limit=20), _optional(f"/stats/{pid}/platoon")
     )
-    context = pages.recent_page(persona, platoon, result["items"], _source(), RECENT)
+    # 和生涯比要单局详情：每局一个请求，几局一起取，取不到的局就不比
+    played = pages.played_rounds(result["items"], RECENT)
+    found = await asyncio.gather(*(_optional(f"/rounds/{i['round']['id']}") for i in played))
+    details = {d["id"]: d for d in found if d}
+    context = pages.recent_page(
+        persona, platoon, result["items"], _source(), RECENT, details, config.base_url
+    )
     if not context["rounds"]:
         return None
     text = format_recent(persona["display_name"], context)
@@ -459,6 +540,59 @@ async def recent_reply(name: str | None, service, user_id: str = "") -> MessageC
             f"还没有记录到 {persona['display_name']} 的对局（bf-manager 跟踪到的才有，保留 90 天）"
         )
     return card
+
+
+def format_collection(context: dict[str, Any]) -> str:
+    lines = [f"{context['name']} 的收藏"]
+    if context["equipped"]:
+        lines.append("佩戴的狗牌：" + "、".join(t["name"] for t in context["equipped"]))
+    got = [m["name"] for _, items in context["medals"] for m in items if m["got"]]
+    going = [
+        f"{m['name']} {m['progress']}"
+        for _, items in context["medals"]
+        for m in items
+        if m["progress"]
+    ]
+    lines.append(f"勋章 {context['medals_got']}/{context['medals_total']}")
+    if got:
+        lines.append("已获得：" + "、".join(got))
+    if going:
+        lines.append("进行中：" + "、".join(going))
+    lines.append(
+        f"狗牌 {context['dogtags_got']}/{context['dogtags_total']}："
+        + "；".join(
+            f"{category} {sum(t['got'] for t in items)}/{len(items)}"
+            for category, items in context["dogtags"]
+        )
+    )
+    if context["ribbons"]:
+        top = sorted(
+            (r for _, items in context["ribbons"] for r in items if r["count"]),
+            key=lambda r: -r["count"],
+        )[:10]
+        lines.append(
+            f"勋带 {context['ribbons_got']}/{context['ribbons_total']} 种，"
+            f"共 {context['ribbons_sum']:,} 次；最多的："
+            + "、".join(f"{r['name']} ×{r['count']:,}" for r in top)
+        )
+    return "\n".join(lines)
+
+
+async def collection_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
+    """勋章、狗牌和佩戴的狗牌；勋带次数在生涯战绩里，拿不到就不画勋带墙。"""
+
+    persona = await _player(name, user_id)
+    pid = persona["persona_id"]
+    found, stats, platoon = await asyncio.gather(
+        _get(f"/stats/{pid}/collection"),
+        _optional(f"/stats/{pid}"),
+        _optional(f"/stats/{pid}/platoon"),
+    )
+    context = pages.collection_page(persona, platoon, stats, found, _source(), config.base_url)
+    caption = f"玩家名：{persona['display_name']}\nPID：{pid}"
+    return await _reply(
+        service, "collection.html", context, format_collection(context), _player_link(pid), caption
+    )
 
 
 async def _bind(user_id: str, persona: dict[str, Any]) -> None:
@@ -807,6 +941,20 @@ async def bf1info(
     full = tuple(key for key, flag in flags.items() if flag.available)
     service = _service(text, render_service)
     return await _answer(info_reply(_name(name), service, session.user.id, full))
+
+
+@_player_commands(
+    ["bf1c", "收藏", "勋章", "狗牌", "collection"], "收藏：佩戴的狗牌、勋章、狗牌和勋带"
+)
+async def bf1c(
+    session: Session,
+    name: Query[str] = Query("name"),  # noqa: B008
+    text: Query[Any] = Query("text"),  # noqa: B008
+    *,
+    render_service: RenderService,
+):
+    service = _service(text, render_service)
+    return await _answer(collection_reply(_name(name), service, session.user.id))
 
 
 @_player_commands(["bf1r", "recent", "match", "最近", "对局"], "最近对局")

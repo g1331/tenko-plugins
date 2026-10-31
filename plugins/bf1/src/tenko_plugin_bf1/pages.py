@@ -18,6 +18,9 @@ import zhconv
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from loguru import logger
 
+from . import collection
+from .names import CAREER_MODES, ELITE_KITS, MAPS
+
 HERE = Path(__file__).parent
 ASSETS = HERE / "assets"
 WIDTH = 1000
@@ -121,6 +124,9 @@ def _gear(items: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
         {
             "name": cn(i.get("name")),
             "image": _image(i),
+            # 装着皮肤时图是皮肤图，名字下面写皮肤名，颜色按稀有度
+            "skin": cn(i.get("skin_name")) if i.get("skin_image") else "",
+            "rarity": SKIN_RARITY.get(i.get("skin_rarity") or "", "white"),
             "kills": _int(i["kills"]),
             "ratio": _percent(i["kills"], most),
         }
@@ -141,6 +147,111 @@ def _split(title, left_label, left, left_color, right_label, right, right_color)
     }
 
 
+def equipped_dogtags(ids: list[str] | None, site: str = "") -> list[dict[str, str]]:
+    """玩家装备着的两块狗牌（收藏接口的 equipped），图鉴里没有的跳过。"""
+
+    tags = [collection.DOGTAG[i] for i in ids or [] if i in collection.DOGTAG]
+    return [{"name": t.name, "image": collection.image("dogtags", t.id, site)} for t in tags]
+
+
+def collection_page(
+    persona: dict[str, Any],
+    platoon: dict[str, Any] | None,
+    stats: dict[str, Any] | None,
+    found: dict[str, Any],
+    source: str,
+    site: str,
+) -> dict[str, Any]:
+    """收藏（网页战绩页的「收藏」分页）：佩戴的狗牌、勋章墙、狗牌墙，外加生涯里的勋带墙。
+
+    found 是 /stats/{pid}/collection；勋带次数在生涯战绩里，stats 拿不到就不画勋带墙。
+    勋章解锁后 EA 会把阶段进度清零，只有没解锁的才写进度。
+    """
+
+    medals = {m["code"]: m for m in found.get("medals") or []}
+    dogtags = {t["id"]: t for t in found.get("dogtags") or []}
+
+    def medal(m: collection.Medal) -> dict[str, Any]:
+        state = medals.get(m.code) or {}
+        done = bool(state.get("unlocked"))
+        stages = state.get("stages_done") or 0
+        return {
+            "name": m.name,
+            "image": collection.image("medals", m.code, site),
+            "got": done,
+            "progress": f"{stages}/{state.get('stages_total') or m.stages}"
+            if not done and stages
+            else "",
+        }
+
+    def dogtag(t: collection.Dogtag) -> dict[str, Any]:
+        state = dogtags.get(t.id) or {}
+        acquired, needed = state.get("acquired"), state.get("needed")
+        return {
+            "name": t.name,
+            "image": collection.image("dogtags", t.id, site),
+            "got": bool(state.get("unlocked")),
+            "progress": min(100, round(acquired / needed * 100))
+            if not state.get("unlocked") and acquired and needed
+            else 0,
+        }
+
+    ribbon_counts = (
+        {r["code"]: r.get("count") or 0 for r in stats["ribbons"]}
+        if stats and stats.get("ribbons") is not None
+        else None
+    )
+    ribbons = (
+        [
+            (
+                category,
+                [
+                    {
+                        "name": r.name,
+                        "image": collection.image("ribbons", r.code, site),
+                        "count": ribbon_counts.get(r.code, 0),
+                    }
+                    for r in items
+                ],
+            )
+            for category, items in collection.grouped(collection.RIBBONS)
+        ]
+        if ribbon_counts is not None
+        else []
+    )
+    return {
+        **_common(source),
+        "width": COLLECTION_WIDTH,
+        "name": persona["display_name"],
+        "tag": (platoon or {}).get("tag"),
+        "avatar_url": persona.get("avatar_url") or "",
+        "equipped": equipped_dogtags(found.get("equipped"), site),
+        "medals": [
+            (c, [medal(m) for m in items]) for c, items in collection.grouped(collection.MEDALS)
+        ],
+        "medals_got": sum(1 for m in medals.values() if m.get("unlocked")),
+        "medals_total": len(collection.MEDALS),
+        "dogtags": [
+            (c, [dogtag(t) for t in items]) for c, items in collection.grouped(collection.DOGTAGS)
+        ],
+        "dogtags_got": sum(1 for t in dogtags.values() if t.get("unlocked")),
+        "dogtags_total": len(collection.DOGTAGS),
+        "ribbons": ribbons,
+        "ribbons_got": sum(1 for n in (ribbon_counts or {}).values() if n),
+        "ribbons_total": len(collection.RIBBONS),
+        "ribbons_sum": sum((ribbon_counts or {}).values()),
+    }
+
+
+PLATOON_FIELDS = ("tag", "name", "size", "description", "emblem_url", "verified")
+
+
+def _platoon(platoon: dict[str, Any] | None) -> dict[str, Any] | None:
+    """战队字段都可能缺，补齐成 None，模板里直接判断。"""
+
+    return {key: platoon.get(key) for key in PLATOON_FIELDS} if platoon else None
+
+
 def _bans(ban: dict[str, Any] | None) -> tuple[list[dict[str, Any]], str]:
     """BFBAN、BFEAC 两个标记，和判定作弊的来源（没有则为空）。"""
 
@@ -155,6 +266,134 @@ def _bans(ban: dict[str, Any] | None) -> tuple[list[dict[str, Any]], str]:
     return bans, " / ".join(b["source"] for b in bans if b["state"] == "hit")
 
 
+def _pct(value: float | None) -> str:
+    return f"{value:.1%}" if isinstance(value, int | float) else "-"
+
+
+def _wan(value: int | None) -> str:
+    """得分到百万级，和网页一样用“万”。"""
+
+    if value is None:
+        return "-"
+    if value < 10_000:
+        return f"{value:,}"
+    return f"{value / 10_000:.{0 if value >= 1_000_000 else 1}f} 万"
+
+
+# 战斗、团队的细项，和网页 CareerOverview 一致；值是 (分组, 键, 名字)
+DETAILS = (
+    ("combat", "headshot_rate", "爆头率"),
+    ("combat", "accuracy", "命中率"),
+    ("combat", "squad_wipes", "团灭"),
+    ("combat", "vehicles_destroyed", "摧毁载具"),
+    ("combat", "avenger_kills", "复仇击杀"),
+    ("combat", "savior_kills", "救星击杀"),
+    ("combat", "nemesis_kills", "宿敌击杀"),
+    ("combat", "max_nemesis_streak", "最高宿敌连杀"),
+    ("teamwork", "flag_captures", "占点"),
+    ("teamwork", "flag_defends", "守点"),
+    ("teamwork", "resupplies", "补给"),
+    ("teamwork", "spot_assists", "索敌助攻"),
+    ("teamwork", "suppression_assists", "压制助攻"),
+    ("teamwork", "squad_kill_assists", "小队击杀助攻"),
+    ("teamwork", "squad_spawns", "小队重生"),
+    ("teamwork", "orders_completed", "完成命令"),
+)
+CAREER_MAPS = 6
+STATS_WIDE = 1760
+
+
+def career_details(stats: dict[str, Any]) -> list[tuple[str, str]]:
+    rows = []
+    for group, key, label in DETAILS:
+        part = stats.get(group)
+        if part is None:
+            continue
+        value = part.get(key)
+        rows.append((label, _pct(value) if key.endswith(("rate", "accuracy")) else _int(value)))
+    return rows
+
+
+def career_modes(modes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """各模式胜负和目标得分，按局数排；没玩过的不列。"""
+
+    played = [m for m in modes if (m.get("wins") or 0) + (m.get("losses") or 0)]
+    played.sort(key=lambda m: (m.get("wins") or 0) + (m.get("losses") or 0), reverse=True)
+    return [
+        {
+            "name": CAREER_MODES.get(m["mode"], m["mode"]),
+            "record": f"{_int(m.get('wins') or 0)} / {_int(m.get('losses') or 0)}",
+            "rate": _pct(m.get("win_rate")),
+            "score": _wan(m.get("score")),
+        }
+        for m in played
+    ]
+
+
+def career_maps(maps: list[dict[str, Any]] | None, site: str) -> list[dict[str, Any]]:
+    """最常玩的几张图：地图图片用 bf-manager 网站的图鉴图。"""
+
+    if not maps:
+        return []
+    total = sum(m.get("time_seconds") or 0 for m in maps)
+    return [
+        {
+            "name": MAPS.get(m["map"], m["map"]),
+            "image": f"{site.rstrip('/')}/bf1/codex/maps-480/{m['map']}.webp" if site else "",
+            "hours": f"{(m.get('time_seconds') or 0) / 3600:,.0f} 小时",
+            "share": _ratio(m.get("time_seconds") or 0, total),
+        }
+        for m in maps[:CAREER_MAPS]
+    ]
+
+
+def elite_kits(kits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    played = sorted(
+        (k for k in kits if k.get("time_seconds")), key=lambda k: k["time_seconds"], reverse=True
+    )
+    return [
+        {
+            "name": ELITE_KITS.get(k["kit"], k["kit"]),
+            "time": _duration(k["time_seconds"]),
+            "kills": _int(k.get("kills")),
+            "kpm": _kpm(k.get("kills"), k["time_seconds"]) if k.get("kills") is not None else "-",
+        }
+        for k in played
+    ]
+
+
+CAREER_RIBBONS = 10
+
+
+def ribbon_rows(
+    ribbons: list[dict[str, Any]] | None, site: str, count: int | None = None
+) -> list[dict[str, Any]]:
+    """拿过的勋带按次数排，带名字和图；count 为空时全列。"""
+
+    got = sorted((r for r in ribbons or [] if r.get("count")), key=lambda r: -r["count"])
+    return [
+        {
+            "name": info.name if (info := collection.RIBBON.get(r["code"])) else r["code"],
+            "image": collection.image("ribbons", r["code"], site) if site else "",
+            "count": r["count"],
+        }
+        for r in got[:count]
+    ]
+
+
+def _honors(stats: dict[str, Any]) -> list[tuple[str, str]]:
+    honors, misc = stats.get("honors"), stats.get("misc")
+    tiles = []
+    if honors:
+        tiles += [("勋带", _int(honors.get("ribbons"))), ("勋章", _int(honors.get("medals")))]
+    if misc:
+        tiles += [
+            ("完成率", _pct(misc.get("completion_rate"))),
+            ("打到结算", f"{_int(misc.get('rounds_completed'))} 局"),
+        ]
+    return tiles
+
+
 def stats_page(
     persona: dict[str, Any],
     stats: dict[str, Any],
@@ -164,7 +403,16 @@ def stats_page(
     platoon: dict[str, Any] | None,
     online: dict[str, Any] | None,
     source: str,
+    site: str = "",
+    tip: Any = None,
+    equipped: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    """site 是 bf-manager 网站地址，地图图片从那里取；tip 是没加入战队时放在战队位置的小贴士；
+    equipped 是 equipped_dogtags 的结果，放在名字旁边。
+
+    荣誉、细项、模式、精英兵、地图是 2026-11 起的扩展字段，接口没给时对应部分不画。
+    """
+
     s = stats["summary"]
     wins, losses = s.get("wins") or 0, s.get("losses") or 0
     soldiers = sorted(
@@ -202,7 +450,8 @@ def stats_page(
         "avatar_url": persona.get("avatar_url") or "",
         "online": online.get("is_online") if online else None,
         "online_server": (online or {}).get("server_name"),
-        "platoon": platoon,
+        "platoon": _platoon(platoon),
+        "equipped": equipped or [],
         "rank": rank if rank is not None else "-",
         "rank_color": _rarity(rank or 0, 150, 100),
         "hours": f"{played_hours:,.0f} 小时",
@@ -217,6 +466,11 @@ def stats_page(
             ("SPM", f"{s['sps'] * 60:,.0f}" if s.get("sps") else "-"),
             ("胜率", _ratio(wins, wins + losses)),
             ("技巧值", _fixed(s.get("skill"), 0)),
+            *(
+                [("MVP", _int(honors.get("mvp"))), ("王牌小队", _int(honors.get("ace_squad")))]
+                if (honors := stats.get("honors"))
+                else []
+            ),
         ],
         "splits": [
             _split(
@@ -247,7 +501,17 @@ def stats_page(
             ]
         ],
         "classes": [class_row(c) for c in soldiers],
+        "elite": elite_kits(stats.get("elite_kits") or []),
+        "tip": {"text": tip.text, "tags": list(tip.tags)} if tip else {"text": "", "tags": []},
         "gear": [("常用武器", _gear(weapons, 4)), ("常用载具", _gear(vehicles, 4))],
+        "details": career_details(stats),
+        "honors": (honor_tiles := _honors(stats)),
+        "ribbons": ribbon_rows(stats.get("ribbons"), site, CAREER_RIBBONS),
+        "modes": career_modes(stats.get("modes") or []),
+        "maps": (map_rows := career_maps(stats.get("maps"), site)),
+        # 有生涯扩展数据就排成左右两栏，图不至于拉得太长
+        "wide": (wide := bool(honor_tiles or map_rows or stats.get("modes"))),
+        "width": STATS_WIDE if wide else WIDTH,
     }
 
 
@@ -620,6 +884,44 @@ def _outcome(p: dict[str, Any]) -> str:
     return "unknown" if won is None else "win" if won else "loss"
 
 
+# 武器和它自己的生涯比：命中率照网页的门槛，KPM 要用满 3 分钟；差不到 5% 算持平
+MIN_GEAR_SHOTS, MIN_GEAR_SECONDS, GEAR_TREND = 50, 180, 0.05
+
+
+def _gear_trend(now: float, career: float | None) -> str | None:
+    if not career or abs(now - career) / career < GEAR_TREND:
+        return None
+    return "up" if now > career else "down"
+
+
+def _gear_compare(w: dict[str, Any]) -> list[dict[str, Any]]:
+    """这件武器这一局的命中率、KPM 和它这一局之前的生涯比（只有单局详情里有生涯值）。"""
+
+    rows = []
+    shots, seconds = w.get("shots") or 0, w.get("seconds") or 0
+    if w.get("kind") == "weapon" and shots >= MIN_GEAR_SHOTS and w.get("career_accuracy"):
+        now = (w.get("hits") or 0) / shots
+        rows.append(
+            {
+                "label": "命中",
+                "value": f"{now:.1%}",
+                "career": f"{w['career_accuracy']:.1%}",
+                "trend": _gear_trend(now, w["career_accuracy"]),
+            }
+        )
+    if seconds >= MIN_GEAR_SECONDS and w.get("career_kpm"):
+        now = w["kills"] / (seconds / 60)
+        rows.append(
+            {
+                "label": "KPM",
+                "value": f"{now:.2f}",
+                "career": f"{w['career_kpm']:.2f}",
+                "trend": _gear_trend(now, w["career_kpm"]),
+            }
+        )
+    return rows
+
+
 def _round_gear(weapons: list[dict[str, Any]] | None, count: int) -> list[dict[str, Any]]:
     """这一局有击杀的武器载具，按击杀排；战马的击杀和骑马时用的武器重复，不列。"""
 
@@ -627,12 +929,149 @@ def _round_gear(weapons: list[dict[str, Any]] | None, count: int) -> list[dict[s
     rows = []
     for w in sorted(used, key=lambda w: w["kills"], reverse=True)[:count]:
         rows.append(
-            {"name": w.get("name") or "-", "image": w.get("image") or "", "kills": w["kills"]}
+            {
+                "name": w.get("name") or "-",
+                "image": w.get("image") or "",
+                "kills": w["kills"],
+                "headshots": w.get("headshots") or 0 if w.get("kind") == "weapon" else 0,
+                "compare": _gear_compare(w),
+            }
         )
     return rows
 
 
-def _round_row(item: dict[str, Any]) -> dict[str, Any]:
+RECORDS = {
+    "max_killstreak": "最高连杀新纪录 {}",
+    "longest_headshot": "最远爆头新纪录 {} 米",
+    "max_nemesis_streak": "最高宿敌连杀新纪录 {}",
+}
+ROUND_RIBBONS = 6
+RECENT_WIDE = 1760
+COLLECTION_WIDTH = 1760
+# 和生涯比的门槛，同网页 RoundHonors：在场太短、开火和击杀太少的不比
+MIN_COMPARE_SECONDS, MIN_COMPARE_SHOTS, MIN_COMPARE_KILLS = 300, 50, 5
+
+
+def _growth(p: dict[str, Any]) -> list[tuple[str, bool]]:
+    """这一局的成长：升级、兵种升级、新纪录、勋章、服役星、技巧值；第二项是否高亮。"""
+
+    chips = []
+    if p.get("rank_to"):
+        chips.append((f"升到 {p['rank_to']} 级", True))
+    chips += [(f"{CLASSES.get(kit, kit)}升级", True) for kit in p.get("kit_ranks") or []]
+    for key, value in (p.get("records") or {}).items():
+        chips.append((RECORDS.get(key, key + " {}").format(value), True))
+    if p.get("medals"):
+        chips.append((f"完成勋章 {p['medals']}", True))
+    chips += [(f"{s.get('name') or '-'} ★{s['stars']}", False) for s in p.get("stars") or []]
+    if delta := p.get("skill_delta"):
+        chips.append((f"技巧值 {delta:+.1f}", False))
+    return chips
+
+
+def _shift(before: float, after: float | None) -> tuple[str, str] | None:
+    """这一局让生涯值变了多少（相对变化），和网页一样两位小数；第二项是 up、down 或 flat。"""
+
+    if after is None or before <= 0:
+        return None
+    change = (after / before - 1) * 100
+    if abs(change) < 0.005:
+        return "持平", "flat"
+    size = "<0.01" if abs(change) < 0.01 else f"{abs(change):.2f}"
+    return (f"+{size}%", "up") if change > 0 else (f"−{size}%", "down")
+
+
+def _compare(p: dict[str, Any]) -> list[dict[str, Any]]:
+    """和这一局之前的生涯比：K/D、KPM、SPM、命中率、爆头率。只有单局详情里有生涯数据。"""
+
+    career, after = p.get("career"), p.get("career_after") or {}
+    if not career or (p.get("seconds") or 0) < MIN_COMPARE_SECONDS:
+        return []
+    combat = p.get("combat")
+    shots = (combat or {}).get("shots") or 0
+    kills = p.get("kills") or 0
+
+    def pct(v: float) -> str:
+        return f"{v * 100:.1f}%"
+
+    items = [
+        ("K/D", p.get("kd"), "kd", lambda v: f"{v:.2f}"),
+        ("KPM", p.get("kpm"), "kpm", lambda v: f"{v:.2f}"),
+        # 旧对局的 SPM 含勋带和结算奖励，和生涯口径不同，不比
+        (
+            "SPM",
+            p.get("spm") if p.get("battle_score") is not None else None,
+            "spm",
+            lambda v: f"{v:.0f}",
+        ),
+        (
+            "命中率",
+            combat["hits"] / shots if combat and shots >= MIN_COMPARE_SHOTS else None,
+            "accuracy",
+            pct,
+        ),
+        (
+            "爆头率",
+            (combat.get("headshots") or 0) / kills
+            if combat and kills - (p.get("vehicle_kills") or 0) >= MIN_COMPARE_KILLS
+            else None,
+            "headshot_rate",
+            pct,
+        ),
+    ]
+    rows = []
+    for label, value, key, fmt in items:
+        before = career.get(key)
+        if value is None or before is None:
+            continue
+        shift = _shift(before, after.get(key))
+        rows.append(
+            {
+                "label": label,
+                "value": fmt(value),
+                "career": fmt(before),
+                "shift": shift[0] if shift else None,
+                "trend": shift[1] if shift else None,
+            }
+        )
+    return rows
+
+
+# 得分构成，配色同网页 RoundHonors.ScoreBreakdown：前五项是计分板上的分，后两项是结算时另给的经验
+SCORE_PARTS = (
+    ("general", "战斗", "rgba(56,189,248,.8)"),
+    ("team", "团队", "rgba(52,211,153,.8)"),
+    ("squad", "小队", "rgba(167,139,250,.8)"),
+    ("objective", "目标", "rgba(251,191,36,.85)"),
+    ("other", "其他", "rgba(255,255,255,.35)"),
+    ("award", "勋带勋章", "rgba(253,230,138,.4)"),
+    ("bonus", "结算奖励", "rgba(255,255,255,.15)"),
+)
+
+
+def _score_parts(p: dict[str, Any]) -> dict[str, Any] | None:
+    """一根条加图例；“其他”是总分减各项的零头，可能为负，不是正数的项不画。"""
+
+    parts = p.get("score_parts")
+    if not parts:
+        return None
+    shown = [(label, parts.get(key) or 0, color) for key, label, color in SCORE_PARTS]
+    shown = [x for x in shown if x[1] > 0]
+    total = sum(value for _, value, _ in shown) or 1
+    return {
+        "segments": [
+            {"label": label, "value": f"{value:,}", "color": color, "pct": value / total * 100}
+            for label, value, color in shown
+        ],
+        "total": _int(p.get("score")),
+    }
+
+
+def _round_ribbons(p: dict[str, Any], site: str) -> list[dict[str, Any]]:
+    return ribbon_rows(p.get("ribbons"), site, ROUND_RIBBONS)
+
+
+def _round_row(item: dict[str, Any], site: str = "") -> dict[str, Any]:
     r, p = item["round"], item["player"]
     outcome = _outcome(p)
     faction = r.get("team1_faction") if p.get("team") == 1 else r.get("team2_faction")
@@ -658,7 +1097,52 @@ def _round_row(item: dict[str, Any]) -> dict[str, Any]:
         "spm": _fixed(p.get("spm"), 0),
         "suspect": p.get("status") == "suspect",
         "gear": _round_gear(p.get("weapons"), 3),
+        "mvp": bool(p.get("mvp")),
+        "ace": bool(p.get("ace_squad")),
+        "ribbons": _round_ribbons(p, site),
+        "more_ribbons": max(
+            0, len([x for x in p.get("ribbons") or [] if x.get("count")]) - ROUND_RIBBONS
+        ),
+        "growth": _growth(p),
+        "parts": _score_parts(p),
+        "stats": _round_stats(p, kd=f"{p['kills']}/{p['deaths']}"),
     }
+
+
+def _round_stats(p: dict[str, Any], kd: str) -> list[dict[str, Any]]:
+    """计分板几项，能和生涯比的在下面写生涯值和变化；命中率、爆头率只在能比时列。
+
+    得分是计分板口径（不含勋带勋章奖励和结算奖励），较早的对局没有分项，用总分。
+    """
+
+    compare = {c["label"]: c for c in _compare(p)}
+    score = p["battle_score"] if p.get("battle_score") is not None else p.get("score")
+    cells = [
+        ("击杀 / 死亡", kd, None),
+        ("KD", _fixed(p.get("kd")), compare.pop("K/D", None)),
+        ("KPM", _fixed(p.get("kpm")), compare.pop("KPM", None)),
+        ("SPM", _fixed(p.get("spm"), 0), compare.pop("SPM", None)),
+        ("得分", _int(score), None),
+        *((label, c["value"], c) for label, c in compare.items()),
+    ]
+    return [{"label": label, "value": value, "compare": c} for label, value, c in cells]
+
+
+def played_rounds(items: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """没击杀也没死过的（排队、观战、进服就走）不算一局。"""
+
+    return [i for i in items if (i["player"].get("kills") or 0) + (i["player"].get("deaths") or 0)][
+        :count
+    ]
+
+
+def _with_detail(item: dict[str, Any], details: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """有单局详情就用详情里这个人的那一行：多了和生涯的对比。"""
+
+    detail = details.get(item["round"]["id"])
+    pid = item["player"]["persona_id"]
+    mine = next((p for p in (detail or {}).get("players") or [] if p["persona_id"] == pid), None)
+    return {**item, "player": mine} if mine else item
 
 
 def recent_page(
@@ -667,11 +1151,12 @@ def recent_page(
     items: list[dict[str, Any]],
     source: str,
     count: int,
+    details: dict[int, dict[str, Any]] | None = None,
+    site: str = "",
 ) -> dict[str, Any]:
-    # 没击杀也没死过的（排队、观战、进服就走）不算一局
-    played = [
-        i for i in items if (i["player"].get("kills") or 0) + (i["player"].get("deaths") or 0)
-    ][:count]
+    """details 是对局 id 到单局详情（/rounds/{id}），拿到的局会和生涯比；site 用来取勋带图。"""
+
+    played = [_with_detail(i, details or {}) for i in played_rounds(items, count)]
     players = [i["player"] for i in played]
     kills = sum(p.get("kills") or 0 for p in players)
     deaths = sum(p.get("deaths") or 0 for p in players)
@@ -690,7 +1175,10 @@ def recent_page(
             ("KPM", _kpm(kills, seconds)),
             ("在场", _duration(seconds)),
         ],
-        "rounds": [_round_row(i) for i in played],
+        "rounds": [_round_row(i, site) for i in played],
+        # 两局一行，图不至于拉得太长；只有一局时照旧一栏
+        "columns": 2 if len(played) > 1 else 1,
+        "width": RECENT_WIDE if len(played) > 1 else WIDTH,
     }
 
 
