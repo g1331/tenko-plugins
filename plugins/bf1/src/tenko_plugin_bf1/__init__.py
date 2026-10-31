@@ -10,6 +10,7 @@ import asyncio
 import random
 import re
 import time
+from datetime import date, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -809,6 +810,83 @@ async def campaign_reply(service) -> MessageChain | str:
     return await _reply(service, "campaign.html", context, format_campaign(context), link)
 
 
+# 旧 bot 的 -t 日期写 2023.01.01；也认 2023-01-01、2023/1/1、2023年1月1日 和 20230101
+_DAY = re.compile(r"(\d{4})\s*[-./年]\s*(\d{1,2})\s*[-./月]\s*(\d{1,2})\s*日?")
+EXCHANGE_LIST = ("列表", "历史", "全部", "期数", "list")
+_EXCHANGE_HINT = "发 /交换 列表 看全部期数，/交换 2023.01.01 看那天的交换"
+
+
+def parse_day(text: str) -> date | None:
+    text = text.strip()
+    if re.fullmatch(r"\d{8}", text):
+        parts = text[:4], text[4:6], text[6:]
+    elif found := _DAY.fullmatch(text):
+        parts = found.groups()
+    else:
+        return None
+    try:
+        return date(*map(int, parts))
+    except ValueError:
+        return None
+
+
+def format_exchange(context: dict[str, Any]) -> str:
+    span = (
+        f"{context['start']} ~ {context['until']}" if context["until"] else f"{context['start']} 起"
+    )
+    number = f"第 {context['number']}/{context['total']} 期，" if context["number"] else ""
+    which = "当期" if context["latest"] else "历史"
+    lines = [f"战地一交换（{which}，{number}{span}，北京时间）"]
+    if context["stale"]:
+        lines.append(
+            f"这一期已经 {context['stale']} 天没换过，之后 EA 就没再更新交换，游戏里一直是这一期"
+        )
+    for group in context["groups"]:
+        lines.append(f"{group['label']}（{len(group['tiles'])} 件）：")
+        lines += [f"· {t['name']} · {t['parent']} · {t['price']} 废料" for t in group["tiles"]]
+    return "\n".join(lines)
+
+
+def format_exchange_periods(dates: list[date]) -> str:
+    """按年列出全部期数，旧的在前，最新一期在最后。"""
+
+    years: dict[int, list[date]] = {}
+    for day in sorted(dates):
+        years.setdefault(day.year, []).append(day)
+    lines = [f"交换共 {len(dates)} 期（{min(dates)} ~ {max(dates)}，北京时间，按每期开始日期）："]
+    lines += [
+        f"{year}（{len(days)} 期）：" + "、".join(d.strftime("%m-%d") for d in days)
+        for year, days in years.items()
+    ]
+    lines.append("发 /交换 日期 看那天的交换，比如 /交换 2023.01.01")
+    return "\n".join(lines)
+
+
+async def exchange_reply(
+    service, day: date | None = None, listing: bool = False
+) -> MessageChain | str:
+    """不给日期查最新一期，给了查那天生效的一期；listing 时按年列出全部期数。"""
+
+    dates = pages.exchange_dates(await _get("/exchange/periods"))
+    if not dates:
+        raise Bf1Error("还没有交换记录")
+    if listing:
+        return format_exchange_periods(dates)
+    first, last = dates[-1], dates[0]
+    if day and day < first:
+        raise Bf1Error(
+            f"{day} 还没有交换记录：bf-manager 收录的是 {first} 到 {last} 的 {len(dates)} 期。"
+            f"{_EXCHANGE_HINT}"
+        )
+    today = datetime.now(pages.BEIJING).date()
+    if day and day > today:
+        raise Bf1Error(f"{day} 还没到，查当期直接发 /交换")
+    snapshot = await _get("/exchange", **({"date": day.isoformat()} if day else {}))
+    context = pages.exchange_page(snapshot, dates, _source(), today)
+    link = f"{config.base_url.rstrip('/')}/bf1/exchange"
+    return await _reply(service, "exchange.html", context, format_exchange(context), link)
+
+
 async def _answer(query) -> MessageChain | str:
     try:
         return await query
@@ -1207,6 +1285,39 @@ async def bf1op(
     render_service: RenderService,
 ):
     return await _answer(campaign_reply(_service(text, render_service)))
+
+
+# 交换的 -t 沿用旧 bot，是日期；只回文字用 -text
+EXCHANGE_TEXT = Option("-text|--text", dest="text", help_text="只回文字，不出图")
+EXCHANGE_DAY = Option("-t|-time|-日期", Args["day", str], dest="day", help_text="日期")
+
+
+@_commands(
+    ["bf1交换", "交换", "exchange", "ex"],
+    Args["when?", str],
+    "战地一交换（废料兑换皮肤）：不带参数看最新一期，带日期看那天的一期，"
+    "发 列表 按年列出全部期数；加 -text 只回文字",
+    "bf1交换 [日期 | 列表] [-text]",
+    "/bf1交换 2023.01.01",
+    EXCHANGE_DAY,
+    EXCHANGE_TEXT,
+)
+async def bf1exchange(
+    session: Session,
+    when: Query[str] = Query("when"),  # noqa: B008
+    day: Query[str] = Query("day.day"),  # noqa: B008
+    text: Query[Any] = Query("text"),  # noqa: B008
+    *,
+    render_service: RenderService,
+):
+    word = (_name(day) or _name(when) or "").strip()
+    service = _service(text, render_service)
+    if word.casefold() in EXCHANGE_LIST:
+        return await _answer(exchange_reply(service, listing=True))
+    parsed = parse_day(word) if word else None
+    if word and parsed is None:
+        return f"看不懂日期「{word}」，写成 2023.01.01 这样。{_EXCHANGE_HINT}"
+    return await _answer(exchange_reply(service, parsed))
 
 
 # —— 百科和小贴士：游戏里的典籍和载入画面小贴士，被戳时随机发一条 ——

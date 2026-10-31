@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -585,6 +585,7 @@ def _alconna(name):
         ("bf1tip", ["bf1tip", "tip", "小贴士"]),
         ("bf1c", ["bf1c", "收藏", "勋章", "狗牌", "collection"]),
         ("bf1op", ["bf1行动", "行动", "战役", "op"]),
+        ("bf1exchange", ["bf1交换", "交换", "exchange", "ex"]),
     ],
 )
 def test_old_command_names_reach_the_same_handler(module, handler, names):
@@ -1541,3 +1542,108 @@ async def test_recent_round_count(module, rounds, rendered):
     assert (result.query("name"), result.query("count.count")) == ("abc", 10)
     assert _alconna("bf1r").parse("/bf1r -num 3 -t").query("count.count") == 3
     assert "-n" in _alconna("bf1r").meta.description
+
+
+PERIODS = ["2025-06-02T16:00:00Z", "2025-05-18T16:00:00Z", "2022-07-17T16:00:00Z"]
+
+
+def _skin(name, rarity, price, parent="麦德森机枪"):
+    return {
+        "key": name,
+        "name": name,
+        "parent_name": parent,
+        "category": "轻机枪",
+        "rarity": rarity,
+        "price": price,
+        "image_url": f"{name}.png",
+    }
+
+
+EXCHANGE = {
+    "captured_at": "2025-06-02T16:00:00Z",
+    "items": [
+        _skin("迷彩纱", "Standard", 300),
+        _skin("黄金甲", "Superior", 10000, None),
+        _skin("坦能堡", "Enhanced", 800),
+        _skin("戴恩", "Superior", 2000),
+    ],
+}
+
+
+def test_exchange_dates(module):
+    parse = module.parse_day
+    for text in ["2023.01.01", "2023-01-01", "2023/1/1", "20230101", "2023年1月1日"]:
+        assert parse(text) == date(2023, 1, 1), text
+    assert parse("2023.13.01") is None and parse("昨天") is None and parse("2023") is None
+
+
+def test_exchange_page(module):
+    pages = module.pages
+    dates = pages.exchange_dates(PERIODS)
+    assert dates == [date(2025, 6, 3), date(2025, 5, 19), date(2022, 7, 18)]
+    ctx = pages.exchange_page(EXCHANGE, dates, "x", date(2025, 6, 10))
+    assert [g["label"] for g in ctx["groups"]] == ["传奇", "精英", "特殊"]
+    assert [t["name"] for t in ctx["groups"][0]["tiles"]] == ["黄金甲", "戴恩"]
+    assert ctx["groups"][0]["tiles"][0]["parent"] == "轻机枪"  # 没有所属武器时写分类
+    assert ctx["groups"][0]["tiles"][0]["price"] == "10,000"
+    assert (ctx["latest"], ctx["number"], ctx["total"], ctx["until"]) == (True, 3, 3, None)
+    assert ctx["stale"] is None
+    # 最新一期很久没换，写明 EA 不再更新
+    assert pages.exchange_page(EXCHANGE, dates, "x", date(2026, 10, 31))["stale"] == 515
+    old = pages.exchange_page({**EXCHANGE, "captured_at": PERIODS[1]}, dates, "x")
+    assert (old["latest"], old["number"], old["until"], old["stale"]) == (
+        False,
+        2,
+        "2025-06-02",
+        None,
+    )
+
+
+@pytest.fixture
+def exchange(api):
+    asked = []
+
+    def snapshot(**params):
+        asked.append(params)
+        return EXCHANGE
+
+    api["/exchange/periods"] = PERIODS
+    api["/exchange"] = snapshot
+    return asked
+
+
+async def test_exchange_reply(module, exchange, rendered):
+    rendered["result"] = b"jpeg"
+    reply = await module.exchange_reply(object())
+    assert isinstance(reply[0], Image) and str(reply[1]).endswith("/bf1/exchange")
+    assert rendered["template"] == "exchange.html" and exchange[-1] == {}
+    rendered["result"] = None
+    text = await module.exchange_reply(None, date(2025, 6, 5))
+    assert exchange[-1] == {"date": "2025-06-05"}
+    lines = text.split("\n")
+    assert lines[0] == "战地一交换（当期，第 3/3 期，2025-06-03 起，北京时间）"
+    assert lines[1].startswith("这一期已经 ") and lines[1].endswith("游戏里一直是这一期")
+    assert lines[2:4] == ["传奇（2 件）：", "· 黄金甲 · 轻机枪 · 10,000 废料"]
+    early = await module._answer(module.exchange_reply(None, date(2020, 1, 1)))
+    assert early.startswith(
+        "2020-01-01 还没有交换记录：bf-manager 收录的是 2022-07-18 到 2025-06-03 的 3 期"
+    )
+    future = await module._answer(module.exchange_reply(None, date(2099, 1, 1)))
+    assert future.startswith("2099-01-01 还没到")
+    listing = await module.exchange_reply(None, listing=True)
+    assert listing.split("\n")[:3] == [
+        "交换共 3 期（2022-07-18 ~ 2025-06-03，北京时间，按每期开始日期）：",
+        "2022（1 期）：07-18",
+        "2025（2 期）：05-19、06-03",
+    ]
+
+
+def test_exchange_flags(module):
+    """旧 bot 的 -t 是日期；只回文字用 -text。"""
+
+    result = _alconna("交换").parse("/交换 -t 2023.01.01")
+    assert result.query("day.day") == "2023.01.01" and result.query("text") is None
+    result = _alconna("ex").parse("/ex 2023-01-01 -text")
+    assert result.query("when") == "2023-01-01" and result.query("text") is not None
+    assert _alconna("bf1交换").parse("/bf1交换 列表").query("when") == "列表"
+    assert _alconna("bf1交换").parse("/bf1交换").matched

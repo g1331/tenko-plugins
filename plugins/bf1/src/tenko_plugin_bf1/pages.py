@@ -13,7 +13,7 @@ import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import cache
 from pathlib import Path
@@ -1438,6 +1438,80 @@ def campaign_page(
         "reset_left": _left(reset, now),
         # 海报一排，右边一栏写时间
         "width": PAGE_PAD + count * (OPERATION_POSTER + 18) + 380,
+    }
+
+
+# 交换按稀有度分组、组内按价格从高到低，同网页；Standard 网页叫“特殊”
+EXCHANGE_RARITIES = (
+    ("Superior", "传奇", "gold"),
+    ("Enhanced", "精英", "blue"),
+    ("Standard", "特殊", "white"),
+)
+EXCHANGE_COLS = 5
+EXCHANGE_TILE, EXCHANGE_GAP = 262, 14
+# 交换平时每周一换，偶尔隔一个多月；最新一期比这还旧，就是 EA 不再更新了
+EXCHANGE_STALE_DAYS = 60
+
+
+def exchange_dates(periods: list[str]) -> list[date]:
+    """各期开始的北京时间日期，新的在前（接口给的是 UTC 时刻，倒序）。"""
+
+    return [_when(p).date() for p in periods]
+
+
+def exchange_stale(dates: list[date], today: date) -> int | None:
+    """最新一期太久没换时返回它距今多少天。"""
+
+    days = (today - dates[0]).days if dates else 0
+    return days if days > EXCHANGE_STALE_DAYS else None
+
+
+def exchange_page(
+    snapshot: dict[str, Any], dates: list[date], source: str, today: date | None = None
+) -> dict[str, Any]:
+    """一期交换：按稀有度分组的网格，标第几期、起止日期；最新一期太旧时写明 EA 不再更新。"""
+
+    today = today or datetime.now(BEIJING).date()
+    start = _when(snapshot["captured_at"]).date()
+    index = dates.index(start) if start in dates else None
+    # 下一期开始的前一天是这一期的最后一天
+    until = dates[index - 1] - timedelta(days=1) if index else None
+    groups = []
+    items = snapshot.get("items") or []
+    for rarity, label, color in EXCHANGE_RARITIES:
+        tiles = sorted(
+            (i for i in items if i.get("rarity") == rarity),
+            key=lambda i: i.get("price") or 0,
+            reverse=True,
+        )
+        if tiles:
+            groups.append(
+                {
+                    "label": label,
+                    "color": color,
+                    "tiles": [
+                        {
+                            "name": cn(i.get("name")) or "-",
+                            "parent": cn(i.get("parent_name") or i.get("category")) or "-",
+                            "image": i.get("image_url") or "",
+                            "price": _int(i.get("price")),
+                        }
+                        for i in tiles
+                    ],
+                }
+            )
+    return {
+        **_common(source),
+        "start": start.isoformat(),
+        "until": until.isoformat() if until else None,
+        "latest": index == 0,
+        "number": len(dates) - index if index is not None else None,
+        "total": len(dates),
+        "count": len(items),
+        "stale": exchange_stale(dates, today) if index == 0 else None,
+        "groups": groups,
+        "cols": EXCHANGE_COLS,
+        "width": PAGE_PAD + EXCHANGE_COLS * EXCHANGE_TILE + (EXCHANGE_COLS - 1) * EXCHANGE_GAP,
     }
 
 
