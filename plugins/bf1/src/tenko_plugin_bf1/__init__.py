@@ -744,6 +744,29 @@ async def overview_reply(service) -> MessageChain | str:
     return await _reply(service, "overview.html", context, format_overview(overview), link)
 
 
+def format_campaign(context: dict[str, Any]) -> str:
+    lines = [f"当前行动：{context['name']}"]
+    if context["description"]:
+        lines.append(context["description"])
+    if context["operations"]:
+        lines.append("包含：" + "、".join(o["name"] for o in context["operations"]))
+    if context["ended"]:
+        lines.append(f"已于 {context['ends']} 结束")
+    else:
+        lines.append(f"剩余 {context['left']}（{context['ends']} 结束）")
+    lines.append(f"距每日重置 {context['reset_left']}（每天 {context['reset']}，北京时间）")
+    return "\n".join(lines)
+
+
+async def campaign_reply(service) -> MessageChain | str:
+    campaign = await _get("/campaign")
+    if not campaign:
+        raise Bf1Error("当前没有进行中的行动")
+    context = pages.campaign_page(campaign, _source())
+    link = f"{config.base_url.rstrip('/')}/bf1/campaign"
+    return await _reply(service, "campaign.html", context, format_campaign(context), link)
+
+
 async def _answer(query) -> MessageChain | str:
     try:
         return await query
@@ -1091,6 +1114,23 @@ async def bf1pl(
 @_commands(["bf1", "bfstat"], Args(), "战地一全服在线人数、地区分布和热门地图", "bf1", "/bf1")
 async def bf1(session: Session, *, render_service: RenderService):
     return await _answer(overview_reply(render_service))
+
+
+@_commands(
+    ["bf1行动", "行动", "战役", "op"],
+    Args(),
+    "战地一当前的行动战役：包含哪些行动、还剩多久、每日什么时候重置；加 -t 只回文字",
+    "bf1行动 [-t]",
+    "/bf1行动",
+    TEXT,
+)
+async def bf1op(
+    session: Session,
+    text: Query[Any] = Query("text"),  # noqa: B008
+    *,
+    render_service: RenderService,
+):
+    return await _answer(campaign_reply(_service(text, render_service)))
 
 
 # —— 百科和小贴士：游戏里的典籍和载入画面小贴士，被戳时随机发一条 ——

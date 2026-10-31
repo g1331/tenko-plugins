@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -583,6 +584,7 @@ def _alconna(name):
         ("bf1info", ["bf1info", "info", "信息", "tyc", "天眼查"]),
         ("bf1tip", ["bf1tip", "tip", "小贴士"]),
         ("bf1c", ["bf1c", "收藏", "勋章", "狗牌", "collection"]),
+        ("bf1op", ["bf1行动", "行动", "战役", "op"]),
     ],
 )
 def test_old_command_names_reach_the_same_handler(module, handler, names):
@@ -1441,3 +1443,49 @@ async def test_item_search_lists_unused_ones_too(module, player, rendered):
     rifles = module.groups.find("weapons", "步枪")
     missing = await module.items_reply("weapons", "abc", None, group=rifles, keyword="mp18")
     assert missing == "abc 的步枪里没有名字含「mp18」的"
+
+
+CAMPAIGN = {
+    "name": "帝國隕落",
+    "description": "色当及其重要的铁路枢纽也被攻下。",
+    "ends_at": "2026-12-07T12:59:31.684560Z",
+    "daily_reset_at": "2026-11-01T00:00:31.684560Z",
+    "operations": [
+        {"name": "铜墙铁壁", "image_url": "op3.png"},
+        {"name": "征服地狱", "image_url": None},
+    ],
+}
+
+
+def test_campaign_page_in_beijing_time(module):
+    pages = module.pages
+    now = datetime(2026, 10, 31, 21, 30, tzinfo=pages.BEIJING)
+    ctx = pages.campaign_page(CAMPAIGN, "x", now)
+    assert ctx["name"] == "帝国陨落" and ctx["background"] == "op3.png"
+    assert (ctx["ends"], ctx["left"], ctx["ended"]) == ("2026-12-07 20:59", "36 天 23 小时", False)
+    assert (ctx["reset"], ctx["reset_left"]) == ("08:00", "10 小时 31 分")
+    assert [o["image"] for o in ctx["operations"]] == ["op3.png", ""]
+    assert ctx["width"] == 48 + 2 * 298 + 380
+    later = pages.campaign_page(CAMPAIGN, "x", datetime(2026, 12, 8, tzinfo=pages.BEIJING))
+    assert later["ended"] and later["left"] == "0 小时 0 分"
+
+
+async def test_campaign_reply(module, api, rendered):
+    api["/campaign"] = CAMPAIGN
+    rendered["result"] = b"jpeg"
+    reply = await module.campaign_reply(object())
+    assert isinstance(reply[0], Image) and str(reply[1]).endswith("/bf1/campaign")
+    assert rendered["template"] == "campaign.html"
+    rendered["result"] = None
+    text = await module.campaign_reply(None)
+    lines = text.split("\n")
+    assert lines[:3] == [
+        "当前行动：帝国陨落",
+        "色当及其重要的铁路枢纽也被攻下。",
+        "包含：铜墙铁壁、征服地狱",
+    ]
+    assert lines[3].startswith("剩余 ") or lines[3].startswith("已于 ")
+    assert "（每天 08:00，北京时间）" in text
+    api["/campaign"] = None
+    assert await module._answer(module.campaign_reply(None)) == "当前没有进行中的行动"
+    assert _alconna("行动").parse("/行动 -t").query("text") is not None

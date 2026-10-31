@@ -13,7 +13,7 @@ import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import cache
 from pathlib import Path
@@ -1388,6 +1388,56 @@ def overview_page(overview: dict[str, Any], source: str) -> dict[str, Any]:
             for m in modes[:5]
         ],
         "trend": _sparkline(overview.get("history") or [], 900, 150),
+    }
+
+
+# 行动和交换按北京时间写：bf-manager 的交换日期也按北京时间算
+BEIJING = timezone(timedelta(hours=8), "北京时间")
+OPERATION_POSTER = 280
+
+
+def _when(iso: str) -> datetime:
+    return datetime.fromisoformat(iso).astimezone(BEIJING)
+
+
+def _left(until: datetime, now: datetime) -> str:
+    """和网页一样：一天以上写天和小时，不到一天写小时和分。"""
+
+    minutes = max(0, round((until - now).total_seconds() / 60))
+    days, hours = divmod(minutes, 1440)
+    if days:
+        return f"{days} 天 {hours // 60} 小时"
+    return f"{hours // 60} 小时 {hours % 60} 分"
+
+
+def campaign_page(
+    campaign: dict[str, Any], source: str, now: datetime | None = None
+) -> dict[str, Any]:
+    """当前的行动战役（旧 bot 的 -行动）：名字、描述、包含的行动海报，结束和每日重置时间。"""
+
+    now = now or datetime.now(BEIJING)
+    ends, reset = _when(campaign["ends_at"]), _when(campaign["daily_reset_at"])
+    operations = [
+        {"name": cn(op.get("name")) or "-", "image": op.get("image_url") or ""}
+        for op in campaign.get("operations") or []
+    ]
+    common = _common(source)
+    count = max(1, len(operations))
+    return {
+        **common,
+        # 背景用第一张行动海报
+        "background": next((o["image"] for o in operations if o["image"]), common["background"]),
+        "name": cn(campaign.get("name")) or "-",
+        "description": cn(campaign.get("description")),
+        "operations": operations,
+        "poster": OPERATION_POSTER,
+        "ended": ends <= now,
+        "ends": ends.strftime("%Y-%m-%d %H:%M"),
+        "left": _left(ends, now),
+        "reset": reset.strftime("%H:%M"),
+        "reset_left": _left(reset, now),
+        # 海报一排，右边一栏写时间
+        "width": PAGE_PAD + count * (OPERATION_POSTER + 18) + 380,
     }
 
 

@@ -1,0 +1,45 @@
+{% extends "_base.html" %}
+{#- 行动：上面战役名和描述，下面行动海报一排，右边一栏写结束和每日重置时间。 -#}
+{% block style %}
+  .head { margin-bottom: 18px; }
+  .head h1 { margin: 4px 0 12px; font-size: 44px; line-height: 1.2; }
+  .head p { margin: 0; font-size: 20px; line-height: 1.7; color: var(--soft); }
+  .row { display: flex; gap: 18px; align-items: stretch; }
+  .op { position: relative; flex: none; width: {{ poster }}px; height: {{ (poster * 384 / 300)|round|int }}px; background: var(--panel); overflow: hidden;
+    clip-path: polygon(0 18px, 18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%); }
+  .op img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .op .n { position: absolute; left: 0; right: 0; bottom: 0; padding: 40px 18px 18px; font-size: 26px; font-weight: 700;
+    background: linear-gradient(to top, rgba(0,0,0,.9), rgba(0,0,0,0)); }
+  .op .i { font-family: "Oswald", sans-serif; font-size: 17px; letter-spacing: .15em; color: var(--amber); }
+  .times { flex: 1; display: flex; flex-direction: column; gap: 18px; }
+  .times .panel { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .times .v { margin: 6px 0 4px; font-family: "Oswald", "SC", sans-serif; font-size: 38px; font-weight: 600; line-height: 1.2; color: var(--amber); }
+  .times .hint { font-size: 18px; color: var(--muted); }
+{% endblock %}
+{% block body %}
+<section class="panel head">
+  <div class="eyebrow">Battlefield 1 · 行动</div>
+  <h1>{{ name }}</h1>
+  {% if description %}<p>{{ description }}</p>{% endif %}
+</section>
+<div class="row">
+  {% for op in operations %}
+  <div class="op">
+    {% if op.image %}<img src="{{ op.image }}">{% endif %}
+    <div class="n"><div class="i">OPERATION {{ loop.index }}</div>{{ op.name }}</div>
+  </div>
+  {% endfor %}
+  <div class="times">
+    <section class="panel">
+      <div class="label">{{ "行动已结束" if ended else "行动剩余" }}</div>
+      <div class="v">{{ "-" if ended else left }}</div>
+      <div class="hint">{{ ends }} 结束</div>
+    </section>
+    <section class="panel">
+      <div class="label">距每日重置</div>
+      <div class="v">{{ reset_left }}</div>
+      <div class="hint">每天 {{ reset }}（北京时间）</div>
+    </section>
+  </div>
+</div>
+{% endblock %}
