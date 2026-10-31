@@ -1489,3 +1489,55 @@ async def test_campaign_reply(module, api, rendered):
     api["/campaign"] = None
     assert await module._answer(module.campaign_reply(None)) == "当前没有进行中的行动"
     assert _alconna("行动").parse("/行动 -t").query("text") is not None
+
+
+def test_group_card_as_an_ea_name(module):
+    name = module.card_name
+    assert name("[EA]abc") == "abc" and name("【EA】 abc_1") == "abc_1"
+    assert name("[EA][SC](x) Ab-c") == "Ab-c" and name("abc") == "abc"
+    assert name("张三") is None and name("abc 张三") is None and name("") is None
+    assert name(None) is None
+
+
+async def test_unbound_member_falls_back_to_the_group_card(module, player, rendered, db):
+    player["/players/search"] = lambda name: {
+        "personas": [{**PERSONA, "time_played_hours": 1}] if name == "abc" else []
+    }
+    text = await module.stats_reply(None, None, "10", card="[EA]abc")
+    assert text.startswith("abc 的战地一战绩")
+    wrong = await module._answer(module.stats_reply(None, None, "10", card="【EA】nobody"))
+    assert wrong.startswith("还没绑定，按群名片 nobody 查：没找到玩家 nobody。使用 /bf1绑定")
+    unusable = await module._answer(module.stats_reply(None, None, "10", card="张三"))
+    assert unusable.startswith("还没绑定：使用 /bf1绑定")
+    # 绑定过的不看群名片
+    player["/players/2"] = PERSONA
+    await module._bind("10", PERSONA)
+    text = await module.stats_reply(None, None, "10", card="nobody")
+    assert text.startswith("abc 的战地一战绩")
+
+
+def test_card_comes_from_the_member_nick(module):
+    def session(member):
+        return SimpleNamespace(event=SimpleNamespace(member=member))
+
+    assert module._card(session(SimpleNamespace(nick="[EA]abc"))) == "[EA]abc"
+    assert module._card(session(SimpleNamespace(nick=""))) is None
+    assert module._card(session(None)) is None
+
+
+async def test_recent_round_count(module, rounds, rendered):
+    asked = []
+
+    def history(limit):
+        asked.append(limit)
+        return {"items": ROUNDS, "next_before": None}
+
+    rounds["/stats/2/rounds"] = history
+    await module.recent_reply("abc", None, count=1)
+    assert len(rendered["context"]["rounds"]) == 1 and asked[-1] == 20
+    await module.recent_reply("abc", None, count=12)
+    assert len(rendered["context"]["rounds"]) == 3 and asked[-1] == 48
+    result = _alconna("最近").parse("/最近 abc -n 10")
+    assert (result.query("name"), result.query("count.count")) == ("abc", 10)
+    assert _alconna("bf1r").parse("/bf1r -num 3 -t").query("count.count") == 3
+    assert "-n" in _alconna("bf1r").meta.description

@@ -110,6 +110,10 @@ class Bf1Error(Exception):
     """要原样回给群友的错误。"""
 
 
+class NoSuchPlayer(Bf1Error):
+    """按名字没找到玩家。"""
+
+
 async def _get(path: str, **params: Any) -> Any:
     # EA 接口慢，战绩和武器常要好几秒。
     url = f"{config.base_url.rstrip('/')}/api/v1/bf1{path}"
@@ -135,9 +139,9 @@ async def _persona(name: str) -> dict[str, Any]:
     exact = [p for p in personas if p["display_name"].casefold() == name.casefold()]
     if not exact:
         if not personas:
-            raise Bf1Error(f"没找到玩家 {name}")
+            raise NoSuchPlayer(f"没找到玩家 {name}")
         names = "、".join(p["display_name"] for p in personas[:5])
-        raise Bf1Error(f"没找到玩家 {name}，相近的有：{names}")
+        raise NoSuchPlayer(f"没找到玩家 {name}，相近的有：{names}")
     # 重名时 bf-manager 会回填生涯时长，0 是没玩过 BF1 的空号。
     return next((p for p in exact if p.get("time_played_hours")), exact[0])
 
@@ -327,8 +331,24 @@ async def _reply(
     return chain + Text(after) if after else chain
 
 
-async def _player(name: str | None, user_id: str) -> dict[str, Any]:
-    """带名字按名字查，#PID 按 PID 查；不带就查发消息的人绑定的号（按 PID，改名也不影响）。"""
+_BIND_HINT = "使用 /bf1绑定 你的EA名字，或者在命令后面带上名字"
+# 群名片开头的 [战队]、【战队】、(xx) 这类前缀
+_CARD_PREFIX = re.compile(r"^(?:\s*[\[【(（<《「『][^\]】)）>》」』]*[\]】)）>》」』])+\s*")
+# EA 名字只有字母、数字、- 和 _
+_EA_NAME = re.compile(r"[A-Za-z0-9_-]{2,32}")
+
+
+def card_name(card: str | None) -> str | None:
+    """群名片去掉前缀后像 EA 名字就用它，不像（中文、带空格）返回 None。"""
+
+    name = _CARD_PREFIX.sub("", card or "").strip()
+    return name if _EA_NAME.fullmatch(name) else None
+
+
+async def _player(name: str | None, user_id: str, card: str | None = None) -> dict[str, Any]:
+    """带名字按名字查，#PID 按 PID 查；不带就查发消息的人绑定的号（按 PID，改名也不影响），
+    没绑定时把群名片当 EA 名字查（只认精确同名）。
+    """
 
     if name and name.startswith("#"):
         if not name[1:].isdigit():
@@ -337,13 +357,21 @@ async def _player(name: str | None, user_id: str) -> dict[str, Any]:
     if name:
         return await _persona(name)
     bound = await _bound(user_id)
-    if not bound:
-        raise Bf1Error("还没绑定：使用 /bf1绑定 你的EA名字，或者在命令后面带上名字")
-    return await _get(f"/players/{bound.pid}")
+    if bound:
+        return await _get(f"/players/{bound.pid}")
+    guess = card_name(card)
+    if not guess:
+        raise Bf1Error(f"还没绑定：{_BIND_HINT}")
+    try:
+        return await _persona(guess)
+    except NoSuchPlayer as error:
+        raise Bf1Error(f"还没绑定，按群名片 {guess} 查：{error}。{_BIND_HINT}") from error
 
 
-async def stats_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
-    reply, _, _ = await _stats_card(await _player(name, user_id), service)
+async def stats_reply(
+    name: str | None, service, user_id: str = "", card: str | None = None
+) -> MessageChain | str:
+    reply, _, _ = await _stats_card(await _player(name, user_id, card), service)
     return reply
 
 
@@ -394,6 +422,7 @@ async def items_reply(
     layout: tuple[int, int] = (pages.ITEM_COLS, pages.ITEM_ROWS),
     keyword: str | None = None,
     sort_word: str | None = None,
+    card: str | None = None,
 ) -> MessageChain | str:
     """武器或载具排行；给了分组（步枪、突击兵、坦克……）就只排这一组。
 
@@ -406,7 +435,7 @@ async def items_reply(
     if sort_word and not (sort := pages.find_sort(kind, sort_word)):
         choices = "、".join(s.label for s in pages.SORTS[kind])
         raise Bf1Error(f"{whole}没有「{sort_word}」这种排法，可以按 {choices} 排")
-    persona = await _player(name, user_id)
+    persona = await _player(name, user_id, card)
     pid = persona["persona_id"]
     result, platoon = await asyncio.gather(
         _get(f"/stats/{pid}/{kind}"), _optional(f"/stats/{pid}/platoon")
@@ -476,11 +505,15 @@ async def _nothing() -> None:
 
 
 async def info_reply(
-    name: str | None, service, user_id: str = "", full: tuple[str, ...] = ()
+    name: str | None,
+    service,
+    user_id: str = "",
+    full: tuple[str, ...] = (),
+    card: str | None = None,
 ) -> MessageChain | str:
     """full 是要全部列出的身份（owner/admin/vip/ban），这时不查最近游玩。"""
 
-    persona = await _player(name, user_id)
+    persona = await _player(name, user_id, card)
     pid = persona["persona_id"]
     # 最近玩过的服用 bf-manager 跟踪到的对局：EA 的“最近游玩”不准
     rsp, rounds, ban, online, platoon = await asyncio.gather(
@@ -541,21 +574,22 @@ def format_recent(name: str, context: dict[str, Any]) -> str:
 
 
 async def _recent_card(
-    persona: dict[str, Any], service, link: bool = True
+    persona: dict[str, Any], service, link: bool = True, count: int = RECENT
 ) -> MessageChain | str | None:
-    """最近对局卡片；bf-manager 没记录到能看的对局时返回 None。"""
+    """最近 count 局的卡片；bf-manager 没记录到能看的对局时返回 None。"""
 
     pid = persona["persona_id"]
-    # 多取一些：排队、观战、进服就走的局会被筛掉
+    # 多取一些：排队、观战、进服就走的局会被筛掉；接口一次最多 100 局
+    limit = min(100, max(20, count * 4))
     result, platoon = await asyncio.gather(
-        _get(f"/stats/{pid}/rounds", limit=20), _optional(f"/stats/{pid}/platoon")
+        _get(f"/stats/{pid}/rounds", limit=limit), _optional(f"/stats/{pid}/platoon")
     )
     # 和生涯比要单局详情：每局一个请求，几局一起取，取不到的局就不比
-    played = pages.played_rounds(result["items"], RECENT)
+    played = pages.played_rounds(result["items"], count)
     found = await asyncio.gather(*(_optional(f"/rounds/{i['round']['id']}") for i in played))
     details = {d["id"]: d for d in found if d}
     context = pages.recent_page(
-        persona, platoon, result["items"], _source(), RECENT, details, config.base_url
+        persona, platoon, result["items"], _source(), count, details, config.base_url
     )
     if not context["rounds"]:
         return None
@@ -565,14 +599,20 @@ async def _recent_card(
     )
 
 
-async def recent_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
-    persona = await _player(name, user_id)
-    card = await _recent_card(persona, service)
-    if card is None:
+async def recent_reply(
+    name: str | None,
+    service,
+    user_id: str = "",
+    count: int = RECENT,
+    card: str | None = None,
+) -> MessageChain | str:
+    persona = await _player(name, user_id, card)
+    reply = await _recent_card(persona, service, count=count)
+    if reply is None:
         raise Bf1Error(
             f"还没有记录到 {persona['display_name']} 的对局（bf-manager 跟踪到的才有，保留 90 天）"
         )
-    return card
+    return reply
 
 
 def format_collection(context: dict[str, Any]) -> str:
@@ -611,10 +651,12 @@ def format_collection(context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def collection_reply(name: str | None, service, user_id: str = "") -> MessageChain | str:
+async def collection_reply(
+    name: str | None, service, user_id: str = "", card: str | None = None
+) -> MessageChain | str:
     """勋章、狗牌和佩戴的狗牌；勋带次数在生涯战绩里，拿不到就不画勋带墙。"""
 
-    persona = await _player(name, user_id)
+    persona = await _player(name, user_id, card)
     pid = persona["persona_id"]
     found, stats, platoon = await asyncio.gather(
         _get(f"/stats/{pid}/collection"),
@@ -865,6 +907,13 @@ def _name(name: Query[str]) -> str | None:
     return name.result if name.available else None
 
 
+def _card(session: Session) -> str | None:
+    """群名片：OneBot 适配器把它放在 member.nick 里；私聊没有。"""
+
+    member = getattr(session.event, "member", None)
+    return getattr(member, "nick", None) or None
+
+
 @_player_commands(["bf1s", "stat", "生涯", "战绩"], "生涯战绩")
 async def bf1s(
     session: Session,
@@ -873,7 +922,8 @@ async def bf1s(
     *,
     render_service: RenderService,
 ):
-    return await _answer(stats_reply(_name(name), _service(text, render_service), session.user.id))
+    service = _service(text, render_service)
+    return await _answer(stats_reply(_name(name), service, session.user.id, _card(session)))
 
 
 def _group_and_name(
@@ -921,7 +971,15 @@ def _items_answer(
     keyword = _name(search).strip("\"'“”") if search.available else None
     return _answer(
         items_reply(
-            kind, name, service, session.user.id, group, layout, keyword or None, _name(sort)
+            kind,
+            name,
+            service,
+            session.user.id,
+            group,
+            layout,
+            keyword or None,
+            _name(sort),
+            _card(session),
         )
     )
 
@@ -1032,7 +1090,7 @@ async def bf1info(
     flags = {"owner": owner, "admin": admin, "vip": vip, "ban": ban}
     full = tuple(key for key, flag in flags.items() if flag.available)
     service = _service(text, render_service)
-    return await _answer(info_reply(_name(name), service, session.user.id, full))
+    return await _answer(info_reply(_name(name), service, session.user.id, full, _card(session)))
 
 
 @_player_commands(
@@ -1046,18 +1104,36 @@ async def bf1c(
     render_service: RenderService,
 ):
     service = _service(text, render_service)
-    return await _answer(collection_reply(_name(name), service, session.user.id))
+    return await _answer(collection_reply(_name(name), service, session.user.id, _card(session)))
 
 
-@_player_commands(["bf1r", "recent", "match", "最近", "对局"], "最近对局")
+# 旧 bot 的 -n：查几局；一局一个详情请求，所以设上限
+MAX_RECENT = 12
+COUNT = Option(
+    "-n|-num|-局数", Args["count", int], dest="count", help_text=f"查几局，最多 {MAX_RECENT}"
+)
+
+
+@_player_commands(
+    ["bf1r", "recent", "match", "最近", "对局"],
+    f"最近对局，默认 {RECENT} 局，-n 指定局数（最多 {MAX_RECENT}）",
+    " [-n 局数]",
+    " -n 10",
+    COUNT,
+)
 async def bf1r(
     session: Session,
     name: Query[str] = Query("name"),  # noqa: B008
     text: Query[Any] = Query("text"),  # noqa: B008
+    count: Query[int] = Query("count.count"),  # noqa: B008
     *,
     render_service: RenderService,
 ):
-    return await _answer(recent_reply(_name(name), _service(text, render_service), session.user.id))
+    rounds = max(1, min(count.result, MAX_RECENT)) if count.available else RECENT
+    service = _service(text, render_service)
+    return await _answer(
+        recent_reply(_name(name), service, session.user.id, rounds, _card(session))
+    )
 
 
 @_commands(
