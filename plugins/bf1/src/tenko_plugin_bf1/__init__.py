@@ -1,4 +1,4 @@
-"""战地一查询：战绩、武器、载具、最近对局和服务器，百科和小贴士，以及入群审核。
+"""战地一查询：战绩、武器、载具、最近对局和服务器，行动和交换，百科和小贴士，以及入群审核。
 
 查询数据来自 bf-manager 的公开查询接口，百科和小贴士在 :mod:`.codex`；这里解析命令、取数据，
 图片排版在 :mod:`.pages`，渲染不了时回文字。
@@ -49,10 +49,10 @@ class Bf1Config(BasicConfModel):
 plugin.metadata(
     "战地一查询",
     author=["13"],
-    version="0.1.19",
+    version="0.1.20",
     description=(
         "经 bf-manager 查询战地一玩家战绩、武器、载具、最近对局、玩家信息、收藏和服务器，"
-        "带百科、小贴士（被戳时随机发）和入群审核。"
+        "以及行动和交换，带百科、小贴士（被戳时随机发）和入群审核。"
     ),
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/bf1",
