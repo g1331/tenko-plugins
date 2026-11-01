@@ -833,6 +833,14 @@ def test_weapon_and_vehicle_groups(module):
     assert {"category": "配備", "name": "炸藥"} in assault  # 繁体也认
     assert {"category": "配备", "name": "弹药箱"} not in assault
     assert {"category": "制式步枪", "name": "SMLE MKIII"} in groups.find("weapons", "狙击枪")
+    # 巡逻型按 bf-manager 校正后的分类归兵种，医疗兵不再挂
+    scout, medic = groups.find("weapons", "斟茶"), groups.find("weapons", "医疗")
+    for patrol, home in (
+        ({"category": "步枪", "name": "三八式步枪（巡逻）"}, scout),
+        ({"category": "步枪", "name": "卡尔卡诺 M91 卡宾枪（巡逻）"}, scout),
+        ({"category": "冲锋枪", "name": "M1917 卡宾枪（巡逻）"}, assault),
+    ):
+        assert patrol in home and patrol not in medic
     ground = groups.find("vehicles", "地面")
     assert {"category": "机械巨兽", "name": "Char 2C"} in ground
     assert {"category": "机械巨兽", "name": "无畏舰"} not in ground
