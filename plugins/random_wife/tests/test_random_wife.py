@@ -1,5 +1,6 @@
 import shutil
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from arclet.alconna import command_manager
@@ -205,6 +206,68 @@ async def test_submission_that_cannot_reach_the_review_group_is_dropped(
     assert module._pending()["items"] == {}
 
 
+@pytest.fixture
+def master(module, monkeypatch):
+    """没配审核群：投稿经 notify_master 发给 Master。"""
+
+    monkeypatch.setattr(module.config, "review_group", "")
+    state = SimpleNamespace(notices=[], result=SimpleNamespace(delivered=True, reason=None))
+
+    async def notify(content, *, key=None):
+        state.notices.append((content, key))
+        return state.result
+
+    monkeypatch.setattr(module, "notify_master", notify)
+    return state
+
+
+def _listener(handler):
+    return getattr(handler, "callable_target", handler)
+
+
+async def test_without_a_review_group_master_reviews(
+    module, library, clean, sent, master, monkeypatch
+):
+    assert await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
+        "投稿已提交给管理员，审核通过后会加进老婆库"
+    )
+    content, key = master.notices[0]
+    assert key == "submission:1" and any(isinstance(e, Image) for e in content)
+    assert "群友(10) 添加老婆【芙莉莲】的申请（编号 1）" in _text(content)
+    assert sent == []  # 没往审核群发
+
+    replies = iter(
+        [
+            None,  # 不是回复通知的消息
+            SimpleNamespace(key="other:1", text="y"),  # 本插件别的通知
+            SimpleNamespace(key="submission:1", text=""),  # 只回了图
+            SimpleNamespace(key="submission:1", text="y"),
+        ]
+    )
+
+    async def reply(session):
+        return next(replies)
+
+    monkeypatch.setattr(module, "master_reply", reply)
+    session = SimpleNamespace(send=AsyncMock())
+    for _ in range(4):
+        await _listener(module.on_master_reply)(session)
+    session.send.assert_awaited_once_with("已同意 群友(10) 投稿的芙莉莲")
+    assert "芙莉莲" in library.wives()
+    assert sent[-1][0] == "g" and "审核通过" in _text(sent[-1][1])
+
+
+async def test_master_rate_limit_drops_the_submission(module, library, clean, master):
+    master.result = SimpleNamespace(delivered=False, reason="rate_limited")
+    assert await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
+        "最近投稿的人太多了，过一会儿再来"
+    )
+    master.result = SimpleNamespace(delivered=False, reason="no_account")
+    assert "没能发给管理员" in await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
+    assert module._pending()["items"] == {}
+    assert not any(library.folder("pending").iterdir())
+
+
 async def test_admin_adds_directly_and_members_need_an_image(module, library, clean, monkeypatch):
     async def perm(session, level):
         return session.admin
@@ -300,3 +363,11 @@ def test_thumbnails_are_cached_and_follow_changes(module, library, clean):
 async def test_list_falls_back_to_text_without_a_browser(module, library, clean):
     library.add("芙莉莲", _real_png())
     assert await module.wife_list(None, 1) == "老婆库里一共 1 位（第 1/1 页）\n1. 芙莉莲  1 KB"
+
+
+async def test_real_notify_master_without_accounts(module, library, clean, monkeypatch):
+    # 不替换宿主接口：测试宿主没有在线账号，送不到 Master，投稿撤回
+    monkeypatch.setattr(module.config, "review_group", "")
+    reply = await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
+    assert reply == "投稿没能发给管理员，稍后再试"
+    assert module._pending()["items"] == {}

@@ -17,7 +17,7 @@ PyPI 的包，并收录在 [Tenko 插件目录](https://github.com/g1331/tenko-r
 
 ## 开发
 
-本仓库是一个 uv 工作区，开发依赖里包含钉在某个提交上的 Tenko 宿主（当前是 `tenko-api-v0.4.2` 那次提交），测试会加载真实的宿主：
+本仓库是一个 uv 工作区，开发依赖里包含钉在某个提交上的 Tenko 宿主（当前是 `tenko-api-v0.4.3` 那次提交），测试会加载真实的宿主：
 
 ```text
 uv sync

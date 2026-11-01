@@ -28,6 +28,7 @@ from loguru import logger
 from satori import At, Author, Element, Image, Quote, Text
 from tenko_api.accounts import accounts_for_group, online_accounts
 from tenko_api.features import declare, rate_limit
+from tenko_api.notify import master_reply, notify_master
 from tenko_api.perm import Permission, group_only, require, require_perm
 from tenko_api.render import RenderService
 from tenko_api.storage import Store
@@ -41,7 +42,7 @@ class RandomWifeConfig(BasicConfModel):
     """对应 config/tenko.toml 中的 ``[plugin_config.random_wife]``。"""
 
     review_group: str = ""
-    """群员投稿的老婆发到这个群审核，群管理员引用回复 y 同意；留空时只有 BOT 管理员能添加。"""
+    """群员投稿的老婆发到这个群审核，群管理员引用回复 y 同意；留空时发给 Master 审核。"""
 
 
 plugin.metadata(
@@ -60,6 +61,8 @@ declare(scope="group", default_enabled=True)
 config = plugin.get_config(RandomWifeConfig)
 
 REVIEW_HOURS = 24
+KEY = "submission:"
+"""发给 Master 的审核通知用的 key 前缀，后面接投稿编号。"""
 _registry_store = Store("marriages", version=1)
 _request_store = Store("requests", version=1)
 _lock = asyncio.Lock()
@@ -197,16 +200,30 @@ async def submit(
         _request_store.save(pending)
     photo = Image.of(raw=data, mime=library.MIME[library.suffix(data)])
     hint = Text(f"\n{REVIEW_HOURS} 小时内引用这条消息回复 y 同意，回复其他内容作为理由拒绝")
-    if not await _send(
-        config.review_group, platform, [Text(_review_text(number, item)), photo, hint]
-    ):
+    failure = await _ask_review(number, platform, [Text(_review_text(number, item)), photo, hint])
+    if failure:
         async with _lock:
             pending = _pending()
             if dropped := pending["items"].pop(str(number), None):
                 _drop_image(dropped)
             _request_store.save(pending)
-        return "投稿没能发到审核群，稍后再试"
+        return failure
     return "投稿已提交给管理员，审核通过后会加进老婆库"
+
+
+async def _ask_review(number: int, platform: str, content: list[Element]) -> str | None:
+    """配了审核群就发到群里，否则发给 Master；发不出去时返回给投稿人的话。"""
+
+    if config.review_group:
+        if await _send(config.review_group, platform, content):
+            return None
+        return "投稿没能发到审核群，稍后再试"
+    notice = await notify_master(content, key=f"{KEY}{number}")
+    if notice.delivered:
+        return None
+    if notice.reason == "rate_limited":
+        return "最近投稿的人太多了，过一会儿再来"
+    return "投稿没能发给管理员，稍后再试"
 
 
 async def add_wife(session: Session, wife: str) -> str:
@@ -214,8 +231,6 @@ async def add_wife(session: Session, wife: str) -> str:
     if src is None:
         return "要带上老婆的图片：/添加老婆 名字 [图片]，或者引用一张图片发这条命令"
     admin = await require_perm(session, Permission.BotAdmin)
-    if not admin and not config.review_group:
-        return "只有 BOT 管理员能添加老婆"
     if not admin and session.event.guild is None:
         return "投稿要在群里发"
     data = await library.download(src)
@@ -235,7 +250,7 @@ async def add_wife(session: Session, wife: str) -> str:
 
 
 async def decide(number: str, said: str) -> str:
-    """审核群里管理员的回复：y 同意，其他文字作为理由拒绝。"""
+    """审核群里管理员或 Master 的回复：y 同意，其他文字作为理由拒绝。"""
 
     async with _lock:
         pending = _pending()
@@ -301,6 +316,16 @@ async def on_review_reply(session: Session[MessageCreatedEvent]):
     await session.send(await decide(number, said))
 
 
+@plugin.listen(MessageCreatedEvent)
+async def on_master_reply(session: Session[MessageCreatedEvent]):
+    """没配审核群时投稿发给 Master，Master 引用那条通知回复。"""
+
+    reply = await master_reply(session)
+    if reply is None or not reply.key.startswith(KEY) or not reply.text:
+        return
+    await session.send(await decide(reply.key.removeprefix(KEY), reply.text))
+
+
 # ---- 命令 ----
 
 
@@ -351,7 +376,7 @@ async def give_up_wife(session: Session):
 @_commands(
     ["添加老婆", "添加wife"],
     Args["name", str]["rest?", AllParam],
-    "把一张图片加进老婆库，名字就是老婆的名字；BOT 管理员直接加，群员的投稿交给管理员审核",
+    "把一张图片加进老婆库，名字就是老婆的名字；BOT 管理员直接加，群员投稿交给审核群或 Master",
     "添加老婆 <名字> [图片]",
     "/添加老婆 芙莉莲 [图片]",
 )
