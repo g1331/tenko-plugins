@@ -1,0 +1,34 @@
+[project]
+name = "tenko-plugin-random-wife"
+version = "0.1.0"
+description = "Tenko 随机老婆：群里每天抽一个老婆，抽到两次别人的老婆就抢过来"
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.11,<3.14"
+keywords = ["tenko", "tenko-plugin", "qq", "random-wife"]
+classifiers = [
+    "Framework :: AsyncIO",
+    "Natural Language :: Chinese (Simplified)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Chat",
+]
+dependencies = [
+    "tenko-api>=0.4,<0.5",
+    "httpx>=0.27",
+    "jinja2>=3",
+    "pillow>=10",
+]
+
+[project.urls]
+Homepage = "https://github.com/g1331/tenko-plugins/tree/main/plugins/random_wife"
+Repository = "https://github.com/g1331/tenko-plugins"
+
+[project.entry-points."tenko.plugins"]
+random_wife = "tenko_plugin_random_wife"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tenko_plugin_random_wife"]

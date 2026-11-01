@@ -7,6 +7,7 @@ members = [
     "tenko-plugin-apex",
     "tenko-plugin-bf1",
     "tenko-plugin-persona-chat",
+    "tenko-plugin-random-wife",
     "tenko-plugin-repeater",
 ]
 
@@ -1324,6 +1325,25 @@ requires-dist = [
     { name = "pypinyin", specifier = ">=0.51" },
     { name = "tenko-api", specifier = ">=0.4.1,<0.5" },
     { name = "zhconv", specifier = ">=1.4" },
+]
+
+[[package]]
+name = "tenko-plugin-random-wife"
+version = "0.1.0"
+source = { editable = "plugins/random_wife" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "pillow" },
+    { name = "tenko-api" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "tenko-api", specifier = ">=0.4,<0.5" },
 ]
 
 [[package]]
