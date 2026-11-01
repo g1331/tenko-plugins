@@ -1329,7 +1329,7 @@ requires-dist = [
 
 [[package]]
 name = "tenko-plugin-random-wife"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "plugins/random_wife" }
 dependencies = [
     { name = "httpx" },

@@ -48,7 +48,7 @@ class RandomWifeConfig(BasicConfModel):
 plugin.metadata(
     "随机老婆",
     author=["13"],
-    version="0.1.0",
+    version="0.2.0",
     description="群里每天抽一个老婆，抽到两次别人的老婆就抢过来；老婆库由管理员维护，群员可投稿。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/random_wife",

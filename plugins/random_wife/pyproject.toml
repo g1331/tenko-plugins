@@ -1,6 +1,6 @@
 [project]
 name = "tenko-plugin-random-wife"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tenko 随机老婆：群里每天抽一个老婆，抽到两次别人的老婆就抢过来"
 readme = "README.md"
 license = "GPL-3.0-only"
