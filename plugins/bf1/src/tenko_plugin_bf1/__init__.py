@@ -1671,7 +1671,7 @@ async def on_join_request(
             accounts = [receiver, *(a for a in others if str(a.self_id) != str(receiver.self_id))]
             if name := await rename_member(group, applicant, accounts):
                 await session.send(
-                    MessageChain(At(applicant), Text(f" 已自动将你的群名片改为 {name}"))
+                    MessageChain([At(applicant), Text(f" 已自动将你的群名片改为 {name}")])
                 )
         return
     if not feature_enabled("bf1", group) or not await _review_on(group):

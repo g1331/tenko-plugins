@@ -1655,3 +1655,34 @@ def test_exchange_flags(module):
     assert result.query("when") == "2023-01-01" and result.query("text") is not None
     assert _alconna("bf1交换").parse("/bf1交换 列表").query("when") == "列表"
     assert _alconna("bf1交换").parse("/bf1交换").matched
+
+
+async def test_joining_greets_the_renamed_member(module, db, monkeypatch):
+    # 真入群（事件不带申请附言）且改了名片：@ 新成员告知改成了什么
+    async def review_on(group):
+        return True
+
+    async def rename(group, user, accounts):
+        return "abd"
+
+    monkeypatch.setattr(module, "feature_enabled", lambda plugin, group: True)
+    monkeypatch.setattr(module, "_review_on", review_on)
+    monkeypatch.setattr(module, "rename_member", rename)
+    monkeypatch.setattr(module, "accounts_for_group", lambda group, platform: [])
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    session = SimpleNamespace(
+        event=SimpleNamespace(_origin=SimpleNamespace()),
+        guild=SimpleNamespace(id="100"),
+        user=SimpleNamespace(id="10"),
+        account=SimpleNamespace(self_id="1", platform="qq"),
+        send=send,
+    )
+    await module.on_join_request(session, render_service=None)
+    assert [str(e) for e in sent[0]] == [
+        str(module.At("10")),
+        str(Text(" 已自动将你的群名片改为 abd")),
+    ]
