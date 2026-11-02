@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+{#- 图要在手机上看：最小字号 17px。配色取幻星集牌面的灰蓝和金色。 -#}
+<style>
+  {% if sc_font %}@font-face { font-family: "SC"; src: url({{ sc_font }}) format("woff2"); font-weight: 100 900; }{% endif %}
+  :root { --ink: #1f2d3d; --muted: #6b7c8f; --blue: #3f6e8c; --blue-soft: #e3edf3; --gold: #c99a3b;
+    --line: #cfdde6; --rev: #b4563f; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #eef4f7; }
+  body { width: 1000px; color: var(--ink); font-family: "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 20px;
+    -webkit-font-smoothing: antialiased; }
+  .page { padding: 30px 28px 22px;
+    background: radial-gradient(80% 50% at 100% 0%, #d6e6f0 0%, transparent 60%),
+                radial-gradient(70% 45% at 0% 100%, #f3e7cf 0%, transparent 60%), #eef4f7; }
+  header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 18px; }
+  h1 { margin: 0; font-size: 44px; font-weight: 800; letter-spacing: .08em; }
+  h1 i { color: var(--gold); font-style: normal; font-size: 30px; margin-right: 6px; }
+  .meta { font-size: 18px; color: var(--muted); text-align: right; line-height: 1.5; }
+  .question { margin-bottom: 20px; padding: 12px 18px; border-radius: 12px; background: #fff;
+    border-left: 6px solid var(--gold); font-size: 22px; }
+  .question b { color: var(--blue); margin-right: 8px; }
+  .face { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(31,45,61,.22); background: var(--blue-soft); }
+  .face.rev { transform: rotate(180deg); }
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 17px; font-weight: 700;
+    color: #fff; background: var(--blue); }
+  .tag.rev { background: var(--rev); }
+  .note { margin-top: 20px; padding: 12px 18px; border-radius: 12px; background: #fff7e6; color: #8a6420;
+    font-size: 19px; }
+  footer { margin-top: 18px; display: flex; justify-content: space-between; font-size: 17px; color: var(--muted); }
+
+  /* 三张牌阵：横排 */
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+  .col { background: #fff; border-radius: 16px; padding: 14px 14px 18px; text-align: center;
+    box-shadow: 0 3px 10px rgba(63,110,140,.12); }
+  .col .pos { font-size: 22px; font-weight: 800; color: var(--blue); letter-spacing: .2em; margin-bottom: 10px; }
+  .col .pic { width: 270px; height: 540px; margin: 0 auto; }
+  .col .name { margin-top: 14px; font-size: 26px; font-weight: 800; }
+  .col .en { font-size: 17px; color: var(--muted); margin-bottom: 8px; }
+  .col .mean { margin-top: 10px; font-size: 19px; line-height: 1.55; text-align: left; }
+
+  /* 凯尔特十字：左边牌阵，右边逐张说明 */
+  .celtic { display: flex; gap: 26px; align-items: flex-start; }
+  .board { position: relative; flex: none; width: 522px; height: 916px; }
+  .slot { position: absolute; width: 110px; height: 220px; }
+  .slot.cross { z-index: 2; transform: rotate(90deg); }
+  .slot.cross .face { box-shadow: 0 4px 18px rgba(31,45,61,.45); }
+  .slot.cross .face.rev { transform: rotate(180deg); }
+  .num { position: absolute; left: -8px; top: -8px; z-index: 3; width: 32px; height: 32px; border-radius: 50%;
+    background: var(--gold); color: #fff; font-size: 18px; font-weight: 800; display: grid; place-items: center;
+    box-shadow: 0 2px 6px rgba(0,0,0,.25); }
+  .slot.cross .num { left: auto; top: auto; right: -8px; bottom: -8px; transform: rotate(-90deg); }
+  .list { flex: 1; display: flex; flex-direction: column; gap: 9px; }
+  .item { background: #fff; border-radius: 12px; padding: 9px 14px 10px; box-shadow: 0 2px 8px rgba(63,110,140,.10); }
+  .item .head { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 800; }
+  .item .no { color: var(--gold); }
+  .item .pos { color: var(--blue); }
+  .item .mean { margin-top: 3px; font-size: 17px; line-height: 1.45; color: #3b4a5a; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1><i>✦</i>{{ title }}</h1>
+    <div class="meta">{% if user %}{{ user }}<br>{% endif %}{% if time %}{{ time }}{% endif %}</div>
+  </header>
+  {% if question %}<div class="question"><b>所问</b>{{ question }}</div>{% endif %}
+
+  {% if kind == "celtic" %}
+  {#- 十字：1 居中、2 横压在 1 上、3 下、4 左、5 上、6 右；右侧一列从下往上是 7 到 10 -#}
+  {%- set spots = [(126, 348), (126, 348), (126, 584), (0, 348), (126, 112), (252, 348),
+                   (412, 696), (412, 464), (412, 232), (412, 0)] -%}
+  <div class="celtic">
+    <div class="board">
+      {% for card in cards %}
+      <div class="slot{% if card.no == 2 %} cross{% endif %}" style="left: {{ spots[loop.index0][0] }}px; top: {{ spots[loop.index0][1] }}px">
+        <span class="num">{{ card.no }}</span>
+        {% if card.img %}<img class="face{% if card.reversed %} rev{% endif %}" src="{{ card.img }}">{% else %}<div class="face"></div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <div class="list">
+      {% for card in cards %}
+      <div class="item">
+        <div class="head"><span class="no">{{ card.no }}</span><span class="pos">{{ card.position }}</span>
+          <span>{{ card.name }}</span><span class="tag{% if card.reversed %} rev{% endif %}">{{ card.orientation }}</span></div>
+        <div class="mean">{{ card.meaning }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% else %}
+  <div class="row">
+    {% for card in cards %}
+    <div class="col">
+      <div class="pos">{{ card.position }}</div>
+      <div class="pic">{% if card.img %}<img class="face{% if card.reversed %} rev{% endif %}" src="{{ card.img }}">{% else %}<div class="face"></div>{% endif %}</div>
+      <div class="name">{{ card.name }}</div>
+      <div class="en">{{ card.name_en }}</div>
+      <span class="tag{% if card.reversed %} rev{% endif %}">{{ card.orientation }}</span>
+      <div class="mean">{{ card.meaning }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if note %}<div class="note">{{ note }}</div>{% endif %}
+  <footer><span>牌面：bilibili 幻星集</span><span>Tenko · 塔罗牌</span></footer>
+</div>
+</body>
+</html>

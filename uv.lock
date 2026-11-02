@@ -9,6 +9,7 @@ members = [
     "tenko-plugin-persona-chat",
     "tenko-plugin-random-wife",
     "tenko-plugin-repeater",
+    "tenko-plugin-tarot",
 ]
 
 [manifest.dependency-groups]
@@ -1359,6 +1360,25 @@ dependencies = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "tenko-api", specifier = ">=0.4,<0.5" },
+]
+
+[[package]]
+name = "tenko-plugin-tarot"
+version = "0.1.0"
+source = { editable = "plugins/tarot" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "pillow" },
+    { name = "sqlalchemy" },
+    { name = "tenko-api" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jinja2", specifier = ">=3" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "tenko-api", specifier = ">=0.4.3,<0.5" },
 ]
 
 [[package]]
