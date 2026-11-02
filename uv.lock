@@ -1287,7 +1287,7 @@ requires-dist = [
 
 [[package]]
 name = "tenko-plugin-bf1"
-version = "0.1.21"
+version = "0.1.22"
 source = { editable = "plugins/bf1" }
 dependencies = [
     { name = "httpx" },
