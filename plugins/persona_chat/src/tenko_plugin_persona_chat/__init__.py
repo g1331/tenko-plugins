@@ -46,7 +46,7 @@ from tenko_api.perm import Permission, get_user_perm, require_perm
 from tenko_api.sandbox import in_sandbox
 from tenko_api.storage import Store
 
-from . import llm, shaping, trigger
+from . import llm, shaping, trigger, websearch
 from .chat import (
     GLOBAL,
     Conversation,
@@ -132,7 +132,14 @@ class PersonaChatConfig(BasicConfModel):
     vision_images: int = 5
     """每次请求最多带这么多张新图，低清晰度发给模型看，每张约 190 token；0 只告诉模型“[图片]”。"""
     search_daily: int = 20
-    """每个群或私聊每天最多上网搜几次，只在被叫到时能搜，每次约 0.005 元；0 关闭搜索。"""
+    """每个群或私聊每天最多上网搜几次，只在被叫到时能搜；0 关闭搜索。"""
+    search_provider: str = "deepseek"
+    """搜索服务：deepseek（和对话共用密钥，每次约 0.005 元）、tavily（每月免费 1000 次，
+    之后每次 0.008 美元）、bocha（博查，国内网页全，每次 0.036 元）、searxng（自建，免费）。"""
+    search_api_key: str = ""
+    """搜索服务的密钥；用 deepseek 时留空就用 ``api_key``，searxng 不用密钥。"""
+    search_base_url: str = ""
+    """搜索服务的地址，留空用各家默认（deepseek 用 ``base_url``）；searxng 必须填自建实例的地址。"""
     sticker_limit: int = 100
     """表情包收藏上限，所有群共用一份；满了丢掉用得最少的。0 关闭表情包。"""
     max_reply_chars: int = 120
@@ -202,7 +209,6 @@ _MEMORY_LINES = 40  # 最近这么多条里说过话的人才带上档案
 _reported: set[int] = set()
 # shortcut: 搜索次数只记在内存里，重启清零；要严格限额时改存 Store。
 _searches: dict[tuple[str, str], int] = {}
-_SEARCH_COST = 0.0007  # 每次 0.005 元，折成美元和用量记账一致
 # 她自己发消息期间为真：after_send 里据此分出哪些是 Tenko 功能发的。
 _speaking: ContextVar[bool] = ContextVar("persona_chat_speaking", default=False)
 _TENKO = "Tenko 功能"
@@ -244,6 +250,8 @@ client = httpx.AsyncClient(
     headers={"Authorization": f"Bearer {config.api_key}"},
     timeout=30,
 )
+# 搜索的地址和密钥每次调用时才读，换搜索服务不用重载插件。
+search_client = httpx.AsyncClient(timeout=20, follow_redirects=True)
 if not config.api_key:
     logger.warning("AI群友未配置 api_key，不会应答")
 
@@ -253,6 +261,7 @@ async def _dispose() -> None:
         task.cancel()
     _save()
     await client.aclose()
+    await search_client.aclose()
 
 
 collect_disposes(_dispose)
@@ -281,6 +290,9 @@ async def _reload_config(event: ConfigReload) -> bool | None:
     for name in changed:
         setattr(config, name, getattr(new, name))
     logger.info("AI群友配置已更新，不用重载：{}", changed)
+    if any(name.startswith("search_") for name in changed) and config.search_daily > 0:
+        if reason := websearch.problem(*_search_settings()):
+            logger.warning("AI群友不会上网搜：{}", reason)
     return True
 
 
@@ -1743,9 +1755,27 @@ async def _agreed(name: str, said: str, key: str) -> bool:
     return answer.startswith("是")
 
 
+def _search_settings() -> tuple[str, str, str]:
+    """(服务名, 密钥, 地址)：用 deepseek 时密钥和地址默认跟对话一样。"""
+
+    name = config.search_provider.strip().lower() or "deepseek"
+    api_key = config.search_api_key
+    base_url = config.search_base_url
+    if name == "deepseek":
+        api_key = api_key or config.api_key
+        base_url = base_url or config.base_url
+    return name, api_key, base_url
+
+
+if config.search_daily > 0 and (_reason := websearch.problem(*_search_settings())):
+    logger.warning("AI群友不会上网搜：{}", _reason)
+
+
 def _search_left(key: str) -> bool:
+    if config.search_daily <= 0 or websearch.problem(*_search_settings()):
+        return False
     today = datetime.now().date().isoformat()
-    return 0 < config.search_daily and _searches.get((today, key), 0) < config.search_daily
+    return _searches.get((today, key), 0) < config.search_daily
 
 
 async def _search(key: str, query: str) -> str:
@@ -1753,19 +1783,22 @@ async def _search(key: str, query: str) -> str:
 
     today = datetime.now().date()
     _searches[(today.isoformat(), key)] = _searches.get((today.isoformat(), key), 0) + 1
+    name, api_key, base_url = _search_settings()
     try:
-        results = await llm.search(client, query)
-    except (httpx.HTTPError, ValueError, KeyError) as error:
-        logger.warning("AI群友搜索失败：{!r}", error)
+        results = await websearch.search(
+            search_client, name, query, api_key=api_key, base_url=base_url
+        )
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as error:
+        logger.warning("AI群友搜索失败（{}）：{!r}", name, error)
         return ""
-    logger.info("AI群友搜索“{}”：{} 条结果", query, len(results))
-    if results and not in_sandbox():
-        usage_book.add(today, key, {}, _SEARCH_COST)  # 只有搜到结果才计费
+    logger.info("AI群友搜索“{}”（{}）：{} 条结果", query, name, len(results))
+    provider = websearch.PROVIDERS[name]
+    if (results or provider.charge_empty) and provider.cost and not in_sandbox():
+        usage_book.add(today, key, {}, provider.cost)
     lines = []
     for r in results:
-        source = f"{r.get('site_name') or '未知站点'}，{(r.get('date') or '')[:10]}"
-        text = (r.get("summary") or r.get("snippet") or "")[:300]
-        lines.append(f"- {r.get('title', '')}（{source}）：{text}")
+        source = "，".join(part for part in (r.site or "未知站点", r.date) if part)
+        lines.append(f"- {r.title}（{source}）：{r.text[:300]}")
     return "\n".join(lines)
 
 

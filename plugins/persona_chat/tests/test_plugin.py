@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from types import SimpleNamespace
@@ -1117,18 +1118,21 @@ async def test_called_bot_may_search_first_then_reply(module, fake_llm, monkeypa
     module._searches.clear()
     queries = []
 
-    async def search(client, query, count=4):
-        queries.append(query)
-        return [
-            {
-                "title": "新赛季",
-                "site_name": "EA",
-                "date": "2026-10-20T16:00:00+00:00",
-                "summary": "加了新地图",
-            }
-        ]
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == f"{module.config.base_url}/v1/tools/search"
+        assert request.headers["Authorization"] == "Bearer test"  # 默认和对话共用密钥
+        queries.append(json.loads(request.content)["query"])
+        result = {
+            "title": "新赛季",
+            "site_name": "EA",
+            "date": "2026-10-20T16:00:00+00:00",
+            "summary": "加了新地图",
+        }
+        return httpx.Response(200, json={"results": [result]})
 
-    monkeypatch.setattr(module.llm, "search", search)
+    monkeypatch.setattr(
+        module, "search_client", httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
     fake_llm.replies += [
         [{"tool": "search", "query": "战地6 新赛季"}],
         [{"tool": "edit_sticker", "name": "没有这张", "mood": None}],
@@ -1148,6 +1152,32 @@ async def test_called_bot_may_search_first_then_reply(module, fake_llm, monkeypa
     fake_llm.replies.append([{"text": "不知道诶"}])
     await feed(module, session([At("42"), Text(" 那平衡呢")], user="2", message_id="m2"))
     assert len(fake_llm.requests) == 4 and fake_llm.requests[-1][1]
+
+
+async def test_search_needs_usable_provider_settings(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "search_daily", 5)
+    monkeypatch.setattr(module.config, "search_provider", "tavily")
+    monkeypatch.setattr(module.config, "search_api_key", "")
+    module._searches.clear()
+    # tavily 没填密钥：搜不了，被叫到时直接强制只能说话
+    fake_llm.replies.append([{"text": "不知道诶"}])
+    await feed(module, session([At("42"), Text(" 新赛季更新了啥")], message_id="m1"))
+    assert fake_llm.requests[-1][1]
+
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers["Authorization"]))
+        return httpx.Response(200, json={"results": []})
+
+    monkeypatch.setattr(module.config, "search_api_key", "tvly-1")
+    monkeypatch.setattr(
+        module, "search_client", httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    fake_llm.replies += [[{"tool": "search", "query": "战地6 新赛季"}], [{"text": "没查到"}]]
+    await feed(module, session([At("42"), Text(" 那平衡呢")], user="2", message_id="m2"))
+    assert seen == [("https://api.tavily.com/search", "Bearer tvly-1")]
+    assert "什么也没搜到" in fake_llm.requests[-1][0][-1]["content"]
 
 
 async def test_called_bot_that_neither_searches_nor_speaks_is_asked_again(

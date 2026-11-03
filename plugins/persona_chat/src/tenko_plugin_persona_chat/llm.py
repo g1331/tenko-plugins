@@ -418,11 +418,3 @@ async def pick_sticker(
         and isinstance(item.get("score"), int | float)
     ]
     return picks, data.get("usage") or {}
-
-
-async def search(client: httpx.AsyncClient, query: str, count: int = 4) -> list[dict[str, Any]]:
-    """DeepSeek 的网页搜索：和对话共用 API key，按次计费，搜不到不收费。"""
-
-    response = await client.post("/v1/tools/search", json={"query": query[:128], "count": count})
-    response.raise_for_status()
-    return response.json().get("results") or []
