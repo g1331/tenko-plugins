@@ -53,6 +53,9 @@ def fake_llm(module, monkeypatch):
     for task in module._waiters.values():
         task.cancel()
     module._waiters.clear()
+    for call in module._calls.values():
+        call.task.cancel()
+    module._calls.clear()
     module.usage_book.store.save({})
     module.sticker_book.store.save({})
     module.sticker_book.bans.save([])
@@ -1882,3 +1885,32 @@ async def test_an_ai_with_her_former_name_is_not_her(module, fake_llm, monkeypat
     assert "群里的 大肥鱼（AI账号）(9) 名字和你像，但不是你" in place
     assert "你以前用过“阿呆”、“大肥鱼”这个名字" in place
 
+
+async def test_she_waits_for_the_caller_to_finish_typing(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "typing_seconds", 0.05)
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    # 只发一个“@你”，下一条才是问题；中间又 @ 了一次：等他说完，只问一次模型，回最新那条
+    fake_llm.replies.append([{"text": "去吧"}])
+    await feed(module, session([At("42")], message_id="w0"))
+    await feed(module, session([Text("周末去爬山吗")], message_id="w1"))
+    await feed(module, session([At("42"), Text(" 你说呢")], message_id="w2"))
+    assert not fake_llm.requests
+    await module._calls[("group:100", "1")].task
+    assert len(fake_llm.requests) == 1 and fake_llm.requests[0][1]
+    hint = fake_llm.requests[0][0][-1]["content"]
+    assert "你说呢" in hint
+    assert not module._calls and "group:100" not in module._waiters
+
+
+async def test_a_reply_to_her_waits_for_the_rest_of_the_burst(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "typing_seconds", 0.05)
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="v0"))
+    await module._calls[("group:100", "1")].task
+    # 聊开了的人拆成两条接着说：等他说完再问，第二条来时不另起一轮
+    fake_llm.replies.append([{"text": "行"}])
+    await feed(module, session([Text("我跟你说")], message_id="v1"))
+    await feed(module, session([Text("我今天抽到了")], message_id="v2"))
+    await module._waiters["group:100"]
+    assert len(fake_llm.requests) == 2
+    assert "我今天抽到了" in fake_llm.requests[-1][0][-1]["content"]

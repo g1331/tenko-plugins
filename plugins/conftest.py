@@ -32,7 +32,12 @@ async def runtime(host):
         external_configs={
             "repeater": {"cooldown_seconds": 60},
             # 不调用真实接口：测试里替换 llm.chat。
-            "persona_chat": {"api_key": "test", "batch_size": 3, "quiet_seconds": 0},
+            "persona_chat": {
+                "api_key": "test",
+                "batch_size": 3,
+                "quiet_seconds": 0,
+                "typing_seconds": 0,
+            },
             "apex": {"api_key": "test"},
             "random_wife": {"review_group": "900"},
         }

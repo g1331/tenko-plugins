@@ -121,6 +121,9 @@ class PersonaChatConfig(BasicConfModel):
     """bot 说话后这么久之内算在聊天里：每来一条新消息就让模型判断要不要接着聊；0 关闭。"""
     quiet_seconds: int = 3
     """要主动说话前，等群里安静这么久，避免在别人连发中间插嘴。"""
+    typing_seconds: int = 6
+    """叫她、跟她聊的人停下这么久才回他：一句话常拆成几条发，等他这一阵说完一起回，
+    最多多等 20 秒。0 不等，叫到就回。"""
     unprompted_interval_seconds: int = 300
     """没在聊天时主动插过一次话后，这么久之内不再这样插话（被叫到、跟聊不受影响）。"""
     user_cooldown_seconds: int = 5
@@ -190,6 +193,26 @@ _talks: dict[tuple[str, str], tuple[int, float]] = {}
 _TALK_GAP = 300
 _LONG_ROUNDS = 4  # 每聊满 4 轮提醒一次她别在一个梗上打转，每轮都提她就每轮换话题
 _waiters: dict[str, asyncio.Task[None]] = {}
+# 一句话常拆成几条发：生产记录里同一个人连着的两条，间隔中位数 6 秒，四分之三超过 3 秒；
+# 叫她的人 11% 在她回之前又补了一条（“@你 介绍下太离谱”“塔罗牌”），13% 只发一个“@你”。
+# 以前叫到就问模型，她回的是半句话，补的那条又单独问一次。所以等他停下 typing_seconds 再回，
+# 但最多等这么久，免得一直在打字的人等不到回话。
+_TYPING_MAX = 20
+
+
+@dataclasses.dataclass
+class _Call:
+    """叫了她、还在等他说完的一次：这一阵里又叫了一次就回最新那条。"""
+
+    session: Session
+    line: Line
+    mood: str
+    force: bool
+    since: float  # time.time()
+    task: asyncio.Task[None] | None = None
+
+
+_calls: dict[tuple[str, str], _Call] = {}
 # 她攒下的档案：{"people": {QQ号: {"name", "note"}}, "groups": {会话: {"note", "upto"}}}。
 # 人所有群共用，群各一份；群里比上次整理多出 _DIGEST_EVERY 条就在后台让模型整理一次，
 # upto 是整理到的编号。私聊不整理，只看对方的档案。
@@ -257,7 +280,8 @@ if not config.api_key:
 
 
 async def _dispose() -> None:
-    for task in [*_waiters.values(), *_digests.values()]:
+    calls = [c.task for c in _calls.values() if c.task is not None]
+    for task in [*_waiters.values(), *_digests.values(), *calls]:
         task.cancel()
     _save()
     await client.aclose()
@@ -676,15 +700,27 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
                 _wait_quiet(key, session, conversation, called=True)
             )
         return
-    if calling:
+    direct = at_me or reply_me or is_reply_me
+    if calling and (pending := _calls.get((key, user_id))) is not None:
+        # 还在等他说完时又叫了一次：回最新这条，前面的都在记录里；只提名字的升级成 @。
+        pending.session, pending.line = session, line
+        if direct and pending.mood == "named":
+            pending.mood, pending.force = "call", True
+    elif calling:
         now = time.monotonic()
         if now - _cooldowns.get((key, user_id), float("-inf")) < config.user_cooldown_seconds:
             return
         _cooldowns[(key, user_id)] = now
-        direct = at_me or reply_me or is_reply_me
         if decided := _decide_call(key, user_id, conversation, now, direct=direct):
             mood, force = decided
-            await respond(session, conversation, line, force=force, mood=mood)
+            if config.typing_seconds <= 0:
+                await respond(session, conversation, line, force=force, mood=mood)
+                return
+            call = _Call(session, line, mood, force, time.time())
+            _calls[(key, user_id)] = call
+            call.task = asyncio.create_task(_wait_caller(key, user_id, conversation, call))
+    elif (key, user_id) in _calls:
+        return  # 叫了她、还没说完的人接着打的字：等他说完一起回
     elif line.talking and not at_only:
         # 和被叫一样记“她刚说完几秒就接”的连击：别的 bot 回得总是这么快，人不会次次都这样。
         # 连着几轮就提醒她没新内容别回，再多就当聊完了，防两个 bot 你一句我一句停不下来。
@@ -960,6 +996,28 @@ def _load(conversation: Conversation, now: float) -> float:
     )
 
 
+def _typing_left(conversation: Conversation, speaker: str | None, since: float) -> float:
+    """还要等 ``speaker`` 多久才算他这一阵说完；从 ``since`` 起最多等 ``_TYPING_MAX`` 秒。"""
+
+    if config.typing_seconds <= 0 or speaker is None:
+        return 0.0
+    last = next((x.at for x in reversed(conversation.lines) if x.speaker == speaker), since)
+    now = time.time()
+    return min(last + config.typing_seconds - now, since + _TYPING_MAX - now)
+
+
+async def _wait_caller(key: str, user_id: str, conversation: Conversation, call: _Call) -> None:
+    """等叫她的人说完这一阵再回他。"""
+
+    try:
+        while (left := _typing_left(conversation, call.line.speaker, call.since)) > 0:
+            await asyncio.sleep(left)
+    finally:
+        if _calls.get((key, user_id)) is call:
+            del _calls[(key, user_id)]
+    await respond(call.session, conversation, call.line, force=call.force, mood=call.mood)
+
+
 async def _wait_quiet(
     key: str,
     session: Session,
@@ -971,8 +1029,21 @@ async def _wait_quiet(
 ) -> None:
     """等群里安静 ``quiet_seconds`` 再开口；``called`` 是私聊里对方这一阵说完了、该回了。"""
 
+    since = time.time()
     try:
-        while (left := conversation.last_message_at + config.quiet_seconds - time.monotonic()) > 0:
+        while True:
+            left = conversation.last_message_at + config.quiet_seconds - time.monotonic()
+            # 在等的是某个人的话（私聊的对方、接着聊的人、紧跟在她后面接话的人）：还要等他说完。
+            person = conversation.talk or answer
+            if called and person is None:
+                person = next(
+                    (x for x in reversed(conversation.lines) if x.speaker not in (None, _TENKO)),
+                    None,
+                )
+            if person is not None:
+                left = max(left, _typing_left(conversation, person.speaker, since))
+            if left <= 0:
+                break
             await asyncio.sleep(left)
         if not called:
             if (talk := conversation.talk) is not None:
@@ -1277,7 +1348,13 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
 
     key, target, answer = turn.key, turn.target, turn.answer
     if target is not None:
-        hint = mention_hint(target.number, mood, target.text)
+        # 叫她之后他又补了几条（只发“@你”，下一条才是问题）：连起来才是他要说的。
+        more = [
+            x.text
+            for x in conversation.lines
+            if x.number > target.number and x.speaker == target.speaker
+        ]
+        hint = mention_hint(target.number, mood, " ".join([target.text, *more]))
     elif answer is not None and turn.talking:
         name = (answer.speaker or "").rpartition("(")[0] or answer.speaker or ""
         her = next((x.text for x in reversed(conversation.lines) if x.speaker is None), "")
