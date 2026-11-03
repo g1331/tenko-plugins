@@ -140,7 +140,10 @@ SEARCH = {
     "type": "function",
     "function": {
         "name": "search",
-        "description": "上网搜一下，结果出来后再回复。只在被问到不确定的具体事实时用。",
+        "description": (
+            "悄悄上网搜一下，结果出来后再回复。对方问的、冲你说的话里有你不确定、没听过的事实、"
+            "梗、外号、人名时用，别反问对方。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
