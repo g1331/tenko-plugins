@@ -1720,3 +1720,28 @@ async def test_a_bot_answering_within_seconds_cannot_keep_her_talking(
     assert len(hints) == module.trigger.STREAK_MUTE - 1
     assert "飞快地连着来回好几轮" not in hints[0] and "飞快地连着来回好几轮" in hints[-1]
     assert "群友9(9)" not in module.conversations["group:100"].partners
+
+
+async def test_an_ai_with_her_former_name_is_not_her(module, fake_llm, monkeypatch):
+    async def allowed(session, level):
+        return True
+
+    monkeypatch.setattr(module, "require_perm", allowed)
+    # 以前换人设不记旧名字：存盘里只有新名字，就当是从默认的大肥鱼换过来的
+    module.persona_store.save({"name": "小埋"})
+    assert module._former_names() == ["大肥鱼"]
+    s = session([])
+    await module.manage_persona(s, "改", "阿呆", "你是阿呆。")
+    assert module.persona_store.load()["former"] == ["小埋", "大肥鱼"]
+    await module.manage_persona(s, "换", "小埋", "")
+    assert module._former_names() == ["阿呆", "大肥鱼"]  # 现在的名字不算以前的
+
+    # 群里别人部署的“大肥鱼”AI：提到她现在的名字不算叫她，也点明它不是她
+    other = session([Text("小埋你看我顶多偷吃白米饭")], user="9", message_id="m1")
+    other.user.name = "大肥鱼（AI账号）"
+    await feed(module, other)
+    assert not fake_llm.requests and "group:100" not in module._waiters
+    await feed(module, session([Text("哈哈")], user="7", message_id="m2"))
+    place = module.conversations["group:100"].place
+    assert "群里的 大肥鱼（AI账号）(9) 名字和你像，但不是你" in place
+    assert "你以前用过“阿呆”、“大肥鱼”这个名字" in place

@@ -190,6 +190,7 @@ memory_store = Store("memory", version=1)
 # 用命令换的人设，所有群共用：{"name": 预置人设名} 或 {"name": 名字, "text": 自定义人设}；
 # 空的用配置里的。
 persona_store = Store("persona", version=1)
+_DEFAULT_NAME = "大肥鱼"  # 没选人设、配置里也没写时用的预置人设
 # 群管理用命令打开“只回 @”的群：[会话, …]。这些群里只有 @ 她才回，不认唤醒词和引用，也不主动插话。
 at_only_store = Store("at_only", version=1)
 _digests: dict[str, asyncio.Task[None]] = {}
@@ -739,7 +740,13 @@ def _place(session: Session, conversation: Conversation) -> str:
     )
     for speaker in lookalikes:
         place += (
-            f"群里的 {speaker} 名字和你像，但不是你，是别人的号：它说的话、它的状态都和你无关。"
+            f"群里的 {speaker} 名字和你像，但不是你，是别人的号：群友叫它的名字说的是它，"
+            "它说的话、它的梗和状态都和你无关，别当成你自己的。"
+        )
+    if former := "、".join(f"“{n}”" for n in _former_names()):
+        place += (
+            f"你以前用过{former}这个名字，档案和表情包备注里可能还这么叫你；"
+            "你现在是人设里的那个角色。"
         )
     return place
 
@@ -851,7 +858,21 @@ def _persona() -> tuple[str, str, list[str], bool]:
         return name, *PRESETS[name]
     if config.persona:
         return "", config.persona, config.catchphrases, True
-    return "大肥鱼", *PRESETS["大肥鱼"]
+    return _DEFAULT_NAME, *PRESETS[_DEFAULT_NAME]
+
+
+def _former_names() -> list[str]:
+    """她以前用过、现在不用的人设名字。
+
+    换人设以后，旧名字的表情包备注、档案和群友的叫法都还在，群里还可能有别人部署的旧名字的 AI
+    （2026-11：换成小埋后，她把群里“大肥鱼（AI账号）”的白饭梗、修代码当成自己的）。
+    以前换人设不记这个，存盘里没有就当是从默认的大肥鱼换过来的。
+    """
+
+    chosen = persona_store.load(default={})
+    name = _persona()[0]
+    default = [_DEFAULT_NAME] if chosen.get("name") and chosen["name"] != _DEFAULT_NAME else []
+    return [n for n in chosen.get("former", default) if n and n != name]
 
 
 def _wake_words() -> list[str]:
@@ -860,9 +881,10 @@ def _wake_words() -> list[str]:
 
 
 def _lookalike(speaker: str | None) -> bool:
-    """昵称里带唤醒词的别人的号，比如另一个叫“大肥鱼bot”的 AI。"""
+    """昵称里带唤醒词或她以前名字的别人的号，比如另一个叫“大肥鱼bot”的 AI。"""
 
-    return bool(speaker) and any(w and w in speaker.rpartition("(")[0] for w in _wake_words())
+    names = [*_wake_words(), *_former_names()]
+    return bool(speaker) and any(w and w in speaker.rpartition("(")[0] for w in names)
 
 
 def _account_label(account) -> str:
@@ -1842,7 +1864,9 @@ async def _digest(key: str, conversation: Conversation, upto: int) -> None:
             f"#{line.number} [{'你' if line.speaker is None else line.who}] {line.text}"
             for line in lines
         )
+        others = "、".join(dict.fromkeys(x.speaker for x in lines if _lookalike(x.speaker)))
         parts = [
+            *([f"不是你的号（名字像你或像你以前的名字，是别人的 AI）：{others}"] if others else []),
             f"群档案：{group or '（还没有）'}",
             "这些人现在的档案：\n" + ("\n".join(known) or "（都还没有）"),
             *([f"更早的聊天备忘：\n{conversation.summary}"] if conversation.summary else []),
@@ -2070,16 +2094,18 @@ async def manage_persona(
     if op in ("换", "改"):
         if not await require_perm(session, Permission.BotAdmin):
             return "人设是所有群共用的，只有 BOT 管理员及以上能换"
+        # 记下她以前用过的名字：群友还会按老名字叫，别人的同名 AI 也还在群里。
+        former = [n for n in dict.fromkeys([_persona()[0], *_former_names()]) if n]
         if op == "换" and name == "默认":
-            persona_store.save({})
+            persona_store.save({"former": former})
         elif op == "换" and name in PRESETS:
-            persona_store.save({"name": name})
+            persona_store.save({"name": name, "former": former})
         elif op == "换":
             return f"没有叫「{name}」的预置人设，有：{'、'.join(PRESETS)}"
         elif not name or not text:
             return "要写名字和人设，例如：/AI群友 人设 改 阿呆 你是阿呆，……"
         else:
-            persona_store.save({"name": name, "text": text})
+            persona_store.save({"name": name, "text": text, "former": former})
         now = _persona()[0] or "配置里的人设"
         return (
             f"换成{now}了，所有群都生效，叫“{now}”也算叫她。各群之前的聊天还是旧人设说的，"
