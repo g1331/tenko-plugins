@@ -371,7 +371,7 @@ def test_big_photos_are_shrunk_before_sending(chat):
     assert chat.picture_url(small.getvalue()) == chat.data_url(small.getvalue())  # 小图原样
 
 
-async def test_every_tool_call_but_silence_comes_back(module):
+async def test_every_known_tool_call_comes_back(module):
     import json
 
     import httpx
@@ -390,7 +390,11 @@ async def test_every_tool_call_but_silence_comes_back(module):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
         calls, _ = await module.llm.chat(c, model="m", messages=[], force=False, max_tokens=9)
-    assert calls == [{"name": "难绷", "tool": "delete_sticker"}, {"text": "行 删了"}]
+    assert calls == [
+        {"name": "难绷", "tool": "delete_sticker"},
+        {"tool": "stay_silent", "scene": ""},  # 不说话只带回她看到的场面，记日志用
+        {"text": "行 删了"},
+    ]
 
 
 async def test_thinking_takes_plain_content_as_what_she_says(module):
@@ -448,18 +452,24 @@ async def test_thinking_passes_back_reasoning_for_her_trailing_words(module):
 async def test_quote_marks_in_plain_content_become_reply_to(module):
     import httpx
 
-    content = "回复#12（甲说的“这图谁做的”） 笑死 做得真像\n回复#14 你那把也太菜了"
+    # 只写“#编号 ”的也算：有了 to 以后回放里见过她这么写，不认的话编号会原样发到群里
+    content = "回复#12（甲说的“这图谁做的”） 笑死 做得真像\n回复#14 你那把也太菜了\n#15 去医院"
+    thought = "乙在问甲那张图，  没人叫我"
 
     def reply(request):
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        message = {"content": content, "reasoning_content": thought}
+        return httpx.Response(200, json={"choices": [{"message": message}]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
         calls, _ = await module.llm.chat(
             c, model="m", messages=[], force=False, max_tokens=9, effort="high"
         )
+    # 直接写字时没填 scene，思考的开头就是她看到的场面，记日志用
+    scene = "（想）乙在问甲那张图， 没人叫我"
     assert calls == [
-        {"text": "笑死 做得真像", "reply_to": 12},
-        {"text": "你那把也太菜了", "reply_to": 14},
+        {"text": "笑死 做得真像", "reply_to": 12, "scene": scene},
+        {"text": "你那把也太菜了", "reply_to": 14, "scene": scene},
+        {"text": "去医院", "reply_to": 15, "scene": scene},
     ]
 
 
@@ -527,3 +537,34 @@ def test_slang_counts_short_lines_several_people_send(chat):
         conversation.add(None, speaker, text)
     conversation.add(None, None, "hyw")  # 她自己说的不算
     assert chat.slang(conversation.lines) == ["hyw"]
+
+
+def test_a_line_from_someone_chatting_with_her_is_marked_and_kept(chat):
+    conversation = chat.Conversation()
+    conversation.add("1", "甲(1)", "@你 海贼王完结了吗")
+    conversation.add("2", None, "你追到哪了")
+    conversation.add("3", "甲(1)", "第一千话").talking = True
+    text = chat.build_messages("人设", conversation, "提示")[-2]["content"]
+    # 是事实（他刚才在跟她聊）不是结论，这句接没接她让她自己看
+    assert "#3 [甲(1)]（刚才在跟你聊） 第一千话" in text
+    restored = chat.Conversation.restore(conversation.dump())
+    assert [line.talking for line in restored.lines] == [False, False, True]
+
+
+def test_unanswered_counts_her_turns_nobody_picked_up(chat):
+    conversation = chat.Conversation()
+    conversation.add("1", "甲(1)", "@你 在吗")
+    conversation.add("2", None, "在")
+    assert conversation.unanswered() == 1
+    conversation.add("3", "乙(2)", "今天好冷")
+    conversation.add("4", None, "冷就多穿点")
+    conversation.add("5", None, "[表情:发抖]")  # 连着发的算一次
+    conversation.add("6", "丙(3)", "我去吃饭了")
+    assert conversation.unanswered() == 2
+    # 引用她、@ 她，或者正跟她聊着的人接着说，都算有人接
+    conversation.add("7", "乙(2)", "回复#4（你说的“冷就多穿点”） 穿了")
+    conversation.add("8", None, "那还冷")
+    assert conversation.unanswered() == 1
+    conversation.add("9", "乙(2)", "冷啊").talking = True
+    conversation.add("10", None, "那没办法了")
+    assert conversation.unanswered() == 1

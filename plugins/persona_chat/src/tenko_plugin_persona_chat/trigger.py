@@ -14,8 +14,10 @@ from .chat import Conversation, Line
 QUICK_SECONDS = 10
 STREAK_LOOSE = 3
 STREAK_MUTE = 6
-# 精力用到这么多倍时，只提到名字的不理；@ 她、引用她的再累也回。
-TIRED_OUT = 1.5
+# 跟她聊开了的人，后面的话很少再 @：2026-11 日志里她回完之后，同一个人 3 分钟内的下一句
+# 139 句什么都不带，只有 84 句仍然 @、引用或叫她名字。所以聊开了的人接着说就当在跟她聊，
+# 直到他转去 @、引用别人，或者这么久没再开口。
+TALK_SECONDS = 300
 # 跟聊时攒够这么多条新消息才问一次模型，不是每句都接。
 FOLLOW_MIN_NEW = 2
 # 没人叫她时最多连着跟聊这么多次：她每接一句跟聊的窗口就重新计时，群友你一句我一句地聊，
@@ -26,22 +28,47 @@ SHARE_WINDOW = 20
 MAX_SHARE = 0.2
 
 
-def call_mood(*, direct: bool, streak: int, load: float) -> tuple[str, bool] | None:
+def call_mood(*, direct: bool, streak: int) -> tuple[str, bool] | None:
     """被叫到时怎么回：返回 (口气, 是否必须回)，``None`` 是这次不理。
 
     ``direct`` 是 @ 了她、引用了她或在私聊里；只提到名字的不算。``streak`` 是对方在她刚说完
-    几秒内又来叫的连续轮数，``load`` 是用掉的精力比例（1 是累了）。
+    几秒内又来叫的连续轮数，只用来防两个 bot 无限对聊。
+
+    以前还按十分钟里说了多少句算“精力”，累了就让她敷衍一句：有人认真跟她连聊二十轮，
+    聊得正好时被硬生生压短。聊不聊下去看对方还接不接，不看她自己说了几句。
     """
 
-    # @ 她、引用她时一声不吭，群里就是“似了吧”“bot是不是下播了”：再累也简短回一句。
-    # 以前到两倍连 @ 也不理：一群人轮流叫她查战绩，她刚答应“马上查”就没了声。
-    if streak >= STREAK_MUTE or not direct and load >= TIRED_OUT:
+    if streak >= STREAK_MUTE:
         return None
-    mood = "again" if streak >= STREAK_LOOSE else "tired" if load >= 1 else "call"
+    mood = "again" if streak >= STREAK_LOOSE else "call"
     # 只是提到名字：很多人自己部署了同名的 AI，“我的大肥鱼”不一定在说她，让她自己判断。
     if mood == "call" and not direct:
         mood = "named"
-    return mood, mood == "call" or mood == "tired" and direct
+    return mood, mood == "call"
+
+
+def talking(
+    partners: dict[str, float], speaker: str, now: float, *, to_her: bool, to_other: bool
+) -> bool:
+    """记下谁正在跟她聊，返回这条是不是聊开了的人没 @ 她、接着跟她说的话。
+
+    ``partners`` 是 {发言人: 上次跟她说话的时刻}，原地更新。明确叫她（@、引用、点名）的人
+    算聊开了，但那条本身走被叫的路，这里返回假；转去 @、引用别人就算聊完了。
+    """
+
+    for who, at in list(partners.items()):
+        if now - at >= TALK_SECONDS:
+            del partners[who]
+    if to_her:
+        partners[speaker] = now
+        return False
+    if to_other:
+        partners.pop(speaker, None)
+        return False
+    if speaker in partners:
+        partners[speaker] = now
+        return True
+    return False
 
 
 def answers_her(lines: Iterable[Line], *, speaker: str, text: str, typed: str, addressed: bool):

@@ -10,6 +10,18 @@ from typing import Any
 
 import httpx
 
+# 先看懂再开口：线上她常把别人两人之间的“你”当成在说她、把甲说的事安到乙头上（2026-11 日志里
+# 31 段）。看场面、决定说不说、怎么说原本挤在一步里，思考也就几十个 token。让她每次先写一句
+# 场面再写话，参数按顺序生成，写话时就有这句垫着；日志里也能看到她到底是怎么看的。
+# MaiBot 的 planner 同样先写分析、再填要回的 msg_id 和回复方向。
+SCENE = {
+    "type": "string",
+    "description": (
+        "先看懂再说，一句话，群友看不到：最新几条是谁在跟谁说什么，"
+        "有没有人在跟你说话（@你、引用你、接你刚才的话）"
+    ),
+}
+
 SEND_MESSAGE = {
     "type": "function",
     "function": {
@@ -18,6 +30,13 @@ SEND_MESSAGE = {
         "parameters": {
             "type": "object",
             "properties": {
+                "scene": SCENE,
+                "to": {
+                    "type": "integer",
+                    "description": (
+                        "这句在接哪条消息的编号，例如 3；对着大家随口说、不接哪一条就填 0"
+                    ),
+                },
                 "text": {
                     "type": "string",
                     "description": (
@@ -34,7 +53,7 @@ SEND_MESSAGE = {
                     "description": "要 @ 的人说过的某条消息编号，例如 3；不 @ 人就省略",
                 },
             },
-            "required": ["text"],
+            "required": ["scene", "to", "text"],
         },
     },
 }
@@ -45,7 +64,11 @@ STAY_SILENT = {
     "function": {
         "name": "stay_silent",
         "description": "这次不说话。",
-        "parameters": {"type": "object", "properties": {}},
+        "parameters": {
+            "type": "object",
+            "properties": {"scene": SCENE},
+            "required": ["scene"],
+        },
     },
 }
 # 和 send_message/stay_silent 一起调用；工具列表固定不变，前缀缓存才不受影响。
@@ -257,22 +280,27 @@ async def _chat(
     for call in message.get("tool_calls") or []:
         function = call.get("function") or {}
         name = function.get("name")
-        # stay_silent 没有参数要带回去；别的工具都从 TOOLS 里认，新加的工具不会被漏掉。
-        if name == "stay_silent" or name not in {t["function"]["name"] for t in TOOLS}:
+        # 工具都从 TOOLS 里认，新加的工具不会被漏掉。
+        if name not in {t["function"]["name"] for t in TOOLS}:
             continue
         try:
             arguments = json.loads(function.get("arguments") or "")
         except ValueError:
-            continue
+            arguments = {}
         if not isinstance(arguments, dict):
             continue
-        if name != "send_message":
+        if name == "stay_silent":
+            # 不说话也带回她看到的场面，只用来记日志。
+            calls.append({"tool": name, "scene": str(arguments.get("scene") or "")})
+        elif name != "send_message":
             calls.append({**arguments, "tool": name})
         elif isinstance(arguments.get("text"), str):
             calls.extend(_quoted(arguments))
     said = (message.get("content") or "").strip()
     if effort and said and not any("tool" not in c for c in calls):
-        calls.extend(_quoted({"text": said}))
+        # 思考模式下她常直接写字、不调 send_message，也就没填 scene：拿思考的开头当她看到的场面。
+        thought = " ".join((message.get("reasoning_content") or "").split())[:150]
+        calls.extend(_quoted({"text": said} | ({"scene": f"（想）{thought}"} if thought else {})))
     return calls, data.get("usage") or {}
 
 
@@ -290,8 +318,9 @@ def _with_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # 直接写字时没法填 reply_to，规则让她在那句开头写“回复#编号 ”；她偶尔照记录的格式抄成
-# “回复#12（甲说的“…”） ”，括号一起去掉。
-_QUOTE = re.compile(r"^回复#(\d+)(?:（[^\n]*?）)?\s*", re.M)
+# “回复#12（甲说的“…”） ”，括号一起去掉。有了 to 以后她还会只写“#781 ”（回放里见到），
+# 同样当成在接那条，不然编号就原样发到群里。
+_QUOTE = re.compile(r"^(?:回复)?#(\d+)(?:（[^\n]*?）)?\s*", re.M)
 
 
 def _quoted(call: dict[str, Any]) -> list[dict[str, Any]]:
@@ -307,8 +336,9 @@ def _quoted(call: dict[str, Any]) -> list[dict[str, Any]]:
     for mark, after in zip(marks, [*marks[1:], None], strict=True):
         piece = text[mark.end() : after.start() if after else len(text)].strip()
         if piece:
-            # @ 只跟着第一次，不然拆开的每次都 @ 一遍。
-            extra = {} if calls else {k: v for k, v in call.items() if k == "mention"}
+            # @ 只跟着第一次，不然拆开的每次都 @ 一遍；她看到的场面每次都带着，记日志用。
+            keep = ("scene",) if calls else ("scene", "mention")
+            extra = {k: v for k, v in call.items() if k in keep}
             calls.append({**extra, "text": piece, "reply_to": int(mark[1])})
     return calls
 

@@ -79,12 +79,14 @@ from .persona import (
     boss_hint,
     command_hint,
     habit_hint,
+    ignored_hint,
     memory_hint,
     mention_hint,
     repeat_hint,
     rules,
     search_hint,
     slang_hint,
+    talk_hint,
 )
 from .stickers import TOKEN, Stickers
 
@@ -124,9 +126,9 @@ class PersonaChatConfig(BasicConfModel):
     user_cooldown_seconds: int = 5
     """同一个人叫 bot 的最短间隔。"""
     stamina: int = 15
-    """精力：10 分钟内说这么多句、或 1 小时内说两倍这么多句就累了。用掉三分之二后不再主动开口；
-    累了以后只提到名字的由它决定理不理，到 1.5 倍不理，@ 她、引用她的照样简短回，到 2 倍才不理；
-    不说话就慢慢恢复。0 不限。"""
+    """主动开口的量：10 分钟内说这么多句、或 1 小时内说两倍这么多句，用掉三分之二后
+    不再没人叫就插话、跟聊。被叫到、和正聊着的人接着聊不受它管：聊不聊下去看对方还接不接。
+    0 不限。"""
     vision_images: int = 5
     """每次请求最多带这么多张新图，低清晰度发给模型看，每张约 190 token；0 只告诉模型“[图片]”。"""
     search_daily: int = 20
@@ -642,6 +644,16 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     # 只看亲手打的字：引用一条再 @ 她发“/撤回”，记录里开头是“回复#…”，也是命令。
     if spoken.lstrip().startswith(_command_prefixes()):
         return
+    if not private and not lookalike:
+        # 聊开了的人接着说很少再 @：记下谁在跟她聊，他接着说的话按在跟她说处理。
+        # 只发一张图、一个表情多半是他对她那句的反应，算还在聊，但不用再接。
+        line.talking = trigger.talking(
+            conversation.partners,
+            speaker,
+            time.monotonic(),
+            to_her=calling,
+            to_other=any(isinstance(e, (At, Quote)) for e in elements),
+        ) and bool(spoken.strip())
 
     if private:
         # 私聊常把一句话拆成几条连着发：等对方停下来再一起回。以前每条都算叫她，
@@ -660,6 +672,18 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         if decided := _decide_call(key, user_id, conversation, now, direct=direct):
             mood, force = decided
             await respond(session, conversation, line, force=force, mood=mood)
+    elif line.talking and not at_only:
+        # 和被叫一样记“她刚说完几秒就接”的连击：别的 bot 回得总是这么快，人不会次次都这样。
+        # 连着几轮就提醒她没新内容别回，再多就当聊完了，防两个 bot 你一句我一句停不下来。
+        streak = _quick_streak(key, user_id, conversation, time.monotonic())
+        if streak >= trigger.STREAK_MUTE:
+            conversation.partners.pop(speaker, None)
+            logger.info("AI群友在 {} 和 {} 来回太快太久，当作聊完了", key, speaker)
+            return
+        # 等他这一阵说完再接；已经有在等的（比如跟聊），到时候也先回他。
+        conversation.talk = line
+        if key not in _waiters:
+            _waiters[key] = asyncio.create_task(_wait_quiet(key, session, conversation))
     elif not lookalike and not at_only and key not in _waiters:
         now = time.monotonic()
         answered = trigger.answers_her(
@@ -900,7 +924,11 @@ async def _wait_quiet(
         while (left := conversation.last_message_at + config.quiet_seconds - time.monotonic()) > 0:
             await asyncio.sleep(left)
         if not called:
-            await respond(session, conversation, None, follow=follow, answer=answer)
+            if (talk := conversation.talk) is not None:
+                conversation.talk = None
+                await respond(session, conversation, None, answer=talk, talking=True)
+            else:
+                await respond(session, conversation, None, follow=follow, answer=answer)
             return
         # 先让出位置：回这一阵的时候对方又发来的，另起一轮等着，排在这次后面回。
         _waiters.pop(key, None)
@@ -916,6 +944,9 @@ async def _wait_quiet(
     finally:
         if _waiters.get(key) is asyncio.current_task():
             _waiters.pop(key, None)
+            # 她回话那会儿聊着的人又说了：这一轮已经过了看它的时候，另起一轮接上。
+            if conversation.talk is not None:
+                _waiters[key] = asyncio.create_task(_wait_quiet(key, session, conversation))
 
 
 def _decide_call(
@@ -923,10 +954,17 @@ def _decide_call(
 ) -> tuple[str, bool] | None:
     """被叫到时记一轮“刚说完又来叫”的连击，返回 :func:`.trigger.call_mood` 的结果。"""
 
+    streak = _quick_streak(key, user_id, conversation, now)
+    return trigger.call_mood(direct=direct, streak=streak)
+
+
+def _quick_streak(key: str, user_id: str, conversation: Conversation, now: float) -> int:
+    """记一轮对方在她刚说完几秒内又来说话的连击，返回连到第几轮；慢下来一次就清零。"""
+
     quick = now - conversation.last_reply_at < trigger.QUICK_SECONDS
     streak = _streaks.get((key, user_id), 0) + 1 if quick else 0
     _streaks[(key, user_id)] = streak
-    return trigger.call_mood(direct=direct, streak=streak, load=_load(conversation, now))
+    return streak
 
 
 def _over_budget(key: str) -> bool:
@@ -1048,6 +1086,7 @@ class _Turn:
     target: Line | None  # 叫她的那条；None 是没人叫她、她自己考虑开口
     answer: Line | None  # 跟聊时紧跟在她后面接话的那条
     follow: bool
+    talking: bool = False  # 聊开了的人没 @ 她、接着说的话
     hint: str = ""
     # 没人叫她、最新一条只是图：只许回表情包。
     pictured: bool = False
@@ -1067,21 +1106,23 @@ async def respond(
     follow: bool = False,
     mood: str = "call",
     answer: Line | None = None,
+    talking: bool = False,
 ) -> None:
     """``target`` 是叫 bot 的那条消息；为 ``None`` 时是主动说话：``follow`` 为真是跟聊
     （bot 刚说过话，``answer`` 是紧跟在她后面接话的那条），否则是累计够数后的插话。
+    ``talking`` 是聊开了的人没 @ 她、接着说的 ``answer``。
 
     ``force`` 时模型必须回复，否则由它决定说不说。一次回复分四步：拼提示（:func:`_compose`）、
     问模型（:func:`_think`）、改写（:func:`_shape`）、发出去（:func:`_deliver`）。
     """
 
-    if target is None and conversation.lock.locked():
-        return  # 已有请求在跑，这次主动插话作罢；被叫到时排队等它结束
+    if target is None and not talking and conversation.lock.locked():
+        return  # 已有请求在跑，这次主动插话作罢；被叫到、正聊着时排队等它结束
     async with conversation.lock:
         key = _key(session)
         if _over_budget(key):
             return
-        turn = _Turn(key, target, answer, follow)
+        turn = _Turn(key, target, answer, follow, talking)
         if not _compose(turn, conversation, mood):
             return
         conversation.unseen = 0
@@ -1095,6 +1136,7 @@ async def respond(
         if thought is None:
             return
         calls, conversation.usage = thought
+        _log_scene(turn, calls)
         tools = [c for c in calls if "tool" in c]
         calls = await _shape(conversation, turn, [c for c in calls if "tool" not in c])
         sent = await _deliver(session, conversation, turn, calls)
@@ -1114,6 +1156,24 @@ async def respond(
         _save()
 
 
+def _log_scene(turn: _Turn, calls: list[dict]) -> None:
+    """她这次怎么看的场面、接的是哪条：以前只看得到说了什么，认错对象时猜不出她是怎么读的。"""
+
+    talk = [c for c in calls if "tool" not in c]
+    scene = next(
+        (str(c.get("scene") or "") for c in [*talk, *calls] if str(c.get("scene") or "").strip()),
+        "",
+    )
+    to = next((c.get("to") for c in talk if c.get("to")), None)
+    said = " / ".join(str(c.get("text", "")) for c in talk)
+    logger.info(
+        "AI群友在 {} 看到：{}{}",
+        turn.key,
+        scene or "（没写）",
+        f"；接 #{to}：{said}" if to else f"；说：{said}" if said else "；不说话",
+    )
+
+
 def _log_spent(turn: _Turn, mood: str, before: list[float], sent: bool) -> None:
     """一次回复花了多少：用量账本只记每天的合计，看不出钱花在被叫、跟聊还是插话上、
     花了有没有开口。这次的差额包括挑表情包、搜索和整理记录；跨零点时只算新一天的。"""
@@ -1122,7 +1182,7 @@ def _log_spent(turn: _Turn, mood: str, before: list[float], sent: bool) -> None:
     if after[3] < before[3]:
         before = [0, 0, 0, 0.0]
     miss, hit, out, cost = (a - b for a, b in zip(after, before, strict=True))
-    why = mood if turn.target else "跟聊" if turn.follow else "插话"
+    why = mood if turn.target else "接着聊" if turn.talking else "跟聊" if turn.follow else "插话"
     logger.info(
         "AI群友在 {} {}：问了 {} 轮，未命中 {} 命中 {} 输出 {}，约 ${:.4f}，{}",
         turn.key,
@@ -1141,7 +1201,14 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
 
     key, target, answer = turn.key, turn.target, turn.answer
     if target is not None:
-        hint = mention_hint(target.number, mood, target.text, _persona()[3])
+        hint = mention_hint(target.number, mood, target.text)
+    elif answer is not None and turn.talking:
+        name = (answer.speaker or "").rpartition("(")[0] or answer.speaker or ""
+        her = next((x.text for x in reversed(conversation.lines) if x.speaker is None), "")
+        hint = talk_hint(answer.number, name, answer.text, her)
+        user_id = (answer.speaker or "").rpartition("(")[2].rstrip(")")
+        if _streaks.get((key, user_id), 0) >= trigger.STREAK_LOOSE:
+            hint += "你们已经飞快地连着来回好几轮了，他这句没有新内容就别回，调用 stay_silent。"
     elif answer is not None:
         newer = any(
             x.number > answer.number and x.speaker not in (None, _TENKO) for x in conversation.lines
@@ -1149,6 +1216,8 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
         hint = answer_hint(answer.number, answer.text, conversation.her_words_before(answer), newer)
     else:
         hint = FOLLOW_HINT if turn.follow else UNPROMPTED_HINT
+    if target is None:
+        hint += ignored_hint(conversation.unanswered())
     latest = next(
         (x for x in reversed(conversation.lines) if x.speaker not in (None, _TENKO)), None
     )
@@ -1200,7 +1269,7 @@ async def _think(
             usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
         return calls
 
-    searching = target is not None and _search_left(key)
+    searching = (target is not None or turn.talking) and _search_left(key)
     # 紧跟着她问“为啥我不能用”这类接话也能直接查，不然她只会学别的 bot 打“@Tenko 指令”。
     running = (target or answer) is not None and bool(_commands())
     try:
@@ -1309,6 +1378,15 @@ async def _deliver(
         if not pieces:
             continue
         quoted = conversation.by_number(arguments.get("reply_to"))
+        answering = conversation.by_number(arguments.get("to"))
+        if answering is not None and answering.speaker in (None, _TENKO):
+            answering = None  # 接的是她自己或功能的话
+        if answering is not None and answering.speaker not in conversation.partners:
+            # 她主动接了谁的话，对方接下来没 @ 她也可能是在回她：算聊开了，他不接就自然过期。
+            conversation.partners[answering.speaker] = time.monotonic()
+        if quoted is None and answering is not None:
+            # 她自己写明了在接哪条：那条被后面的话盖住时像真人一样引用它，群友才知道她在回谁。
+            quoted = answering
         if quoted is None and sent == 0:
             # 被叫的那条被后面的话盖住了也照样引用，不然看不出她在回谁。跟聊的 answer 不这样猜：
             # 它只是排队时紧跟在她后面的那条，等她开口时别人可能又接了她的话，

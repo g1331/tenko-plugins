@@ -22,16 +22,29 @@ def chat(module, *speakers):
     return conversation
 
 
-def test_call_mood_answers_direct_calls_even_when_tired(trigger):
-    assert trigger.call_mood(direct=True, streak=0, load=0) == ("call", True)
-    assert trigger.call_mood(direct=False, streak=0, load=0) == ("named", False)
-    # 累了：@ 她照样回（简短），只提到名字的到 1.5 倍就不理
-    assert trigger.call_mood(direct=True, streak=0, load=1.8) == ("tired", True)
-    assert trigger.call_mood(direct=False, streak=0, load=1.2) == ("tired", False)
-    assert trigger.call_mood(direct=False, streak=0, load=trigger.TIRED_OUT) is None
-    # 刚说完又来叫，连着几轮多半是别的 bot：先不强制，再多就不理
-    assert trigger.call_mood(direct=True, streak=trigger.STREAK_LOOSE, load=0) == ("again", False)
-    assert trigger.call_mood(direct=True, streak=trigger.STREAK_MUTE, load=0) is None
+def test_call_mood_does_not_depend_on_how_much_she_talked(trigger):
+    assert trigger.call_mood(direct=True, streak=0) == ("call", True)
+    assert trigger.call_mood(direct=False, streak=0) == ("named", False)
+    # 只防两个 bot 无限对聊：刚说完几秒又来叫，连着几轮后不强制、再多就不理
+    assert trigger.call_mood(direct=True, streak=trigger.STREAK_LOOSE) == ("again", False)
+    assert trigger.call_mood(direct=True, streak=trigger.STREAK_MUTE) is None
+
+
+def test_talking_follows_who_is_chatting_with_her(trigger):
+    partners = {}
+    talk = trigger.talking
+    # 没跟她说过话的人，不 @ 她就不算
+    assert not talk(partners, "甲", 0, to_her=False, to_other=False)
+    # @ 她算聊开了；那条自己走被叫的路
+    assert not talk(partners, "甲", 1, to_her=True, to_other=False) and "甲" in partners
+    # 之后不 @ 也算在跟她聊，每说一句续一次
+    assert talk(partners, "甲", 100, to_her=False, to_other=False)
+    assert talk(partners, "甲", 100 + trigger.TALK_SECONDS - 1, to_her=False, to_other=False)
+    # 转去 @、引用别人就聊完了
+    assert not talk(partners, "甲", 500, to_her=False, to_other=True) and "甲" not in partners
+    # 隔太久没说话也算聊完了
+    talk(partners, "乙", 600, to_her=True, to_other=False)
+    assert not talk(partners, "乙", 600 + trigger.TALK_SECONDS, to_her=False, to_other=False)
 
 
 def test_answers_her_only_right_after_her_and_not_to_others(module, trigger):

@@ -22,6 +22,8 @@ from .persona import RULES, SUMMARY_PROMPT
 
 GLOBAL = "*"
 _TIME_GAP = 300
+# 记录里明确冲她来的话：@ 她渲染成“@你”，引用她渲染成“回复#编号（你说的…）/（你发的…）”。
+_TO_HER = re.compile(r"@你|回复#\d+（你(?:说|发)的")
 _SENTENCE_ENDS = "。！？!?…~～"
 
 
@@ -38,6 +40,7 @@ class Line:
     sticker: tuple[str, str] | None = None  # 还没收藏的表情包：(QQ 文件名, 原地址)
     shown: bool = False  # 图已经给模型看过：之后一直带着，不存盘
     sharp: bool = False  # 叫她来看的图用高清：低清读不出密密麻麻的小字，会照样编个数出来
+    talking: bool = False  # 发言人刚才正在跟她聊、这条没 @ 也没引用别人：多半在接着跟她说
 
     @property
     def image_tokens(self) -> int:
@@ -74,6 +77,8 @@ class Conversation:
     last_unprompted_at: float = float("-inf")
     last_reply_at: float = float("-inf")
     follows: int = 0  # 上次被叫到之后，没人叫她、她自己跟着接了几次话
+    partners: dict[str, float] = field(default_factory=dict)  # 正在跟她聊的人：上次说话的时刻
+    talk: Line | None = None  # 聊开了的人接着说的、还没回的那条
     spoken: deque[float] = field(default_factory=lambda: deque(maxlen=200))  # bot 每句话的时刻
     stickers: dict[str, str] | None = None  # 表情包目录快照，压缩时换新；None 是还没拍
     usage: dict[str, Any] = field(default_factory=dict)  # 上次请求的 usage，给“上下文”命令看
@@ -239,6 +244,23 @@ class Conversation:
             and before.text.strip() == line.text.strip()
         )
 
+    def unanswered(self) -> int:
+        """她最近连着几次开口之后，都没人接她的话。
+
+        有人 @ 她、引用她，或者正跟她聊着的人接着说了话，就从那之后重新数；她连着发的几条算一次。
+        """
+
+        count, hers = 0, False
+        for line in reversed(self.lines):
+            if line.speaker is None:
+                count += not hers
+                hers = True
+                continue
+            hers = False
+            if line.talking or _TO_HER.search(line.text):
+                break
+        return count
+
     def buried(self, line: Line) -> bool:
         """``line`` 之后有没有别人说过话；没有的话回它不用引用，一看就知道在接谁。"""
 
@@ -259,6 +281,7 @@ class Conversation:
                     "text": line.text,
                     "at": line.at,
                     "role": line.role,
+                    **({"talking": True} if line.talking else {}),
                 }
                 for line in self.lines
             ],
@@ -329,7 +352,9 @@ def build_messages(
         if messages[-1]["role"] != "user":
             messages.append({"role": "user", "content": []})
         blocks = messages[-1]["content"]
-        text = f"#{line.number} [{line.who}] {line.text}"
+        # 聊开了的人接着说时很少再 @，标一句是事实（他刚才在跟她聊），这句接没接她让她自己看。
+        mark = "（刚才在跟你聊）" if line.talking else ""
+        text = f"#{line.number} [{line.who}]{mark} {line.text}"
         if gap >= _TIME_GAP:
             text = f"—— {datetime.fromtimestamp(line.at):%m-%d %H:%M} ——\n{text}"
         if blocks and blocks[-1]["type"] == "text":
