@@ -69,6 +69,25 @@ def test_she_stops_chiming_in_once_she_talks_more_than_anyone(module, trigger):
     assert trigger.chime_in(conversation, load=0.7, interval=300, **args) == (False, False)
 
 
+def test_she_is_not_the_loudest_one_without_being_called(module, trigger):
+    # 一对一聊：她总排在对方后面，连着发的几条算一次，不会比对方多
+    assert not trigger.loudest(chat(module, "甲(1)", "甲(1)", None, None, "甲(1)", None).lines)
+    # 两个人轮流逗她、她句句都接：比谁都多
+    banter = chat(module, "甲(1)", None, "乙(2)", None, "甲(1)", None, "乙(2)", None)
+    assert trigger.loudest(banter.lines)
+    # 功能结果不算群友在说话
+    assert trigger.loudest(chat(module, "甲(1)", None, "Tenko 功能", None).lines)
+
+    # 这时紧跟在她后面的话也不接，跟聊、插话也不开口，等再被叫到
+    assert banter.follows == 0
+    assert not trigger.keep_talking(banter, answered=True)
+    banter.unseen = 8
+    args = {"now": 1000.0, "answered": True, "follow_seconds": 180, "batch_size": 8}
+    assert trigger.chime_in(banter, load=0, interval=0, **args) == (False, False)
+    pair = chat(module, "甲(1)", None, "甲(1)")
+    assert trigger.keep_talking(pair, answered=True)
+
+
 def test_shaping_keeps_first_line_and_stickers(shaping):
     calls = [{"text": "第一句\n第二句", "reply_to": 3}, {"text": "再来一句"}]
     assert shaping.first_line(calls) == [{"text": "第一句", "reply_to": 3}]

@@ -530,10 +530,9 @@ async def test_follow_up_every_two_messages_until_mostly_tired(module, fake_llm,
     # bot 刚说过话：每攒两条新消息就问一次模型，不用攒够 batch_size
     for i in range(12):
         fake_llm.replies.append([{"text": f"接{i}"}])
-        # 叫她的是群友1；接话的是旁人，跟聊有上限，聊开了的人接着说另有一条路
-        await feed(
-            module, session([Text(f"那你说说{i}")], user=str(i % 3 + 10), message_id=f"f{i}")
-        )
+        # 叫她的是群友1；接话的是旁人，跟聊有上限，聊开了的人接着说另有一条路。
+        # 一直是同一个旁人：几个人轮流接、她句句回，很快就比谁说得都多，另有刹车
+        await feed(module, session([Text(f"那你说说{i}")], user="10", message_id=f"f{i}"))
         if task := module._waiters.get("group:100"):
             await task
 
@@ -549,15 +548,17 @@ async def test_follow_up_stops_after_a_few_until_called_again(module, fake_llm, 
     fake_llm.replies.append([{"text": "你追到哪了"}])
     await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
 
-    # 群友你一句我一句，每句都紧跟在她后面：没人叫她时最多跟着接三次，不然句句点评
+    # 群友每句都紧跟在她后面：没人叫她时最多跟着接三次，不然句句点评
     for i in range(6):
         fake_llm.replies.append([{"text": f"接{i}"}])
-        await feed(module, session([Text(f"那你说说{i}")], user=str(i % 2 + 2), message_id=f"f{i}"))
+        await feed(module, session([Text(f"那你说说{i}")], user="2", message_id=f"f{i}"))
         if task := module._waiters.get("group:100"):
             await task
     assert len(fake_llm.requests) == 1 + module.trigger.FOLLOW_STREAK
 
-    # 再被叫到就重新算
+    # 再被叫到就重新算；中间大家自己聊了一阵，她已经不是说得最多的
+    for i in range(12):
+        await feed(module, session([Text(f"闲聊{i}")], user=str(i % 2 + 7), message_id=f"g{i}"))
     fake_llm.replies.append([{"text": "咋"}])
     await feed(module, session([At("42"), Text(" 你说呢")], user="5", message_id="m9"))
     fake_llm.replies.append([{"text": "嗯"}])
@@ -1825,6 +1826,7 @@ async def test_she_hears_when_nobody_picked_up_what_she_said(module, fake_llm, m
     monkeypatch.setattr(module.config, "batch_size", 2)
     monkeypatch.setattr(module.config, "unprompted_interval_seconds", 0)
     conversation = module._conversation("group:100")
+    conversation.add("0", "群友7(7)", "种地好玩吗")
     conversation.add("a", None, "星露谷的牛会叫")
     conversation.add("b", "群友7(7)", "哎")
     conversation.add("c", None, "MC 的牛只会撞人")
@@ -1879,3 +1881,4 @@ async def test_an_ai_with_her_former_name_is_not_her(module, fake_llm, monkeypat
     place = module.conversations["group:100"].place
     assert "群里的 大肥鱼（AI账号）(9) 名字和你像，但不是你" in place
     assert "你以前用过“阿呆”、“大肥鱼”这个名字" in place
+

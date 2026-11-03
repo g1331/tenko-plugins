@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
-from itertools import islice, pairwise
+from itertools import groupby, islice, pairwise
 
 from .chat import Conversation, Line
 
@@ -26,6 +27,8 @@ FOLLOW_STREAK = 3
 # 日志里最活跃的群友大约说两成的话；最近 20 条里她开口（连着几条算一次）超过这个比例就不插嘴。
 SHARE_WINDOW = 20
 MAX_SHARE = 0.2
+# 插件发的功能结果不是群友在说话，不算谁说得多。
+_TENKO = "Tenko 功能"
 
 
 def call_mood(*, direct: bool, streak: int) -> tuple[str, bool] | None:
@@ -103,6 +106,22 @@ def talks_too_much(lines: Iterable[Line]) -> bool:
     return turns > SHARE_WINDOW * MAX_SHARE
 
 
+def loudest(lines: Iterable[Line]) -> bool:
+    """最近的话里她开口的次数比哪个群友都多：没人叫她时就别再接了。
+
+    一个人连着发几条算一次。一对一聊天她总是排在对方后面，不会比对方多；几个人轮流逗她、
+    她句句都接时才会这样。11-03 两个群里各有两三个人跟她聊开了，每人没 @ 的话都当成在跟她说，
+    她五分钟开口十几次，比谁都多。那时几乎每句都紧跟在她后面，所以这条不管是不是紧跟在她后面都看。
+    """
+
+    lines = list(lines)
+    recent = lines[max(len(lines) - SHARE_WINDOW - 1, 0) :]
+    turns = Counter(speaker for speaker, _ in groupby(x.speaker for x in recent))
+    her = turns.pop(None, 0)
+    turns.pop(_TENKO, None)
+    return her > max(turns.values(), default=0)
+
+
 def keep_talking(conversation: Conversation, *, answered: bool) -> bool:
     """聊开了的人没 @ 她接着说时，要不要问模型：和跟聊用同一套刹车。
 
@@ -111,8 +130,10 @@ def keep_talking(conversation: Conversation, *, answered: bool) -> bool:
     11-03 有人隔两分钟刷一次别的 bot 的查服命令，每条都当成在跟她聊，她十二分钟里开口九次。
     """
 
-    return conversation.follows < FOLLOW_STREAK and (
-        answered or not talks_too_much(conversation.lines)
+    return (
+        conversation.follows < FOLLOW_STREAK
+        and not loudest(conversation.lines)
+        and (answered or not talks_too_much(conversation.lines))
     )
 
 
@@ -131,8 +152,8 @@ def chime_in(
     跟聊是她刚说过话、大家还在接着聊；插话是没在聊天时群里攒够了 ``batch_size`` 条新消息。
     """
 
-    # 精力用掉三分之二后不再主动开口，只在被叫到时说话。
-    fresh = load * 3 < 2
+    # 精力用掉三分之二后、或者最近她比谁说得都多时，不再主动开口，只在被叫到时说话。
+    fresh = load * 3 < 2 and not loudest(conversation.lines)
     quiet = talks_too_much(conversation.lines)
     follow = (
         fresh
