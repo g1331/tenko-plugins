@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import time
@@ -1420,13 +1421,13 @@ async def test_called_bot_runs_a_listed_command_and_answers_from_the_result(
     (first, first_force), (second, _) = fake_llm.requests
     assert not first_force and fake_llm.commands()["bf1s"] in first[2]["content"]
     assert "你刚用了“bf1s SHlSAN13”，结果已经发到群里" in second[-1]["content"]
-    assert "这是 群友1(1) 叫你查的" in second[-1]["content"]  # 帮别人查时别说成是对方的
+    assert "这是替 #1 群友1 查的" in second[-1]["content"]  # 帮别人查时别说成是对方的
     # 结果原样发到群里、带着图记进记录，她回话在后面
     assert [call.args[0] for call in s.send.await_args_list][0][0].text.startswith("SHlSAN13")
     result = module.conversations["group:100"].lines[1]
     assert (
         result.speaker == "Tenko 功能"
-        and result.text == "（你用“bf1s SHlSAN13”查的）SHlSAN13 的战地一战绩[图片]"
+        and result.text == "（你替 #1 群友1 用“bf1s SHlSAN13”查的）SHlSAN13 的战地一战绩[图片]"
     )
     assert result.sharp and result.pictures[0].startswith("data:image/jpeg")
     assert module.conversations["group:100"].lines[2].text == "KD 挺高啊"
@@ -1459,7 +1460,50 @@ async def test_a_slow_send_receipt_does_not_cut_her_off(module, fake_llm, comman
 
     # 结果图多半已经送达：照样记下、接着说话，不然她一声不吭、下次又查一遍
     texts = [line.text for line in module.conversations["group:100"].lines]
-    assert texts[1:] == ["（你用“bf1s SHlSAN13”查的）SHlSAN13 的战地一战绩[图片]", "KD 挺高啊"]
+    assert texts[1:] == [
+        "（你替 #1 群友1 用“bf1s SHlSAN13”查的）SHlSAN13 的战地一战绩[图片]",
+        "KD 挺高啊",
+    ]
+
+
+async def test_a_result_names_who_it_was_for_when_someone_else_asks_meanwhile(
+    module, fake_llm, commands, monkeypatch
+):
+    """两个人前后脚叫她占卜：第二个人的消息在她查第一个时进来，结果排在第二个人后面。
+    记录里不写替谁查的，她把第一个人的牌当成第二个人的点评，轮到第二个人时又说“不是你抽的”不给抽。"""
+
+    fake_llm.replies += [
+        [{"tool": "run_command", "command": "/bf1s"}],
+        [{"text": "这牌挺顺"}],
+        [{"tool": "run_command", "command": "/bf1s"}],
+        [{"text": "你这张也不错"}],
+    ]
+    run = module.execute
+    pending = []
+
+    async def execute(text, session):
+        if not pending:
+            pending.append(asyncio.create_task(feed(module, second)))
+            await asyncio.sleep(0)  # 第二个人的消息在查的时候进了记录
+        return await run(text, session)
+
+    monkeypatch.setattr(module, "execute", execute)
+    second = session([At("42"), Text(" 占卜")], user="2", message_id="m2")
+    await feed(module, session([At("42"), Text(" 占卜")], message_id="m1"))
+    await pending[0]
+
+    lines = list(module.conversations["group:100"].lines)
+    assert [(x.speaker, x.text) for x in lines[:3]] == [
+        ("群友1(1)", "@你 占卜"),
+        ("群友2(2)", "@你 占卜"),
+        ("Tenko 功能", "（你替 #1 群友1 用“bf1s”查的）SHlSAN13 的战地一战绩[图片]"),
+    ]
+    assert (
+        "这是替 #1 群友1 查的，记录里排在它前面的别人的消息跟它无关"
+        in (fake_llm.requests[1][0][-1]["content"])
+    )
+    assert commands == ["/bf1s", "/bf1s"]
+    assert lines[-2].text == "（你替 #2 群友2 用“bf1s”查的）SHlSAN13 的战地一战绩[图片]"
 
 
 async def test_unlisted_command_is_not_run(module, fake_llm, commands):

@@ -791,9 +791,10 @@ def _fresh(session: Session, text: str) -> Session:
 
 
 async def _run_command(
-    session: Session, conversation: Conversation, text: str, asker: str | None
+    session: Session, conversation: Conversation, text: str, asker: Line | None
 ) -> str:
-    """以叫她的人的身份执行，宿主的开关、限流和权限照常生效；结果发到群里、记进记录。
+    """以叫她的人（``asker`` 那条）的身份执行，宿主的开关、限流和权限照常生效；
+    结果发到群里、记进记录。
 
     返回给模型的提示。
     """
@@ -811,8 +812,13 @@ async def _run_command(
     else:
         result = None  # 编出来的或没列出来的命令不执行
     logger.info("AI群友执行命令“{}”：{}", text, "有结果" if result else "没结果")
+    who = (
+        f"#{asker.number} {(asker.speaker or '').rpartition('(')[0] or asker.speaker}"
+        if asker is not None
+        else None
+    )
     if not result:
-        return command_hint(text, False, asker)
+        return command_hint(text, False, who)
     token = _speaking.set(True)  # 自己记，带上图给她看，不走 on_sent 的截断和“[图片]”
     try:
         receipts = await _send(session, result)
@@ -822,10 +828,13 @@ async def _run_command(
     images = tuple(e.src for e in elements if isinstance(e, Image) and e.src)
     # 记下查的是什么：结果常只有一张图，“查了谁”只在这次的提示里，过后她只能按位置猜，
     # 把查 YueMaT 的图当成紧挨着的上一条“查一下Alan_Mikasa_999”的，还说“刚查过了”。
+    # 替谁查的也写上：占卜、抽老婆这类命令里没有名字，查的时候又有人来叫她，结果排在
+    # 后来那人的消息后面，她就当成是后来那人的，轮到后来那人时还说“刚抽过了”不给抽。
+    by = f"替 {who} " if who else ""
     line = conversation.add(
         receipts[0].id if receipts else None,
         _TENKO,
-        f"（你用“{text}”查的）" + " ".join(_plain(elements).split())[:_COMMAND_CHARS],
+        f"（你{by}用“{text}”查的）" + " ".join(_plain(elements).split())[:_COMMAND_CHARS],
         images,
         counted=False,
     )
@@ -835,7 +844,7 @@ async def _run_command(
         line.pictures = [
             p for src in images if (p := picture_url(base64.b64decode(src.partition(",")[2])))
         ]
-    return command_hint(text, True, asker)
+    return command_hint(text, True, who)
 
 
 async def _send(session: Session, content) -> list:
@@ -1314,8 +1323,7 @@ async def _think(
         if searching and query.strip():
             found.append(search_hint(query, await _search(key, query)))
         if running and ran.strip():
-            asker = (target or answer).speaker  # running 时两者必有其一
-            found.append(await _run_command(session, conversation, ran, asker))
+            found.append(await _run_command(session, conversation, ran, target or answer))
         turn.searched = bool(found)
         turn.commanded = running and bool(ran.strip())
         again = None

@@ -424,7 +424,8 @@ def search_hint(query: str, results: str) -> str:
 def command_hint(command: str, found: bool, asker: str | None = None) -> str:
     """她用了功能：结果已经发到群里、记在记录最后，这里只告诉她怎么接。
 
-    ``asker`` 是叫她查的人：常有人帮别人查，她会把结果说成是对方自己的。
+    ``asker`` 是叫她查的那条，如“#12 小明”：常有人帮别人查，她会把结果说成是对方自己的；
+    查的时候又有人来叫她，结果排在那人的消息后面，她会当成是那人的。
     """
 
     if not found:
@@ -433,8 +434,8 @@ def command_hint(command: str, found: bool, asker: str | None = None) -> str:
             "现在回复，可以说没查到、问问对方是不是名字打错了，别编结果；不要再调用 run_command。"
         )
     whose = (
-        f"这是 {asker} 叫你查的，但查的是命令里那个名字：和 {asker} 的昵称对不上时就是在查别人，"
-        "说结果时别说成“你”的，要说“他”或者直接说名字。"
+        f"这是替 {asker} 查的，记录里排在它前面的别人的消息跟它无关。"
+        "命令里写了别人的名字就是在查那个人，说结果时别说成“你”的，要说“他”或者直接说名字。"
         if asker
         else ""
     )
