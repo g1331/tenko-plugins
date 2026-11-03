@@ -561,10 +561,11 @@ def test_unanswered_counts_her_turns_nobody_picked_up(chat):
     conversation.add("5", None, "[表情:发抖]")  # 连着发的算一次
     conversation.add("6", "丙(3)", "我去吃饭了")
     assert conversation.unanswered() == 2
-    # 引用她、@ 她，或者正跟她聊着的人接着说，都算有人接
+    # 引用她、@ 她算有人接
     conversation.add("7", "乙(2)", "回复#4（你说的“冷就多穿点”） 穿了")
     conversation.add("8", None, "那还冷")
     assert conversation.unanswered() == 1
-    conversation.add("9", "乙(2)", "冷啊").talking = True
-    conversation.add("10", None, "那没办法了")
-    assert conversation.unanswered() == 1
+    # 聊开了的人没 @ 她接着说只是插件的猜测，不算：他可能在刷别的 bot 的命令
+    conversation.add("9", "乙(2)", "*pl 3").talking = True
+    conversation.add("10", None, "又刷")
+    assert conversation.unanswered() == 2

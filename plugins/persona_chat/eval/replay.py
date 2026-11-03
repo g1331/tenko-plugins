@@ -38,7 +38,7 @@ class Scene:
     id: str
     key: str  # "group:群号"
     cut: int  # 回放到这条（含）为止，这条就是触发的那条
-    kind: str  # call / named / answer / follow / cold
+    kind: str  # call / named / answer / talk / follow / cold
     tags: list[str] = field(default_factory=list)
 
 
@@ -251,6 +251,10 @@ class Host:
             await m.respond(session, conversation, target, mood="named")
         elif scene.kind == "answer":
             await m.respond(session, conversation, None, follow=True, answer=target)
+        elif scene.kind == "talk":
+            # 聊开了的人没 @ 她接着说的那条
+            target.talking = True
+            await m.respond(session, conversation, None, answer=target, talking=True)
         else:
             await m.respond(session, conversation, None, follow=scene.kind == "follow")
         hers = [x for x in conversation.lines if x.number > scene.cut and x.speaker is None]

@@ -693,6 +693,14 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             conversation.partners.pop(speaker, None)
             logger.info("AI群友在 {} 和 {} 来回太快太久，当作聊完了", key, speaker)
             return
+        answered = trigger.answers_her(
+            conversation.lines, speaker=speaker, text=text, typed=spoken, addressed=False
+        )
+        if not trigger.keep_talking(conversation, answered=answered):
+            conversation.partners.pop(speaker, None)
+            line.talking = False
+            logger.info("AI群友在 {} 没人叫着接了好几句或说得太多，不再接 {}", key, speaker)
+            return
         # 等他这一阵说完再接；已经有在等的（比如跟聊），到时候也先回他。
         conversation.talk = line
         if key not in _waiters:
@@ -1181,6 +1189,8 @@ async def respond(
         calls, conversation.usage = thought
         _log_scene(turn, calls)
         tools = [c for c in calls if "tool" in c]
+        if talking and answer is not None:
+            _settle_talk(key, conversation, answer, [c for c in calls if "tool" not in c])
         calls = await _shape(conversation, turn, [c for c in calls if "tool" not in c])
         sent = await _deliver(session, conversation, turn, calls)
         await _use_tools(conversation, turn, tools, calls)
@@ -1188,7 +1198,8 @@ async def respond(
             logger.info("AI群友在 {} 想说的话全被丢掉了：{}", key, [c["text"] for c in calls])
         if sent:
             conversation.last_reply_at = time.monotonic()
-            conversation.follows = conversation.follows + 1 if follow else 0
+            # 跟聊和接着聊都是没人叫她、自己接的话，共用一个上限；被叫到才重新算。
+            conversation.follows = conversation.follows + 1 if follow or talking else 0
         if target is None and sent and not follow:
             conversation.last_unprompted_at = time.monotonic()
         prompt_tokens = conversation.usage.get("prompt_tokens", 0)
@@ -1197,6 +1208,28 @@ async def respond(
         _log_spent(turn, mood, before, sent)
         _changed(key)
         _save()
+
+
+def _settle_talk(key: str, conversation: Conversation, answer: Line, said: list[dict]) -> None:
+    """接着聊时由她判断这句是不是在跟她说：没开口，或者写明接的是别人的话，就当聊完了。
+
+    插件只认得出 @、引用、点名，聊开了的人后面没 @ 的话是不是冲她来的，她看得比插件准：
+    11-03 有人在她接过一句后隔两分钟刷一次别的 bot 的命令，她自己写“他这句是刷命令”，
+    插件却一直把他当成在跟她聊。没写接哪条（思考模式下直接写字）的，当作在接他。
+    """
+
+    speaker = answer.speaker
+    for call in said:
+        to = call.get("to")
+        if to is None:
+            to = call.get("reply_to")
+        if to is None:
+            return
+        line = conversation.by_number(to)
+        if line is not None and line.speaker == speaker:
+            return
+    if conversation.partners.pop(speaker, None) is not None:
+        logger.info("AI群友在 {} 没接 {} 这句，当作和他聊完了", key, speaker)
 
 
 def _log_scene(turn: _Turn, calls: list[dict]) -> None:
@@ -1423,9 +1456,6 @@ async def _deliver(
         answering = conversation.by_number(arguments.get("to"))
         if answering is not None and answering.speaker in (None, _TENKO):
             answering = None  # 接的是她自己或功能的话
-        if answering is not None and answering.speaker not in conversation.partners:
-            # 她主动接了谁的话，对方接下来没 @ 她也可能是在回她：算聊开了，他不接就自然过期。
-            conversation.partners[answering.speaker] = time.monotonic()
         if quoted is None and answering is not None:
             # 她自己写明了在接哪条：那条被后面的话盖住时像真人一样引用它，群友才知道她在回谁。
             quoted = answering

@@ -247,7 +247,8 @@ class Conversation:
     def unanswered(self) -> int:
         """她最近连着几次开口之后，都没人接她的话。
 
-        有人 @ 她、引用她，或者正跟她聊着的人接着说了话，就从那之后重新数；她连着发的几条算一次。
+        有人 @ 她、引用她，就从那之后重新数；她连着发的几条算一次。正跟她聊着的人没 @ 她接着说的
+        不算：那只是插件的猜测，他刷别的 bot 的命令也会被这样标上，被晾着的提醒就一直出不来。
         """
 
         count, hers = 0, False
@@ -257,7 +258,7 @@ class Conversation:
                 hers = True
                 continue
             hers = False
-            if line.talking or _TO_HER.search(line.text):
+            if _TO_HER.search(line.text):
                 break
         return count
 

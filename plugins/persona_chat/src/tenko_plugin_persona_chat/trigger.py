@@ -52,8 +52,9 @@ def talking(
 ) -> bool:
     """记下谁正在跟她聊，返回这条是不是聊开了的人没 @ 她、接着跟她说的话。
 
-    ``partners`` 是 {发言人: 上次跟她说话的时刻}，原地更新。明确叫她（@、引用、点名）的人
-    算聊开了，但那条本身走被叫的路，这里返回假；转去 @、引用别人就算聊完了。
+    ``partners`` 是 {发言人: 上次跟她说话的时刻}，原地更新。只有明确叫她（@、引用、点名）
+    才算聊开了，但那条本身走被叫的路，这里返回假；转去 @、引用别人就算聊完了。
+    她接着聊时没接他的话，调用方也会把他移出去。
     """
 
     for who, at in list(partners.items()):
@@ -100,6 +101,19 @@ def talks_too_much(lines: Iterable[Line]) -> bool:
     recent = lines[max(len(lines) - SHARE_WINDOW - 1, 0) :]
     turns = sum(b.speaker is None and a.speaker is not None for a, b in pairwise(recent))
     return turns > SHARE_WINDOW * MAX_SHARE
+
+
+def keep_talking(conversation: Conversation, *, answered: bool) -> bool:
+    """聊开了的人没 @ 她接着说时，要不要问模型：和跟聊用同一套刹车。
+
+    没人叫她、自己接着聊满 ``FOLLOW_STREAK`` 次就停，等再被叫到；这句不是紧跟在她后面
+    （``answered`` 为假）、她最近又说得比最活跃的群友还多，也不接。以前这条路不设限，
+    11-03 有人隔两分钟刷一次别的 bot 的查服命令，每条都当成在跟她聊，她十二分钟里开口九次。
+    """
+
+    return conversation.follows < FOLLOW_STREAK and (
+        answered or not talks_too_much(conversation.lines)
+    )
 
 
 def chime_in(

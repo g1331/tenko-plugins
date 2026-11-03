@@ -1723,14 +1723,14 @@ async def test_someone_chatting_with_her_needs_no_at_to_keep_talking(module, fak
     fake_llm.replies.append([{"scene": "群友1问我海贼王", "to": 1, "text": "你追到哪了"}])
     await feed(module, session([At("42"), Text(" 海贼王完结了吗")], message_id="m0"))
 
-    # 聊开了以后不再 @：照样当成在跟她聊，不受跟聊上限和精力限制，也不强制她回
-    for i, said in enumerate(["第一千话", "你呢", "最近剧情好燃"]):
+    # 聊开了以后不再 @：照样问她，但只摆事实，是不是冲她来的让她自己看，也不强制她回
+    for i, said in enumerate(["第一千话", "你呢"]):
         fake_llm.replies.append([{"text": f"接{i}"}])
         await feed(module, session([Text(said)], message_id=f"t{i}"))
         await module._waiters["group:100"]
         hint = fake_llm.requests[-1][0][-1]["content"]
-        assert f"群友1 刚才在跟你聊，这句没 @ 你：“{said}”" in hint
-        assert not fake_llm.requests[-1][1]
+        assert f"群友1 刚才在跟你聊，这句没 @ 你、也没引用谁：“{said}”" in hint
+        assert "多半" not in hint and not fake_llm.requests[-1][1]
     lines = module.conversations["group:100"].lines
     assert lines[-2].talking and "（刚才在跟你聊）" in fake_llm.requests[-1][0][-2]["content"]
 
@@ -1742,7 +1742,63 @@ async def test_someone_chatting_with_her_needs_no_at_to_keep_talking(module, fak
     assert all("刚才在跟你聊" not in m[-1]["content"] for m, _ in fake_llm.requests[count:])
 
 
-async def test_answering_someone_lets_them_reply_without_at(module, fake_llm, monkeypatch):
+async def test_talking_without_being_called_has_the_follow_cap(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "quiet_seconds", 0.01)
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="c0"))
+    # 没人叫她、自己接着聊和跟聊共用一个上限：接满了就不再问，等再被叫到
+    for i in range(module.trigger.FOLLOW_STREAK):
+        fake_llm.replies.append([{"text": f"嗯{i}"}])
+        await feed(module, session([Text(f"说{i}")], message_id=f"c{i + 1}"))
+        await module._waiters["group:100"]
+    count = len(fake_llm.requests)
+    await feed(module, session([Text("还有")], message_id="c9"))
+    assert "group:100" not in module._waiters and len(fake_llm.requests) == count
+    conversation = module.conversations["group:100"]
+    assert not conversation.lines[-1].talking and "群友1(1)" not in conversation.partners
+
+    # 再被叫到就重新算
+    fake_llm.replies.append([{"text": "咋了"}])
+    await feed(module, session([At("42"), Text(" 喂")], message_id="c10"))
+    assert conversation.follows == 0 and "群友1(1)" in conversation.partners
+
+
+async def test_she_ends_the_talk_when_she_does_not_take_it(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "quiet_seconds", 0.01)
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="d0"))
+    conversation = module.conversations["group:100"]
+    # 他接着发的是别的 bot 的命令，她看出来不是冲她的、不说话：插件就当这段聊完了
+    await feed(module, session([Text("*pl 3")], message_id="d1"))
+    await module._waiters["group:100"]
+    assert "群友1(1)" not in conversation.partners
+    count = len(fake_llm.requests)
+    await feed(module, session([Text("*pl 3")], message_id="d2"))
+    assert not conversation.lines[-1].talking
+    assert all("刚才在跟你聊" not in m[-1]["content"] for m, _ in fake_llm.requests[count:])
+
+    # 她开口了，但写明接的是别人的话：也算聊完了
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="d3"))
+    await feed(module, session([Text("今天真冷")], user="6", message_id="d4"))
+    other = conversation.lines[-1].number
+    fake_llm.replies.append([{"to": other, "text": "是挺冷"}])
+    await feed(module, session([Text("吃了吗")], message_id="d5"))
+    await module._waiters["group:100"]
+    assert "群友1(1)" not in conversation.partners
+
+    # 接的是他的话，或者没写接哪条（思考模式下直接写字），就还在聊
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="d6"))
+    fake_llm.replies.append([{"text": "吃了"}])
+    await feed(module, session([Text("吃了吗")], message_id="d7"))
+    await module._waiters["group:100"]
+    assert "群友1(1)" in conversation.partners
+
+
+async def test_answering_someone_does_not_start_a_talk(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "quiet_seconds", 0.01)
     monkeypatch.setattr(module.config, "batch_size", 2)
     monkeypatch.setattr(module.config, "unprompted_interval_seconds", 0)
@@ -1755,11 +1811,13 @@ async def test_answering_someone_lets_them_reply_without_at(module, fake_llm, mo
     sent = s.send.call_args_list[-1].args[0]
     assert isinstance(sent[0], Quote) and sent[0].id == "q1"
 
-    # 群友5 不 @ 她接着说：算聊开了
+    # 她插话接了谁不算聊开：群友5 紧跟着说的按跟聊处理，提醒她不一定是对她说的
     fake_llm.replies.append([{"text": "牛也好养"}])
     await feed(module, session([Text("你养牛吗")], user="5", message_id="q3"))
     await module._waiters["group:100"]
-    assert "群友5 刚才在跟你聊" in fake_llm.requests[-1][0][-1]["content"]
+    hint = fake_llm.requests[-1][0][-1]["content"]
+    assert "紧跟在你后面说：“你养牛吗”" in hint and "刚才在跟你聊" not in hint
+    assert "群友5(5)" not in module.conversations["group:100"].partners
 
 
 async def test_she_hears_when_nobody_picked_up_what_she_said(module, fake_llm, monkeypatch):
@@ -1774,7 +1832,7 @@ async def test_she_hears_when_nobody_picked_up_what_she_said(module, fake_llm, m
     await feed(module, session([Text("确实")], user="9", message_id="z2"))
     await module._waiters["group:100"]
     hint = fake_llm.requests[-1][0][-1]["content"]
-    assert "你最近连着 2 次开口，之后都没人 @ 你、引用你，也没有正跟你聊的人接着说" in hint
+    assert "你最近连着 2 次开口，之后都没人 @ 你、引用你。" in hint
 
 
 async def test_a_bot_answering_within_seconds_cannot_keep_her_talking(
@@ -1784,15 +1842,17 @@ async def test_a_bot_answering_within_seconds_cannot_keep_her_talking(
     fake_llm.replies.append([{"text": "在"}])
     await feed(module, session([At("42"), Text(" 在吗")], user="9", message_id="b0"))
 
-    # 别的 bot 不 @ 她、每次都在她刚说完几秒内接：连着几轮就提醒她别回，再多就当聊完了
+    # 别的 bot 不 @ 她、每次都在她刚说完几秒内接：连着几轮就提醒她别回，到了上限就当聊完了
     for i in range(1, 8):
         fake_llm.replies.append([{"text": f"嗯{i}"}])
         await feed(module, session([Text(f"诶{i}")], user="9", message_id=f"b{i}"))
         if task := module._waiters.get("group:100"):
             await task
     hints = [m[-1]["content"] for m, _ in fake_llm.requests[1:]]
-    assert len(hints) == module.trigger.STREAK_MUTE - 1
-    assert "飞快地连着来回好几轮" not in hints[0] and "飞快地连着来回好几轮" in hints[-1]
+    limit = min(module.trigger.FOLLOW_STREAK, module.trigger.STREAK_MUTE - 1)
+    assert len(hints) == limit
+    loose = module.trigger.STREAK_LOOSE
+    assert all(("飞快地连着来回好几轮" in h) == (n >= loose) for n, h in enumerate(hints, 1))
     assert "群友9(9)" not in module.conversations["group:100"].partners
 
 
