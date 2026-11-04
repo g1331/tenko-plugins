@@ -695,7 +695,7 @@ class UsageBook:
             usage.get("completion_tokens", 0),
             cost,
         )
-        for name in (GLOBAL, key):
+        for name in dict.fromkeys((GLOBAL, key)):  # 记到合计里的不重复记
             row = today.setdefault(name, [0, 0, 0, 0.0])
             today[name] = [a + b for a, b in zip(row, delta, strict=True)]
         oldest = (day - timedelta(days=6)).isoformat()

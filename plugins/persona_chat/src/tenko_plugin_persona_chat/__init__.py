@@ -17,7 +17,7 @@ import random
 import re
 import time
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import datetime, timedelta
 from importlib.metadata import entry_points
 from itertools import islice
 
@@ -31,6 +31,7 @@ from arclet.entari import (
     Session,
     command,
     plugin,
+    scheduler,
 )
 from arclet.entari.command import Query, execute
 from arclet.entari.config import EntariConfig, config_model_validate, model_field
@@ -38,7 +39,7 @@ from arclet.entari.plugin import collect_disposes, get_plugin_commands, get_plug
 from loguru import logger
 from satori import At, Author, Emoji, Image, Quote, Text
 from satori.element import Message
-from satori.model import MessageObject
+from satori.model import Event, MessageObject
 from tenko_api.accounts import accounts_for_group, online_accounts
 from tenko_api.features import declare, feature_required
 from tenko_api.messages import report_error
@@ -46,7 +47,7 @@ from tenko_api.perm import Permission, get_user_perm, require_perm
 from tenko_api.sandbox import in_sandbox
 from tenko_api.storage import Store
 
-from . import llm, shaping, trigger, websearch
+from . import llm, reminders, shaping, trigger, websearch
 from .chat import (
     GLOBAL,
     Conversation,
@@ -72,8 +73,10 @@ from .persona import (
     PICK_STICKER_PROMPT,
     PICTURE_HINT,
     PRESETS,
+    REMIND_NUDGE,
     RULE_LINES,
     SHORT_HINT,
+    SPLIT_PROMPT,
     UNPROMPTED_HINT,
     answer_hint,
     boss_hint,
@@ -82,6 +85,8 @@ from .persona import (
     ignored_hint,
     memory_hint,
     mention_hint,
+    pending_hint,
+    remind_hint,
     repeat_hint,
     rules,
     search_hint,
@@ -213,20 +218,37 @@ class _Call:
 _calls: dict[tuple[str, str], _Call] = {}
 # 她想过的每个人的话到哪条为止：{(会话, 发言人): 编号}。重想时合进去的话不再单独回一次。
 _considered: dict[tuple[str, str | None], int] = {}
-# 她攒下的档案：{"people": {QQ号: {"name", "note"}}, "groups": {会话: {"note", "upto"}}}。
-# 人所有群共用，群各一份；群里比上次整理多出 _DIGEST_EVERY 条就在后台让模型整理一次，
-# upto 是整理到的编号。私聊不整理，只看对方的档案。
-memory_store = Store("memory", version=1)
+# 她攒下的档案：{"people": {QQ号: {"name", "note", "groups": {会话: 本群那层}}},
+# "groups": {会话: {"note", "upto"}}}。人物档案分两层：note 所有群和私聊都看得到，只记称呼、
+# 身份、游戏 ID 这类到哪儿说都不难堪的；groups 里是他在那个群说的自己的事、答应他的事，
+# 只在那个群看得到。群档案每群一份；群里比上次整理多出 _DIGEST_EVERY 条就在后台让模型整理一次，
+# upto 是整理到的编号。私聊不整理，只看对方的 note。
+# v1 的人物档案不分群：升级时原样挪进 legacy，后台再让模型拆成两层（见 _split_legacy）。
+
+
+def _memory_v2(version: int, data: dict) -> dict:
+    for person in data.get("people", {}).values():
+        person["legacy"], person["note"] = person.get("note", ""), ""
+        person["groups"] = {}
+    return data
+
+
+memory_store = Store("memory", version=2, migrate=_memory_v2)
 # 用命令换的人设，所有群共用：{"name": 预置人设名} 或 {"name": 名字, "text": 自定义人设}；
 # 空的用配置里的。
 persona_store = Store("persona", version=1)
 _DEFAULT_NAME = "大肥鱼"  # 没选人设、配置里也没写时用的预置人设
 # 群管理用命令打开“只回 @”的群：[会话, …]。这些群里只有 @ 她才回，不认唤醒词和引用，也不主动插话。
 at_only_store = Store("at_only", version=1)
+# 她答应到点做的事，见 reminders 模块；到点没群友消息可接，靠登记时存下的原始事件重建会话发出去。
+reminder_book = reminders.Reminders(Store("reminders", version=1))
+_reminding: set[int] = set()  # 正在到点开口的提醒，别被下一轮检查再拿一次
 _digests: dict[str, asyncio.Task[None]] = {}
 _DIGEST_EVERY = 60
 _DIGEST_LINES = 300  # 第一次整理时最多读最近这么多条，旧的靠备忘
-_PERSON_CHARS = 200  # 要求 80 字，超出太多就截断
+_PERSON_CHARS = 200  # 本群那层要求 80 字，超出太多就截断
+_COMMON_CHARS = 200  # 共用那层要求 40 字，模型常写长；截断只兜底，别把一句话截一半
+_SPLIT_BATCH = 10  # 旧档案每分钟拆这么多个
 _GROUP_CHARS = 600
 _MEMORY_LINES = 40  # 最近这么多条里说过话的人才带上档案
 _reported: set[int] = set()
@@ -245,8 +267,7 @@ _MAX_BUBBLES = 2
 _STICKER_SCORE = 4
 _STICKER_SURE = 5
 _STICKER_MAYBE = 1 / 3
-_STICKERS_DONE = "表情包已经处理好了，这次只说话。"
-_STICKER_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker")
+_STICKERS_DONE = "表情包、提醒已经处理好了，这次只说话。"
 # 群友口头叫她删表情包：bot主人、bot管理员叫的照删，别人叫的每个群每天最多删这么几张，
 # 免得被起哄把所有群共用的收藏删光。
 _DELETES_PER_DAY = 3
@@ -281,7 +302,8 @@ if not config.api_key:
 
 async def _dispose() -> None:
     calls = [c.task for c in _calls.values() if c.task is not None]
-    for task in [*_waiters.values(), *_digests.values(), *calls]:
+    splitting = [_splitting] if _splitting is not None else []
+    for task in [*_waiters.values(), *_digests.values(), *calls, *_firing, *splitting]:
         task.cancel()
     _save()
     await client.aclose()
@@ -1195,6 +1217,7 @@ class _Turn:
     commanded: bool = False  # 这次替人用了功能
     asks: int = 0  # 这次问了模型几轮
     rounds: int | None = None  # 和叫她、接她话的人连着聊到第几轮；重想时不再算一轮
+    reminder: dict | None = None  # 到点了，她答应过的这条提醒
 
 
 async def respond(
@@ -1208,18 +1231,20 @@ async def respond(
     answer: Line | None = None,
     talking: bool = False,
     call: _Call | None = None,
-) -> None:
+    reminder: dict | None = None,
+) -> bool | None:
     """``target`` 是叫 bot 的那条消息；为 ``None`` 时是主动说话：``follow`` 为真是跟聊
     （bot 刚说过话，``answer`` 是紧跟在她后面接话的那条），否则是累计够数后的插话。
     ``talking`` 是聊开了的人没 @ 她、接着说的 ``answer``。``call`` 是群里叫她的这一次，
-    排队、想的时候他又叫了一次，就改回最新那条。
+    排队、想的时候他又叫了一次，就改回最新那条。``reminder`` 是到点了的提醒，
+    这时她必须开口 @ 那个人。发出去了返回真。
 
     ``force`` 时模型必须回复，否则由它决定说不说。一次回复分四步：拼提示（:func:`_compose`）、
     问模型（:func:`_think`）、改写（:func:`_shape`）、发出去（:func:`_deliver`）。
     问完模型、还没开口时，叫她、接她话的人又说了，就合起来重想（:func:`_rethink`）。
     """
 
-    if target is None and not talking and conversation.lock.locked():
+    if target is None and not talking and reminder is None and conversation.lock.locked():
         return  # 已有请求在跑，这次主动插话作罢；被叫到、正聊着时排队等它结束
     async with conversation.lock:
         key = _key(session)
@@ -1230,7 +1255,7 @@ async def respond(
         person = target or answer
         if person is not None and person.number <= _considered.get((key, person.speaker), 0):
             return  # 上一轮重想时合进去回过了（私聊对方在她想的时候又发的几条）
-        turn = _Turn(key, target, answer, follow, talking)
+        turn = _Turn(key, target, answer, follow, talking, reminder=reminder)
         if not _compose(turn, conversation, mood):
             return
         conversation.unseen = 0
@@ -1266,7 +1291,7 @@ async def respond(
             _settle_talk(key, conversation, answer, [c for c in calls if "tool" not in c])
         calls = await _shape(conversation, turn, [c for c in calls if "tool" not in c])
         sent = await _deliver(session, conversation, turn, calls)
-        await _use_tools(conversation, turn, tools, calls)
+        await _use_tools(session, conversation, turn, tools, calls)
         if calls and not sent:
             logger.info("AI群友在 {} 想说的话全被丢掉了：{}", key, [c["text"] for c in calls])
         if sent:
@@ -1281,6 +1306,7 @@ async def respond(
         _log_spent(turn, mood, before, sent)
         _changed(key)
         _save()
+        return bool(sent)
 
 
 def _rethink(conversation: Conversation, turn: _Turn, seen: int, started: float) -> bool:
@@ -1363,7 +1389,13 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
     """拼这次请求末尾的提示，放进 ``turn.hint``；返回 ``False`` 是这次不该开口。"""
 
     key, target, answer = turn.key, turn.target, turn.answer
-    if target is not None:
+    if turn.reminder is not None:
+        item = turn.reminder
+        late = int((datetime.now().timestamp() - item["due"]) // 60)
+        private = key.startswith("private:")
+        number = None if private else _remindee(conversation, item)
+        hint = remind_hint(item["name"], item["note"], item["said"], number, late, private)
+    elif target is not None:
         # 叫她之后他又补了几条（只发“@你”，下一条才是问题）：连起来才是他要说的。
         more = [
             x.text
@@ -1385,19 +1417,23 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
         hint = answer_hint(answer.number, answer.text, conversation.her_words_before(answer), newer)
     else:
         hint = FOLLOW_HINT if turn.follow else UNPROMPTED_HINT
-    if target is None:
+    # 到点提醒是她答应过的事，不按没人叫她时的规矩来（只许回表情包、不接复读的 bot 话题）。
+    unprompted = target is None and turn.reminder is None
+    if unprompted:
         hint += ignored_hint(conversation.unanswered())
     latest = next(
         (x for x in reversed(conversation.lines) if x.speaker not in (None, _TENKO)), None
     )
-    turn.pictured = target is None and latest is not None and only_pictures(latest.text)
+    turn.pictured = unprompted and latest is not None and only_pictures(latest.text)
     if turn.pictured:
         hint += PICTURE_HINT
     # 在说 bot、人机的只发第一句；不另加提示：实测一点明，别人说别的 bot 她也急着回
     # “我不是机器人”。
-    turn.bot_talk = latest is not None and bool(BOT_TALK.search(latest.text))
+    turn.bot_talk = (
+        turn.reminder is None and latest is not None and bool(BOT_TALK.search(latest.text))
+    )
     # 一群人接龙复读“这群怎么那么多机器人”：没人叫她就别对号入座，正常人不会出来回一句。
-    if target is None and turn.bot_talk and conversation.repeated(latest):
+    if unprompted and turn.bot_talk and conversation.repeated(latest):
         logger.info("AI群友在 {} 不接复读的 bot 话题：{}", key, latest.text)
         return False
     if target is not None and target.role.endswith(_TRUSTED):
@@ -1406,6 +1442,8 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
         turn.rounds = _rounds(key, who.speaker)
     if turn.rounds and turn.rounds % _LONG_ROUNDS == 0:
         hint += LONG_HINT
+    if (target or answer) is not None:
+        hint += REMIND_NUDGE  # 只有有人跟她说话时能登记提醒
     said = [line.text for line in conversation.lines if line.speaker is None][-30:]
     others = [line.text for line in conversation.lines if line.speaker not in (None, _TENKO)][-200:]
     phrases = _persona()[2]
@@ -1413,7 +1451,8 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
     weekday = "一二三四五六日"[now.weekday()]
     turn.hint = (
         f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
-        f"{_recall(key, conversation)}{hint}{repeat_hint(said, [*phrases, *RULE_LINES])}"
+        f"{_recall(key, conversation)}{_pending(key)}{hint}"
+        f"{repeat_hint(said, [*phrases, *RULE_LINES])}"
         f"{habit_hint(said, others)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
     )
     return True
@@ -1463,7 +1502,7 @@ async def _think(
             # DeepSeek 仍去调 search 之类的工具：点明只说话，再强制问一次。
             again = hint
         if again is not None:
-            kept = [c for c in calls if c.get("tool") in _STICKER_TOOLS]
+            kept = [c for c in calls if c.get("tool") in llm.SIDE_TOOLS]
             if not turn.searched:
                 again = f"{again}\n{_STICKERS_DONE if kept else _JUST_TALK}"
             calls = kept + await ask(again, force and not turn.searched, retry=True)
@@ -1500,7 +1539,7 @@ async def _shape(conversation: Conversation, turn: _Turn, calls: list[dict]) -> 
     """把模型想说的话改成能发的样子：提示词压不住的几处在这里兜底，见 :mod:`.shaping`。"""
 
     key = turn.key
-    if turn.commanded or turn.bot_talk:
+    if turn.commanded or turn.bot_talk or turn.reminder is not None:
         texts = [c["text"] for c in calls]
         calls = shaping.first_line(calls)
         if calls and "\n".join(texts).strip() != calls[0]["text"].strip():
@@ -1566,6 +1605,10 @@ async def _deliver(
         named, rest = conversation.called_in(pieces[0])
         if group and named and (called is None or called.speaker == named.speaker):
             called, pieces[0] = named, rest
+        whom = called.speaker if called is not None else None
+        if turn.reminder is not None and sent == 0:
+            # 到点叫人一定 @ 到他：她没填、填错了人，或者他那条已经压缩出记录，都按登记的 QQ 号 @。
+            whom = f"{turn.reminder['name']}({turn.reminder['user']})"
         for index, piece in enumerate(pieces):
             before, sticker, after = _pick_sticker(
                 conversation, piece, allowed=not picked, repeat=repeat
@@ -1576,8 +1619,8 @@ async def _deliver(
                 continue
             mention: list = []
             # @ 和引用只放在连发的第一条上。
-            if index == 0 and group and called and called.speaker:
-                name, _, user = called.speaker.rpartition("(")
+            if index == 0 and group and whom:
+                name, _, user = whom.rpartition("(")
                 mention = [At(user.rstrip(")"), name=name)]
                 before, text = " " + before, f"@{name} {text}"
             content: list = [*mention, *(Text(part) for part in (before, after) if part)]
@@ -1618,9 +1661,10 @@ async def _deliver(
 
 
 async def _use_tools(
-    conversation: Conversation, turn: _Turn, tools: list[dict], calls: list[dict]
+    session: Session, conversation: Conversation, turn: _Turn, tools: list[dict], calls: list[dict]
 ) -> None:
-    """说完话再收藏、改、删表情包；``calls`` 是她这次说的话，删图时看她嘴上答应了没有。"""
+    """说完话再收藏、改、删表情包，登记、取消提醒；``calls`` 是她这次说的话，
+    删图时看她嘴上答应了没有。"""
 
     for arguments in tools:
         if arguments["tool"] == "save_sticker":
@@ -1634,6 +1678,169 @@ async def _use_tools(
     for arguments in tools:
         if arguments["tool"] == "delete_sticker":
             await _delete_sticker(str(arguments.get("name") or ""), turn.key, trusted, said)
+    for arguments in tools:
+        if arguments["tool"] == "cancel_reminder":
+            _cancel_reminder(turn, arguments)
+    for arguments in tools:
+        if arguments["tool"] == "remind":
+            _add_reminder(session, conversation, turn, arguments)
+
+
+def _add_reminder(
+    session: Session, conversation: Conversation, turn: _Turn, arguments: dict
+) -> None:
+    """登记她答应的提醒。只认有人在跟她说话的时候：没人叫她时她不该答应谁什么。"""
+
+    asker = turn.target or turn.answer
+    if asker is None or turn.reminder is not None:
+        logger.info("AI群友在 {} 没人找她时想登记提醒，不登记：{}", turn.key, arguments)
+        return
+    line = conversation.by_number(arguments.get("mention"))
+    if line is None or line.speaker in (None, _TENKO):
+        line = asker  # 没填、填错了：多半就是托她的这个人
+    name, user = _qq(line.speaker or "")
+    if in_sandbox():
+        logger.info("AI群友在沙盒里登记提醒，不存：{}", arguments)
+        return
+    origin = getattr(session.event, "_origin", None)
+    raw = origin.dump() if origin is not None else None
+    if raw is not None:
+        raw["message"] = {"id": "", "content": ""}  # 只用来重建会话，原话不留
+    platform = getattr(getattr(session.event, "login", None), "platform", None) or "qq-client"
+    item, why = reminder_book.add(
+        turn.key,
+        at=arguments.get("at"),
+        user=user,
+        name=name,
+        note=str(arguments.get("note") or ""),
+        said=line.text,
+        number=line.number,
+        self_id=str(session.account.self_id),
+        platform=platform,
+        origin=raw,
+        now=datetime.now().timestamp(),  # 回放时换成场景的时刻，和提示里的“现在”一致
+    )
+    if item is None:
+        logger.info("AI群友在 {} 的提醒没登记（{}）：{}", turn.key, why, arguments)
+    else:
+        logger.info(
+            "AI群友在 {} 登记了提醒 {}：{} {} {}",
+            turn.key,
+            item["id"],
+            reminders.when(item["due"], datetime.now().timestamp()),
+            line.speaker,
+            item["note"],
+        )
+
+
+def _cancel_reminder(turn: _Turn, arguments: dict) -> None:
+    if in_sandbox():
+        return
+    found = reminder_book.cancel(turn.key, arguments.get("id"))
+    if found is None:
+        logger.info("AI群友在 {} 想取消不存在的提醒：{}", turn.key, arguments)
+    else:
+        logger.info("AI群友在 {} 取消了提醒 {}：{}", turn.key, found["id"], found["note"])
+
+
+def _pending(key: str) -> str:
+    """末尾提示里她答应过、还没到点的提醒。"""
+
+    now = datetime.now().timestamp()
+    return pending_hint(
+        [
+            (item["id"], reminders.when(item["due"], now), item["name"], item["note"])
+            for item in reminder_book.pending(key)
+            if item["id"] not in _reminding
+        ]
+    )
+
+
+def _remindee(conversation: Conversation, item: dict) -> int | None:
+    """要提醒的人还在记录里的一条：登记时那条，压缩掉了就找他最近说的。"""
+
+    def his(line: Line | None) -> bool:
+        return (
+            line is not None and line.speaker is not None and _qq(line.speaker)[1] == item["user"]
+        )
+
+    line = conversation.by_number(item.get("number"))
+    if his(line):
+        return line.number
+    return next((x.number for x in reversed(conversation.lines) if his(x)), None)
+
+
+def _reminder_session(item: dict) -> Session | None:
+    """到点了没有群友消息可接：用登记时存下的那条消息的事件重建会话，换上在线的号。
+
+    群里优先用原来那个号，换别的号也能发；私聊只能用原来的号，别的号不是对方好友。
+    """
+
+    raw = item.get("origin")
+    if not raw:
+        return None
+    key = item["key"]
+    if key.startswith("group:"):
+        accounts = list(accounts_for_group(key.partition(":")[2], platform=item["platform"]))
+        accounts.sort(key=lambda a: str(a.self_id) != item["self_id"])
+    else:
+        accounts = [a for a in online_accounts() if str(a.self_id) == item["self_id"]]
+    if not accounts:
+        return None
+    account = accounts[0]
+    origin = Event.parse(json.loads(json.dumps(raw)))  # parse 会改动传进去的 dict
+    message = MessageObject(id=f"persona-chat-{time.time_ns()}", content="")
+    origin = dataclasses.replace(origin, message=message)
+    return Session(account, MessageCreatedEvent(account, origin))
+
+
+_firing: set[asyncio.Task[None]] = set()
+
+
+@scheduler.schedule(lambda: timedelta(minutes=1), label="persona-chat-reminders")
+async def _remind_due() -> None:
+    """每分钟看一次有没有到点的提醒；错过太久的作废，没有能发的号就下一分钟再试。"""
+
+    if not config.api_key or in_sandbox():
+        return
+    now = time.time()
+    for item in reminder_book.due(now):
+        if item["id"] in _reminding:
+            continue
+        if now - item["due"] > reminders.LATE:
+            reminder_book.drop(item["id"])
+            logger.warning("AI群友的提醒 {} 错过太久，作废：{}", item["id"], item)
+            continue
+        session = _reminder_session(item)
+        if session is None:
+            logger.info("AI群友的提醒 {} 到点了，但 {} 没有能发的号", item["id"], item["key"])
+            continue
+        _reminding.add(item["id"])
+        task = asyncio.create_task(_remind(session, item))
+        _firing.add(task)
+        task.add_done_callback(_firing.discard)
+
+
+async def _remind(session: Session, item: dict) -> None:
+    """到点叫她开口；没发出去（额度用完、请求失败）留着，下一分钟再试，晚太久了作废。"""
+
+    key = item["key"]
+    try:
+        conversation = _conversation(key)
+        sent = await respond(session, conversation, None, force=True, mood="remind", reminder=item)
+        if not sent:
+            logger.info("AI群友的提醒 {} 这次没发出去，稍后再试", item["id"])
+            return
+        reminder_book.drop(item["id"])
+        logger.info("AI群友在 {} 提醒了 {}：{}", key, item["name"], item["note"])
+        # 他回一句“起了”多半不会 @ 她：当作刚跟她聊过，接得上。
+        if (number := _remindee(conversation, item)) is not None:
+            speaker = conversation.by_number(number).speaker
+            conversation.partners[speaker] = time.monotonic()
+    except Exception:
+        logger.exception("AI群友的提醒 {} 出错", item["id"])
+    finally:
+        _reminding.discard(item["id"])
 
 
 async def _add_sticker(
@@ -2023,8 +2230,13 @@ async def _digest(key: str, conversation: Conversation, upto: int) -> None:
             return
         speakers = (line.speaker for line in lines if line.speaker not in (None, _TENKO))
         names = dict(_qq(speaker)[::-1] for speaker in speakers)
+        # 旧档案还没拆开的人这次不整理：分不清哪些话是在别的群说的，拆完再说。
+        names = {qq: name for qq, name in names.items() if "legacy" not in people.get(qq, {})}
         known = [
-            f"- {name}({qq})：{people[qq]['note']}" for qq, name in names.items() if qq in people
+            f"- {name}({qq})：common：{people[qq]['note'] or '（空）'}；"
+            f"here：{people[qq].get('groups', {}).get(key) or '（空）'}"
+            for qq, name in names.items()
+            if qq in people
         ]
         record = "\n".join(
             f"#{line.number} [{'你' if line.speaker is None else line.who}] {line.text}"
@@ -2060,9 +2272,19 @@ async def _digest(key: str, conversation: Conversation, upto: int) -> None:
         for qq, note in (result.get("people") or {}).items():
             # 只认这段记录里说过话的人，模型编出来的号不收；它偶尔拿昵称当键，换回 QQ 号。
             qq = str(qq) if str(qq) in names else numbers.get(str(qq))
-            if qq and isinstance(note, str) and note.strip():
-                people[qq] = {"name": names[qq], "note": note.strip()[:_PERSON_CHARS]}
-                changed.append(names[qq])
+            if not qq or "legacy" in people.get(qq, {}):
+                continue
+            # 没分层、只给一整段的当成本群的：放错了也只在这个群看得到。
+            common, here = (
+                (note.get("common"), note.get("here")) if isinstance(note, dict) else (None, note)
+            )
+            person = people.setdefault(qq, {"note": "", "groups": {}})
+            person["name"] = names[qq]
+            if isinstance(common, str):
+                person["note"] = common.strip()[:_COMMON_CHARS]
+            if isinstance(here, str):
+                person.setdefault("groups", {})[key] = here.strip()[:_PERSON_CHARS]
+            changed.append(names[qq])
         memory_store.save(memory)
         logger.info("AI群友整理了 {} 的 {} 条记录，更新了 {} 的档案", key, len(lines), changed)
     finally:
@@ -2082,10 +2304,101 @@ def _recall(key: str, conversation: Conversation) -> str:
         if line.speaker in (None, _TENKO):
             continue
         qq = _qq(line.speaker)[1]
-        if qq in people and qq not in present:
-            present[qq] = f"{line.speaker}：{people[qq]['note']}"
+        if qq in people and qq not in present and (note := _impression(people[qq], key)):
+            present[qq] = f"{line.speaker}：{note}"
     group = memory.get("groups", {}).get(key, {}).get("note", "")
     return memory_hint(group, list(present.values()))
+
+
+def _impression(person: dict, key: str) -> str:
+    """她在这个会话里能用的印象：共用那层，加上在这个群记的。旧档案还没拆开时照旧整段给。"""
+
+    if "legacy" in person:
+        return person["legacy"]
+    here = person.get("groups", {}).get(key, "")
+    return "；".join(filter(None, [person.get("note", ""), here and f"在这个群：{here}"]))
+
+
+def _seen_in() -> dict[str, set[str]]:
+    """{QQ号: 他在记录里说过话的群}：拆旧档案时判断那些话是在哪个群说的。"""
+
+    data = chat_store.load(default={})
+    saved = {key: [line.get("speaker") for line in c.get("lines", [])] for key, c in data.items()}
+    live = {key: [line.speaker for line in c.lines] for key, c in conversations.items()}
+    seen: dict[str, set[str]] = {}
+    for key, speakers in (saved | live).items():
+        if not key.startswith("group:"):
+            continue
+        for speaker in speakers:
+            if speaker and speaker != _TENKO:
+                seen.setdefault(_qq(speaker)[1], set()).add(key)
+    return seen
+
+
+_splitting: asyncio.Task[None] | None = None
+
+
+@scheduler.schedule(lambda: timedelta(minutes=1), label="persona-chat-memory-split")
+async def _split_due() -> None:
+    """还有没拆开的旧档案就在后台拆一批；拆的时候不占着定时器，别耽误提醒。"""
+
+    global _splitting
+    if not config.api_key or in_sandbox() or (_splitting is not None and not _splitting.done()):
+        return
+    people = memory_store.load(default={}).get("people", {})
+    if any("legacy" in person for person in people.values()):
+        _splitting = asyncio.create_task(_split_legacy())
+
+
+async def _split_legacy(batch: int = _SPLIT_BATCH) -> None:
+    """把 v1 不分群的档案拆成两层：只在一个群说过话的，本群那层归那个群；说过话的群不止一个
+    或者查不到（记录压缩掉了）的，分不清哪句是在哪儿说的，只留共用那层，免得带到别的群去。
+    升级时宿主已经备份了原文件。请求失败就停下，下一分钟再试。"""
+
+    seen = _seen_in()
+    pending = [
+        qq
+        for qq, person in memory_store.load(default={}).get("people", {}).items()
+        if "legacy" in person
+    ][:batch]
+    for qq in pending:
+        legacy = memory_store.load(default={}).get("people", {}).get(qq, {}).get("legacy")
+        if legacy is None:
+            continue
+        groups = sorted(seen.get(qq, ()))
+        result: dict = {}
+        if legacy.strip():
+            try:
+                result, usage = await llm.digest(
+                    client, model=config.model, prompt=SPLIT_PROMPT, text=legacy
+                )
+            except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
+                logger.warning("AI群友拆旧档案失败，稍后再试：{!r}", error)
+                return
+            now = datetime.now()
+            usage_book.add(
+                now.date(), groups[0] if groups else GLOBAL, usage, estimate_cost(usage, now)
+            )
+        common = result.get("common") if isinstance(result.get("common"), str) else ""
+        here = result.get("here") if isinstance(result.get("here"), str) else ""
+        memory = memory_store.load(default={})
+        person = memory.get("people", {}).get(qq)
+        if person is None or "legacy" not in person:
+            continue  # 拆的时候被删了
+        del person["legacy"]
+        person["note"] = person.get("note") or common.strip()[:_COMMON_CHARS]
+        kept = len(groups) == 1 and here.strip()
+        if kept:
+            person.setdefault("groups", {}).setdefault(groups[0], here.strip()[:_PERSON_CHARS])
+        memory_store.save(memory)
+        logger.info(
+            "AI群友拆开了 {} 的旧档案：共用“{}”；本群那层{}",
+            qq,
+            person["note"],
+            f"归 {groups[0]}：{here.strip()}"
+            if kept
+            else f"不留（说过话的群：{groups or '查不到'}）：{here.strip()}",
+        )
 
 
 @plugin.listen(SendResponse)

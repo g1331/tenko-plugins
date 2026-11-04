@@ -64,6 +64,8 @@ def fake_llm(module, monkeypatch):
     module.memory_store.save({})
     module.persona_store.save({})
     module.at_only_store.save([])
+    module.reminder_book.store.save({})
+    module._reminding.clear()
     module._unsaved.clear()
     return fake
 
@@ -1570,27 +1572,46 @@ async def test_memory_is_digested_in_the_background_and_recalled(module, fake_ll
 
     async def digest(client, *, model, prompt, text):
         asked.append(text)
-        people = {"1": "玩bf1，EA名 YueMaT", "999": "记录里没有的号"}
+        people = {
+            "1": {"common": "玩bf1，EA名 YueMaT", "here": "说最近加班到十点"},
+            "2": "只给一整段的",  # 没分层的当成本群那层
+            "999": {"common": "记录里没有的号"},
+        }
         return {"group": "打bf1的群", "people": people}, {}
 
     monkeypatch.setattr(module.llm, "digest", digest)
-    module.memory_store.save({"people": {"2": {"name": "群友2", "note": "老熟人"}}})
+    module.memory_store.save({"people": {"2": {"name": "群友2", "note": "老熟人", "groups": {}}}})
     for n in range(59):
         await feed(module, session([Text(f"闲聊{n}")], user="1", message_id=f"m{n}"))
     assert not module._digests
     await feed(module, session([Text("我也来")], user="2", message_id="m59"))
     await module._digests["group:100"]  # 第 60 条触发
 
-    assert "群友2(2)：老熟人" in asked[0] and "#60 [群友2(2)] 我也来" in asked[0]
+    assert "群友2(2)：common：老熟人；here：（空）" in asked[0]
+    assert "#60 [群友2(2)] 我也来" in asked[0]
     memory = module.memory_store.load()
     assert memory["groups"]["group:100"] == {"note": "打bf1的群", "upto": 60}
-    assert memory["people"]["1"] == {"name": "群友1", "note": "玩bf1，EA名 YueMaT"}
+    assert memory["people"]["1"] == {
+        "name": "群友1",
+        "note": "玩bf1，EA名 YueMaT",
+        "groups": {"group:100": "说最近加班到十点"},
+    }
+    assert memory["people"]["2"]["note"] == "老熟人"
+    assert memory["people"]["2"]["groups"] == {"group:100": "只给一整段的"}
     assert "999" not in memory["people"]  # 模型编的号不收
 
     await feed(module, session([At("42"), Text(" 我EA名是啥")], user="1", message_id="m60"))
     hint = fake_llm.requests[-1][0][-1]["content"]
     assert "这个群：打bf1的群" in hint
-    assert "群友1(1)：玩bf1，EA名 YueMaT" in hint and "群友2(2)：老熟人" in hint
+    assert "群友1(1)：玩bf1，EA名 YueMaT；在这个群：说最近加班到十点" in hint
+    assert "群友2(2)：老熟人；在这个群：只给一整段的" in hint
+    # 到了别的群只看得到共用那层：在这个群说的自己的事不带过去
+    other = module._conversation("group:200")
+    other.add("x1", "群友1(1)", "在吗")
+    assert module._recall("group:200", other) == (
+        "你以前攒下的印象（可能过时，和眼前的记录对不上时以记录为准；用得上再用，别硬提、别翻旧账）：\n"
+        "群友1(1)：玩bf1，EA名 YueMaT\n"
+    )
 
     assert module._forget("1") and not module._forget("1")
     assert "群友1(1)" not in module._recall("group:100", module.conversations["group:100"])
@@ -1960,3 +1981,182 @@ async def test_private_lines_merged_by_a_rethink_are_not_answered_again(
     assert len(fake_llm.requests) == 2
     said = [x.text for x in module.conversations["private:1"].lines if x.speaker is None]
     assert said == ["看啥"]
+
+
+def _later(hours=8):
+    from datetime import datetime, timedelta
+
+    return f"{datetime.now() + timedelta(hours=hours):%Y-%m-%d %H:%M}"
+
+
+async def test_promise_with_a_time_is_registered_and_listed(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    at = _later()
+    fake_llm.replies.append(
+        [
+            {"text": "行 九点叫你"},
+            {"tool": "remind", "at": at, "mention": 99, "note": "叫他起床"},
+        ]
+    )
+    await feed(module, session([At("42"), Text(" 明早叫我起床")], user="13", message_id="m1"))
+
+    (item,) = module.reminder_book.pending("group:100")
+    # 编号填错了就当是托她的人
+    assert (item["user"], item["name"], item["note"]) == ("13", "群友13", "叫他起床")
+    assert item["said"] == "@你 明早叫我起床" and item["number"] == 1
+    fake_llm.replies.append([{"text": "记着呢"}])
+    await feed(module, session([At("42"), Text(" 你会叫我吧")], user="13", message_id="m2"))
+    hint = fake_llm.requests[-1][0][-1]["content"]
+    assert f"提醒{item['id']} " in hint and "群友13：叫他起床" in hint
+
+    # 说不用了就取消
+    fake_llm.replies.append([{"text": "行"}, {"tool": "cancel_reminder", "id": item["id"]}])
+    await feed(module, session([At("42"), Text(" 算了不用叫了")], user="13", message_id="m3"))
+    assert module.reminder_book.pending("group:100") == []
+
+
+async def test_unprompted_turns_cannot_promise(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "quiet_seconds", 0.01)
+    monkeypatch.setattr(module.config, "batch_size", 2)
+    monkeypatch.setattr(module.config, "unprompted_interval_seconds", 0)
+    fake_llm.replies.append(
+        [{"text": "我九点叫你们"}, {"tool": "remind", "at": _later(), "mention": 1, "note": "x"}]
+    )
+    await feed(module, session([Text("明天要早起")], user="5", message_id="q1"))
+    await feed(module, session([Text("好困")], user="6", message_id="q2"))
+    await module._waiters["group:100"]
+    assert fake_llm.requests and module.reminder_book.pending("group:100") == []
+
+
+async def test_due_reminder_ats_the_person_once(module, fake_llm):
+    await feed(module, session([Text("晚安")], user="13", message_id="m1"))
+    await feed(module, session([Text("[图片]")], user="8", message_id="m2"))
+    item, _ = module.reminder_book.add(
+        "group:100", at=_later(), user="13", name="13", note="叫他起床", said="明早叫我起床"
+    )
+    item["due"] = module.time.time() - 120
+    # 她没填 mention，最新一条只是图也照样说话（不按没人叫她时“只许回表情包”）
+    fake_llm.replies.append([{"text": "九点了 起床\n再不起埃及拔草"}])
+    s = session([], user="13", message_id="x")
+    await module._remind(s, item)
+
+    ((messages, force),) = fake_llm.requests
+    hint = messages[-1]["content"]
+    assert force and "到了你答应 13 的时间：叫他起床" in hint and "晚了 2 分钟" in hint
+    assert "mention 填 #1" in hint  # 他那条还在记录里
+    (sent,) = s.send.call_args.args[0]
+    at, text = sent.children
+    assert isinstance(at, At) and at.id == "13" and text.text == " 九点了 起床"  # 只说一句
+    assert module.reminder_book.pending("group:100") == []
+    assert "群友13(13)" in module.conversations["group:100"].partners
+
+
+async def test_failed_reminder_stays_and_late_ones_expire(module, fake_llm, monkeypatch):
+    now = module.time.time()
+    kept, _ = module.reminder_book.add("group:100", at=_later(), user="1", name="甲", note="a")
+    gone, _ = module.reminder_book.add("group:100", at=_later(), user="2", name="乙", note="b")
+    data = module.reminder_book.store.load(default={})
+    for item in data["items"]:
+        item["due"] = now - (60 if item["id"] == kept["id"] else module.reminders.LATE + 60)
+    module.reminder_book.store.save(data)
+    fired = []
+
+    async def remind(session, item):
+        fired.append(item["id"])
+
+    monkeypatch.setattr(module, "_remind", remind)
+    monkeypatch.setattr(module, "_reminder_session", lambda item: None)
+    await module._remind_due.callable_target()
+    assert fired == [] and [x["id"] for x in module.reminder_book.pending("group:100")] == [
+        kept["id"]
+    ]  # 没有能发的号：留着下一分钟再试；错过太久的作废
+
+    monkeypatch.setattr(module, "_reminder_session", lambda item: object())
+    await module._remind_due.callable_target()
+    await asyncio.gather(*module._firing)
+    assert fired == [kept["id"]]
+
+
+async def test_reminder_session_is_rebuilt_from_the_saved_event(module, fake_llm, monkeypatch):
+    from datetime import datetime
+
+    from satori.model import Channel, ChannelType, Event, Guild, Login, LoginStatus, User
+    from satori.model import MessageObject as SatoriMessage
+
+    origin = Event(
+        "message-created",
+        datetime.now(),
+        Login(status=LoginStatus.ONLINE, platform="qq-client", user=User("42")),
+        channel=Channel("100", ChannelType.TEXT),
+        guild=Guild("100", "测试群"),
+        user=User("13", "甲"),
+        message=SatoriMessage("m1", "明早叫我起床"),
+    )
+    raw = origin.dump()
+    raw["message"] = {"id": "", "content": ""}
+    item = {"key": "group:100", "origin": raw, "self_id": "42", "platform": "qq-client"}
+    other, own = SimpleNamespace(self_id="7"), SimpleNamespace(self_id="42")
+    monkeypatch.setattr(module, "accounts_for_group", lambda group, platform: (other, own))
+    monkeypatch.setattr(module, "MessageCreatedEvent", lambda account, event: event)
+    monkeypatch.setattr(module, "Session", lambda account, event: (account, event))
+
+    account, event = module._reminder_session(item)
+    assert account is own  # 原来那个号还在线就用它
+    assert (event.channel.id, event.user.id, event.guild.id) == ("100", "13", "100")
+    assert event.message.id.startswith("persona-chat-") and item["origin"] == raw
+    monkeypatch.setattr(module, "accounts_for_group", lambda group, platform: ())
+    assert module._reminder_session(item) is None
+
+
+async def test_old_memory_is_split_so_it_stays_in_its_group(module, fake_llm, monkeypatch):
+    # v1 的档案不分群：升级时整段挪进 legacy，拆开之前照旧整段给她看
+    data = module._memory_v2(1, {"people": {"1": {"name": "甲", "note": "旧的整段"}}})
+    assert data["people"]["1"] == {"name": "甲", "note": "", "legacy": "旧的整段", "groups": {}}
+
+    people = {
+        "1": {"name": "甲", "note": "", "legacy": "叫他老甲，EA名 A，说单位扣钱", "groups": {}},
+        "2": {"name": "乙", "note": "", "legacy": "叫他乙哥，说自己失恋了", "groups": {}},
+        "3": {"name": "丙", "note": "", "legacy": "叫他丙", "groups": {}},
+    }
+    module.memory_store.save({"people": people})
+    for key, users in {"group:100": ("1", "2"), "group:200": ("2",)}.items():
+        conversation = module._conversation(key)
+        for user in users:
+            conversation.add(f"{key}-{user}", f"群友{user}({user})", "在")
+    assert module._recall("group:200", module.conversations["group:200"]).endswith(
+        "群友2(2)：叫他乙哥，说自己失恋了\n"
+    )
+
+    async def digest(client, *, model, prompt, text):
+        assert prompt == module.SPLIT_PROMPT
+        common, _, here = text.partition("，说")
+        return {"common": common, "here": "说" + here if here else ""}, {}
+
+    monkeypatch.setattr(module.llm, "digest", digest)
+    await module._split_legacy(batch=2)
+    people = module.memory_store.load()["people"]
+    # 只在一个群说过话：本群那层归那个群
+    assert people["1"] == {
+        "name": "甲",
+        "note": "叫他老甲，EA名 A",
+        "groups": {"group:100": "说单位扣钱"},
+    }
+    # 两个群都说过话：分不清在哪儿说的，只留共用那层
+    assert people["2"] == {"name": "乙", "note": "叫他乙哥", "groups": {}}
+    assert "legacy" in people["3"]  # 这一批没轮到
+    await module._split_legacy()
+    people = module.memory_store.load()["people"]
+    assert people["3"] == {"name": "丙", "note": "叫他丙", "groups": {}}  # 查不到在哪儿说过话
+
+    # 还没拆开的人整理时先不碰
+    module.memory_store.save({"people": {"1": {"name": "甲", "note": "", "legacy": "x"}}})
+    asked = []
+
+    async def later(client, *, model, prompt, text):
+        asked.append(text)
+        return {"people": {"1": {"common": "新的"}}}, {}
+
+    monkeypatch.setattr(module.llm, "digest", later)
+    await module._digest("group:100", module.conversations["group:100"], 0)
+    assert "群友1(1)：common" not in asked[0]
+    assert module.memory_store.load()["people"]["1"] == {"name": "甲", "note": "", "legacy": "x"}

@@ -1,6 +1,6 @@
 """调用 OpenAI 兼容的 /chat/completions；模型只能说话（send_message）或不说（stay_silent），
 顺手可以收藏表情包（save_sticker），不确定的事实可以先搜（search），
-也能用别的插件的查询功能（run_command）。"""
+也能用别的插件的查询功能（run_command），答应到点做的事登记成提醒（remind）。"""
 
 from __future__ import annotations
 
@@ -172,6 +172,48 @@ RUN_COMMAND = {
         },
     },
 }
+REMIND = {
+    "type": "function",
+    "function": {
+        "name": "remind",
+        "description": (
+            "答应了到某个时间去做的事（叫人起床、提醒上号、到点喊一声），和说话一起调用登记下来："
+            "到点插件会叫你 @ 那个人说一句。只提醒一次；不调用，到点你就想不起来。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "at": {
+                    "type": "string",
+                    "description": "到点的本地时间，照提示里的当前时间推算，例如“2026-11-03 09:00”",
+                },
+                "mention": {
+                    "type": "integer",
+                    "description": "要提醒的人说过的某条消息编号，例如 3",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "到点要做什么，30 字以内，例如“叫他起床”",
+                },
+            },
+            "required": ["at", "mention", "note"],
+        },
+    },
+}
+CANCEL_REMINDER = {
+    "type": "function",
+    "function": {
+        "name": "cancel_reminder",
+        "description": (
+            "对方说不用提醒了、时间改了时，取消提示里列出的某条提醒（改时间就取消后重新 remind）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"id": {"type": "integer", "description": "提示里提醒的编号"}},
+            "required": ["id"],
+        },
+    },
+}
 FORCE_SEND = {"type": "function", "function": {"name": "send_message"}}
 
 
@@ -208,6 +250,8 @@ TOOLS = [
     DELETE_STICKER,
     SEARCH,
     RUN_COMMAND,
+    REMIND,
+    CANCEL_REMINDER,
 ]
 
 
@@ -229,7 +273,7 @@ async def chat(
 
     calls, usage = await _chat(client, model, messages, force, max_tokens, effort)
     if effort and force and not any("tool" not in c for c in calls):
-        kept = [c for c in calls if c["tool"] in _STICKER_TOOLS]
+        kept = [c for c in calls if c["tool"] in SIDE_TOOLS]
         again, more = await _chat(client, model, messages, True, max_tokens, "")
         calls = kept + again
         usage = {
@@ -241,7 +285,8 @@ async def chat(
 
 # usage 里按 token 计费的几项：再问一次时两次相加；prompt_tokens 取后一次，校准上下文大小用。
 _BILLED = ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "completion_tokens")
-_STICKER_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker")
+# 和说话一起调用、说完话插件再办的工具：没开口要强制再问时留着，不然白调了。
+SIDE_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker", "remind", "cancel_reminder")
 # 思考的 token 也算在 max_tokens 里；给它另留一份，不然想完了没字数说话。
 _THINK_TOKENS = 2048
 
