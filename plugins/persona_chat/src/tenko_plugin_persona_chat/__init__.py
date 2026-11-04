@@ -167,7 +167,7 @@ class PersonaChatConfig(BasicConfModel):
 plugin.metadata(
     "AI群友",
     author=["13"],
-    version="0.1.47",
+    version="0.1.48",
     description="接入 DeepSeek，用人设口吻陪群友聊天，预置“大肥鱼”“小埋”。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/persona_chat",
