@@ -56,6 +56,7 @@ def fake_llm(module, monkeypatch):
     for call in module._calls.values():
         call.task.cancel()
     module._calls.clear()
+    module._considered.clear()
     module.usage_book.store.save({})
     module.sticker_book.store.save({})
     module.sticker_book.bans.save([])
@@ -1886,31 +1887,76 @@ async def test_an_ai_with_her_former_name_is_not_her(module, fake_llm, monkeypat
     assert "你以前用过“阿呆”、“大肥鱼”这个名字" in place
 
 
-async def test_she_waits_for_the_caller_to_finish_typing(module, fake_llm, monkeypatch):
-    monkeypatch.setattr(module.config, "typing_seconds", 0.05)
+def typing_during(module, monkeypatch, fake_llm, lines):
+    """第一次问模型时，``lines`` 里的消息在她想的时候陆续发进来。"""
+
+    chat = module.llm.chat
+    pending = list(lines)
+
+    async def slow(client, **kwargs):
+        while pending:
+            await feed(module, pending.pop(0))
+        return await chat(client, **kwargs)
+
+    monkeypatch.setattr(module.llm, "chat", slow)
+
+
+async def test_a_finished_call_is_answered_without_waiting(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "typing_seconds", 20)
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], message_id="w0"))
+    await asyncio.wait_for(module._calls[("group:100", "1")].task, 1)
+    assert len(fake_llm.requests) == 1 and not module._calls
+
+
+async def test_she_rethinks_when_the_caller_adds_more(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "typing_seconds", 20)
     monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
-    # 只发一个“@你”，下一条才是问题；中间又 @ 了一次：等他说完，只问一次模型，回最新那条
-    fake_llm.replies.append([{"text": "去吧"}])
-    await feed(module, session([At("42")], message_id="w0"))
-    await feed(module, session([Text("周末去爬山吗")], message_id="w1"))
-    await feed(module, session([At("42"), Text(" 你说呢")], message_id="w2"))
-    assert not fake_llm.requests
+    # 只发一个“@你”，她想的时候他才打出问题、又 @ 了一次：合起来重想，回最新那条，只开口一次
+    later = [
+        session([Text("周末去爬山吗")], message_id="w1"),
+        session([At("42"), Text(" 你说呢")], message_id="w2"),
+    ]
+    typing_during(module, monkeypatch, fake_llm, later)
+    fake_llm.replies += [[{"text": "啥"}], [{"text": "去吧"}]]
+    first = session([At("42")], message_id="w0")
+    await feed(module, first)
     await module._calls[("group:100", "1")].task
-    assert len(fake_llm.requests) == 1 and fake_llm.requests[0][1]
-    hint = fake_llm.requests[0][0][-1]["content"]
-    assert "你说呢" in hint
-    assert not module._calls and "group:100" not in module._waiters
+    assert len(fake_llm.requests) == 2 and fake_llm.requests[1][1]
+    assert "你说呢" in fake_llm.requests[1][0][-1]["content"]
+    assert not first.send.called and later[1].send.call_count == 1
+    assert not module._calls
 
 
-async def test_a_reply_to_her_waits_for_the_rest_of_the_burst(module, fake_llm, monkeypatch):
-    monkeypatch.setattr(module.config, "typing_seconds", 0.05)
+async def test_a_reply_to_her_is_rethought_with_the_rest(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "typing_seconds", 20)
     fake_llm.replies.append([{"text": "在"}])
     await feed(module, session([At("42"), Text(" 在吗")], message_id="v0"))
     await module._calls[("group:100", "1")].task
-    # 聊开了的人拆成两条接着说：等他说完再问，第二条来时不另起一轮
-    fake_llm.replies.append([{"text": "行"}])
+    # 聊开了的人拆成两条接着说：第二条在她想的时候来，合起来重想，不另起一轮
+    typing_during(module, monkeypatch, fake_llm, [session([Text("我今天抽到了")], message_id="v2")])
+    fake_llm.replies += [[{"text": "说"}], [{"text": "抽到啥了"}]]
     await feed(module, session([Text("我跟你说")], message_id="v1"))
-    await feed(module, session([Text("我今天抽到了")], message_id="v2"))
     await module._waiters["group:100"]
-    assert len(fake_llm.requests) == 2
+    assert len(fake_llm.requests) == 3
     assert "我今天抽到了" in fake_llm.requests[-1][0][-1]["content"]
+    conversation = module.conversations["group:100"]
+    assert [x.text for x in conversation.lines if x.speaker is None] == ["在", "抽到啥了"]
+    assert conversation.talk is None and "group:100" not in module._waiters
+
+
+async def test_private_lines_merged_by_a_rethink_are_not_answered_again(
+    module, fake_llm, monkeypatch
+):
+    monkeypatch.setattr(module.config, "typing_seconds", 20)
+    later = session([Text("帮我看看")], message_id="p1", group=None)
+    typing_during(module, monkeypatch, fake_llm, [later])
+    fake_llm.replies += [[{"text": "嗯"}], [{"text": "看啥"}]]
+    await feed(module, session([Text("在吗")], message_id="p0", group=None))
+    first = module._waiters["private:1"]
+    await first
+    # 她想的时候发来的那条另起了一轮等着；重想时已经合进去回过，这轮不再问
+    await module._waiters.get("private:1", first)
+    assert len(fake_llm.requests) == 2
+    said = [x.text for x in module.conversations["private:1"].lines if x.speaker is None]
+    assert said == ["看啥"]
