@@ -84,7 +84,7 @@ def test_same_person_same_time_counts_once(r):
     book = r.Reminders(MemoryStore())
     first, _ = book.add("group:1", at="2026-11-02 09:00", user="13", name="13", note="", now=NOW)
     again, why = add(book, at="2026-11-02 09:00")  # 第二遍补上了备注
-    assert why == "" and again["id"] == first["id"]
+    assert why == "已经登记过" and again["id"] == first["id"]
     (only,) = book.pending("group:1")
     assert only["note"] == "叫他起床"
     assert add(book, at="2026-11-02 09:30")[0]["id"] != first["id"]  # 不同时刻另算

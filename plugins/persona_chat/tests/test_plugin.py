@@ -2034,7 +2034,7 @@ async def test_due_reminder_ats_the_person_once(module, fake_llm):
     item, _ = module.reminder_book.add(
         "group:100", at=_later(), user="13", name="13", note="叫他起床", said="明早叫我起床"
     )
-    item["due"] = module.time.time() - 120
+    item["due"] = module.time.time() - 600
     # 她没填 mention，最新一条只是图也照样说话（不按没人叫她时“只许回表情包”）
     fake_llm.replies.append([{"text": "九点了 起床\n再不起埃及拔草"}])
     s = session([], user="13", message_id="x")
@@ -2042,7 +2042,7 @@ async def test_due_reminder_ats_the_person_once(module, fake_llm):
 
     ((messages, force),) = fake_llm.requests
     hint = messages[-1]["content"]
-    assert force and "到了你答应 13 的时间：叫他起床" in hint and "晚了 2 分钟" in hint
+    assert force and "到了你答应 13 的时间：叫他起床" in hint and "晚了 10 分钟" in hint
     assert "mention 填 #1" in hint  # 他那条还在记录里
     (sent,) = s.send.call_args.args[0]
     at, text = sent.children
@@ -2160,3 +2160,100 @@ async def test_old_memory_is_split_so_it_stays_in_its_group(module, fake_llm, mo
     await module._digest("group:100", module.conversations["group:100"], 0)
     assert "群友1(1)：common" not in asked[0]
     assert module.memory_store.load()["people"]["1"] == {"name": "甲", "note": "", "legacy": "x"}
+
+
+async def test_reminder_cancelled_while_waiting_is_not_sent(module, fake_llm):
+    # 11-04：先说“两分钟后叫我”又改成“两点叫我”，她在那一轮里取消了旧的；
+    # 旧的已经被每分钟的检查拿到、排队等那一轮结束，结束后照样发了出去
+    item, _ = module.reminder_book.add(
+        "group:100", at=_later(), user="13", name="13", note="叫他一声"
+    )
+    module.reminder_book.cancel("group:100", item["id"])
+    s = session([], user="13", message_id="x")
+    assert not await module._remind(s, item) and not fake_llm.requests
+    s.send.assert_not_called()
+
+
+async def test_due_reminders_are_left_to_the_plugin(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    due, _ = module.reminder_book.add("group:100", at=_later(), user="13", name="13", note="喊一声")
+    later, _ = module.reminder_book.add("group:100", at=_later(5), user="2", name="乙", note="两点")
+    data = module.reminder_book.store.load(default={})
+    data["items"][0]["due"] = module.time.time() - 30
+    module.reminder_book.store.save(data)
+    # 到点了的不列给她：不然她在别的回复里自己先喊一遍，插件到点再喊一遍
+    fake_llm.replies.append([{"text": "在"}])
+    await feed(module, session([At("42"), Text(" 在吗")], user="5", message_id="m1"))
+    hint = fake_llm.requests[-1][0][-1]["content"]
+    assert f"提醒{later['id']} " in hint and f"提醒{due['id']} " not in hint
+    # 到点开口时不列别的提醒，免得混在一起（把“两分钟后”说成“两点到了”）
+    fake_llm.replies.append([{"text": "到了"}])
+    await module._remind(session([], user="13", message_id="x"), data["items"][0])
+    hint = fake_llm.requests[-1][0][-1]["content"]
+    assert "还没到点的提醒" not in hint and "晚了" not in hint  # 晚几十秒不提
+
+
+async def test_reminder_fires_after_the_chat_was_reset(module, fake_llm):
+    # 重置会清聊天记录、不清提醒：记录是空的时候到点也要说得出来
+    item, _ = module.reminder_book.add(
+        "group:100", at=_later(), user="13", name="13", note="叫他起床"
+    )
+    fake_llm.replies.append([{"text": "起床了"}])
+    s = session([], user="13", message_id="x")
+    await module._remind(s, item)
+    (sent,) = s.send.call_args.args[0]
+    assert isinstance(sent.children[0], At) and module.reminder_book.pending("group:100") == []
+
+
+async def test_reminder_expired_while_waiting_is_dropped(module, fake_llm):
+    item, _ = module.reminder_book.add("group:100", at=_later(), user="13", name="13", note="x")
+    item["due"] = module.time.time() - module.reminders.LATE - 60  # 排队等锁时过了作废时间
+    s = session([], user="13", message_id="x")
+    assert not await module._remind(s, item) and not fake_llm.requests
+    assert module.reminder_book.pending("group:100") == []
+
+
+async def test_bad_split_answers_keep_the_old_note(module, fake_llm, monkeypatch):
+    module._split_failures.clear()
+    module.memory_store.save(
+        {
+            "people": {
+                "1": {"name": "甲", "note": "", "legacy": "叫他老甲，答应周日叫他", "groups": {}}
+            }
+        }
+    )
+    module._conversation("group:100").add("a", "群友1(1)", "在")
+    answers = [{}, {"common": 3}, {}]
+
+    async def digest(client, *, model, prompt, text):
+        return answers.pop(0), {}
+
+    monkeypatch.setattr(module.llm, "digest", digest)
+    for _ in range(2):  # 没拿到能用的两层：旧档案留着，下次再拆
+        await module._split_legacy()
+        assert module.memory_store.load()["people"]["1"]["legacy"] == "叫他老甲，答应周日叫他"
+    await module._split_legacy()  # 第三次还不行：整段当成本群那层，只留在他出现过的那一个群
+    assert module.memory_store.load()["people"]["1"] == {
+        "name": "甲",
+        "note": "",
+        "groups": {"group:100": "叫他老甲，答应周日叫他"},
+    }
+
+
+async def test_split_looks_again_where_he_spoke_after_the_request(module, fake_llm, monkeypatch):
+    module.memory_store.save(
+        {
+            "people": {
+                "1": {"name": "甲", "note": "", "legacy": "叫他老甲，说单位扣钱", "groups": {}}
+            }
+        }
+    )
+    module._conversation("group:100").add("a", "群友1(1)", "在")
+
+    async def digest(client, *, model, prompt, text):
+        module._conversation("group:200").add("b", "群友1(1)", "我也在这")  # 等模型时去了别的群
+        return {"common": "叫他老甲", "here": "说单位扣钱"}, {}
+
+    monkeypatch.setattr(module.llm, "digest", digest)
+    await module._split_legacy()
+    assert module.memory_store.load()["people"]["1"]["groups"] == {}

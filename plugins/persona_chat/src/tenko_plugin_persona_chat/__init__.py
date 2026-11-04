@@ -243,12 +243,15 @@ at_only_store = Store("at_only", version=1)
 # 她答应到点做的事，见 reminders 模块；到点没群友消息可接，靠登记时存下的原始事件重建会话发出去。
 reminder_book = reminders.Reminders(Store("reminders", version=1))
 _reminding: set[int] = set()  # 正在到点开口的提醒，别被下一轮检查再拿一次
+_LATE_NOTE = 5  # 晚这么多分钟以上才在提示里说晚了
 _digests: dict[str, asyncio.Task[None]] = {}
 _DIGEST_EVERY = 60
 _DIGEST_LINES = 300  # 第一次整理时最多读最近这么多条，旧的靠备忘
 _PERSON_CHARS = 200  # 本群那层要求 80 字，超出太多就截断
 _COMMON_CHARS = 200  # 共用那层要求 40 字，模型常写长；截断只兜底，别把一句话截一半
 _SPLIT_BATCH = 10  # 旧档案每分钟拆这么多个
+_SPLIT_TRIES = 3  # 模型连着这么多次没给出能用的结果，就整段当成本群那层
+_split_failures: dict[str, int] = {}
 _GROUP_CHARS = 600
 _MEMORY_LINES = 40  # 最近这么多条里说过话的人才带上档案
 _reported: set[int] = set()
@@ -1250,6 +1253,17 @@ async def respond(
         key = _key(session)
         if _over_budget(key):
             return
+        if reminder is not None and not any(
+            item["id"] == reminder["id"] for item in reminder_book.pending(key)
+        ):
+            # 排队等前一轮回复的时候，她在那一轮里取消或改掉了这条：11-04 群主先说“两分钟后
+            # 叫我”又改成“两点叫我”，她取消了旧的，旧的照样发了出去，还说成“两点到了”。
+            logger.info("AI群友的提醒 {} 等着开口时被取消了，不发", reminder["id"])
+            return
+        if reminder is not None and time.time() - reminder["due"] > reminders.LATE:
+            reminder_book.drop(reminder["id"])  # 等前一轮等得太久，过了作废的时间
+            logger.warning("AI群友的提醒 {} 等着开口时错过太久，作废", reminder["id"])
+            return
         if call is not None:
             session, target, mood, force = call.session, call.line, call.mood, call.force
         person = target or answer
@@ -1371,7 +1385,15 @@ def _log_spent(turn: _Turn, mood: str, before: list[float], sent: bool) -> None:
     if after[3] < before[3]:
         before = [0, 0, 0, 0.0]
     miss, hit, out, cost = (a - b for a, b in zip(after, before, strict=True))
-    why = mood if turn.target else "接着聊" if turn.talking else "跟聊" if turn.follow else "插话"
+    why = (
+        mood
+        if turn.target or turn.reminder
+        else "接着聊"
+        if turn.talking
+        else "跟聊"
+        if turn.follow
+        else "插话"
+    )
     logger.info(
         "AI群友在 {} {}：问了 {} 轮，未命中 {} 命中 {} 输出 {}，约 ${:.4f}，{}",
         turn.key,
@@ -1391,7 +1413,9 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
     key, target, answer = turn.key, turn.target, turn.answer
     if turn.reminder is not None:
         item = turn.reminder
+        # 每分钟才看一次，晚几十秒是常态：说“晚了 1 分钟”她自己都觉得矛盾，晚得多了才提。
         late = int((datetime.now().timestamp() - item["due"]) // 60)
+        late = late if late >= _LATE_NOTE else 0
         private = key.startswith("private:")
         number = None if private else _remindee(conversation, item)
         hint = remind_hint(item["name"], item["note"], item["said"], number, late, private)
@@ -1451,7 +1475,7 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
     weekday = "一二三四五六日"[now.weekday()]
     turn.hint = (
         f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
-        f"{_recall(key, conversation)}{_pending(key)}{hint}"
+        f"{_recall(key, conversation)}{'' if turn.reminder else _pending(key)}{hint}"
         f"{repeat_hint(said, [*phrases, *RULE_LINES])}"
         f"{habit_hint(said, others)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
     )
@@ -1722,6 +1746,8 @@ def _add_reminder(
     )
     if item is None:
         logger.info("AI群友在 {} 的提醒没登记（{}）：{}", turn.key, why, arguments)
+    elif why:
+        logger.info("AI群友在 {} 的提醒 {} {}", turn.key, item["id"], why)
     else:
         logger.info(
             "AI群友在 {} 登记了提醒 {}：{} {} {}",
@@ -1747,11 +1773,12 @@ def _pending(key: str) -> str:
     """末尾提示里她答应过、还没到点的提醒。"""
 
     now = datetime.now().timestamp()
+    # 到点了的不列：插件马上会叫她开口，列着她会在别的回复里自己先喊一遍，到点再喊一遍。
     return pending_hint(
         [
             (item["id"], reminders.when(item["due"], now), item["name"], item["note"])
             for item in reminder_book.pending(key)
-            if item["id"] not in _reminding
+            if item["id"] not in _reminding and item["due"] > now
         ]
     )
 
@@ -2355,7 +2382,6 @@ async def _split_legacy(batch: int = _SPLIT_BATCH) -> None:
     或者查不到（记录压缩掉了）的，分不清哪句是在哪儿说的，只留共用那层，免得带到别的群去。
     升级时宿主已经备份了原文件。请求失败就停下，下一分钟再试。"""
 
-    seen = _seen_in()
     pending = [
         qq
         for qq, person in memory_store.load(default={}).get("people", {}).items()
@@ -2365,7 +2391,7 @@ async def _split_legacy(batch: int = _SPLIT_BATCH) -> None:
         legacy = memory_store.load(default={}).get("people", {}).get(qq, {}).get("legacy")
         if legacy is None:
             continue
-        groups = sorted(seen.get(qq, ()))
+        groups = sorted(_seen_in().get(qq, ()))
         result: dict = {}
         if legacy.strip():
             try:
@@ -2379,8 +2405,19 @@ async def _split_legacy(batch: int = _SPLIT_BATCH) -> None:
             usage_book.add(
                 now.date(), groups[0] if groups else GLOBAL, usage, estimate_cost(usage, now)
             )
-        common = result.get("common") if isinstance(result.get("common"), str) else ""
-        here = result.get("here") if isinstance(result.get("here"), str) else ""
+        common, here = result.get("common"), result.get("here")
+        if legacy.strip() and not (isinstance(common, str) or isinstance(here, str)):
+            # 没给出能用的两层（JSON 坏了、截断了）：别把旧档案当成空的删掉，下次再拆；
+            # 连着几次都这样，整段当成本群那层，下面照样只在单一群里留。
+            tries = _split_failures[qq] = _split_failures.get(qq, 0) + 1
+            if tries < _SPLIT_TRIES:
+                logger.warning("AI群友拆 {} 的旧档案没拿到结果，稍后再试：{!r}", qq, result)
+                continue
+            common, here = "", legacy
+        common = common if isinstance(common, str) else ""
+        here = here if isinstance(here, str) else ""
+        # 等模型的时候他可能又在别的群说了话：落盘前重新看一次他在哪些群出现过。
+        groups = sorted(_seen_in().get(qq, ()))
         memory = memory_store.load(default={})
         person = memory.get("people", {}).get(qq)
         if person is None or "legacy" not in person:

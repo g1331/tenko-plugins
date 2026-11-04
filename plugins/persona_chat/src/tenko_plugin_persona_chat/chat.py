@@ -529,7 +529,8 @@ def slang(lines: Iterable[Line], top: int = 5, least: int = 3, longest: int = 6)
     counts: Counter[str] = Counter()
     people: dict[str, set[str]] = {}
     lines, last = list(lines), None
-    for line, after in zip(lines, [*lines[1:], None], strict=True):
+    # 记录是空的（刚重置过，到点提醒时）也照样能算：zip 两边长度要对得上。
+    for line, after in zip(lines, [*lines[1:], None][: len(lines)], strict=True):
         if line.speaker in (None, "Tenko 功能"):
             continue
         text = _ADDRESS.sub("", line.text).strip()

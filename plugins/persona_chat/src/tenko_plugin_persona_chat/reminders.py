@@ -74,7 +74,8 @@ class Reminders:
         origin: dict[str, Any] | None = None,
         now: float | None = None,
     ) -> tuple[dict[str, Any] | None, str]:
-        """登记一条，返回 (提醒, 不收的原因)；收下时原因为空。"""
+        """登记一条，返回 (提醒, 原因)：收下时原因为空；同一个人、同一时刻已经有了，
+        返回那条和“已经登记过”；不收时提醒为 ``None``。"""
 
         now = time.time() if now is None else now
         due = parse_at(at)
@@ -95,7 +96,7 @@ class Reminders:
             if note and not same["note"]:
                 same["note"] = note
                 self.store.save(data)
-            return same, ""
+            return same, "已经登记过"
         if len(mine) >= PER_CONVERSATION:
             return None, "这个会话挂着的提醒满了"
         if sum(item["user"] == user for item in mine) >= PER_PERSON:
