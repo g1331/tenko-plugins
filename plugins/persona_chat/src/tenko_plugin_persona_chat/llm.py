@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 import httpx
+from loguru import logger
 
 # 先看懂再开口：线上她常把别人两人之间的“你”当成在说她、把甲说的事安到乙头上（2026-11 日志里
 # 31 段）。看场面、决定说不说、怎么说原本挤在一步里，思考也就几十个 token。让她每次先写一句
@@ -268,13 +269,14 @@ async def chat(
 
     ``effort`` 是思考强度（low/high/max），空的不思考。思考时接口只认 ``tool_choice=auto``，
     模型常把要说的话直接写进 content：没调 send_message 时 content 就当要说的话，
-    否则 content 丢弃。``force`` 时思考完还是没开口，就不思考、强制只能说话再问一次。
+    否则 content 丢弃。``force`` 时思考完还是没开口，就不思考、强制只能说话再问一次；
+    content 是她把思考写错了地方时（见 :func:`_chat`），不思考、只能用工具再问一次。
     """
 
-    calls, usage = await _chat(client, model, messages, force, max_tokens, effort)
-    if effort and force and not any("tool" not in c for c in calls):
+    calls, usage, aloud = await _chat(client, model, messages, force, max_tokens, effort)
+    if effort and (force or aloud) and not any("tool" not in c for c in calls):
         kept = [c for c in calls if c["tool"] in SIDE_TOOLS]
-        again, more = await _chat(client, model, messages, True, max_tokens, "")
+        again, more, _ = await _chat(client, model, messages, force, max_tokens, "")
         calls = kept + again
         usage = {
             **more,
@@ -298,7 +300,9 @@ async def _chat(
     force: bool,
     max_tokens: int,
     effort: str,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
+    """第三项为真：思考时她没调 send_message、思考是空的，content 当成她的思考，没当成要说的话。"""
+
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -344,11 +348,19 @@ async def _chat(
         elif isinstance(arguments.get("text"), str):
             calls.extend(_quoted(arguments))
     said = (message.get("content") or "").strip()
-    if effort and said and not any("tool" not in c for c in calls):
-        # 思考模式下她常直接写字、不调 send_message，也就没填 scene：拿思考的开头当她看到的场面。
-        thought = " ".join((message.get("reasoning_content") or "").split())[:150]
-        calls.extend(_quoted({"text": said} | ({"scene": f"（想）{thought}"} if thought else {})))
-    return calls, data.get("usage") or {}
+    usage = data.get("usage") or {}
+    if not (effort and said and not any("tool" not in c for c in calls)):
+        return calls, usage, False
+    thought = " ".join((message.get("reasoning_content") or "").split())[:150]
+    if not thought:
+        # 思考是空的，content 多半就是她的思考：11-05 她把“这个话题我插不上什么，可以短回一句
+        # ……stay_silent也行”整段写进 content，拆成两条发到了群里。思考为空时她本来也没想，
+        # 交给不思考、只能用工具的那次重问，不丢什么（这类回复约占两成，多是单发一张表情包）。
+        logger.info("AI群友思考是空的，正文不当成要说的话：{}", " ".join(said.split())[:150])
+        return calls, usage, True
+    # 思考模式下她常直接写字、不调 send_message，也就没填 scene：拿思考的开头当她看到的场面。
+    calls.extend(_quoted({"text": said, "scene": f"（想）{thought}"}))
+    return calls, usage, False
 
 
 def _with_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

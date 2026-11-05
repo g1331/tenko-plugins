@@ -406,13 +406,15 @@ async def test_thinking_takes_plain_content_as_what_she_says(module):
 
     def reply(request):
         payloads.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": "是康神吧"}}]})
+        message = {"content": "是康神吧", "reasoning_content": "甲在猜图里是谁"}
+        return httpx.Response(200, json={"choices": [{"message": message}]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
         calls, _ = await module.llm.chat(
             c, model="m", messages=[], force=False, max_tokens=9, effort="high"
         )
-    assert calls == [{"text": "是康神吧"}]
+    assert calls == [{"text": "是康神吧", "scene": "（想）甲在猜图里是谁"}]
+    assert len(payloads) == 1
     # 思考时接口只认 auto；思考的 token 另留一份
     assert payloads[0]["tool_choice"] == "auto"
     assert payloads[0]["reasoning_effort"] == "high"
@@ -428,7 +430,8 @@ async def test_thinking_passes_back_reasoning_for_her_trailing_words(module):
 
     def reply(request):
         payloads.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": "嗯"}}]})
+        message = {"content": "嗯", "reasoning_content": "甲在问"}
+        return httpx.Response(200, json={"choices": [{"message": message}]})
 
     messages = [
         {"role": "system", "content": "人设"},
@@ -503,6 +506,42 @@ async def test_forced_thinking_that_stays_quiet_asks_again_without_thinking(modu
     assert usage["completion_tokens"] == 105
     assert usage["prompt_cache_miss_tokens"] == 100
     assert usage["prompt_tokens"] == 50
+
+
+async def test_thinking_written_into_content_is_not_said(module):
+    import json
+
+    import httpx
+
+    payloads = []
+    # 11-05 生产原样：思考是空的，整段盘算写在 content 里，以前拆成两条发到了群里
+    leaked = (
+        "现在还在聊枪皮和载具，DrChristoff2说白车皮在雪地图好用。这个话题我插不上什么，可以短回一句。"
+        "\n\n回一句短的，或者说白了就是没人找我，stay_silent也行。\n\n就发一条短的。雪地图白车皮藏得住"
+    )
+
+    def reply(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            call = {"function": {"name": "save_sticker", "arguments": '{"name": "难绷"}'}}
+            message = {"content": leaked, "reasoning_content": "", "tool_calls": [call]}
+        else:
+            args = {"scene": "在聊车皮", "to": 3, "text": "雪地图白车皮藏得住"}
+            call = {"function": {"name": "send_message", "arguments": json.dumps(args)}}
+            message = {"tool_calls": [call]}
+        return httpx.Response(200, json={"choices": [{"message": message}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        calls, _ = await module.llm.chat(
+            c, model="m", messages=[], force=False, max_tokens=9, effort="high"
+        )
+    # 不思考、只能用工具再问一次；没被叫到，照样可以选不说话
+    assert payloads[1]["thinking"] == {"type": "disabled"}
+    assert payloads[1]["tool_choice"] == "required"
+    assert calls == [
+        {"name": "难绷", "tool": "save_sticker"},
+        {"scene": "在聊车皮", "to": 3, "text": "雪地图白车皮藏得住"},
+    ]
 
 
 def test_slang_counts_short_lines_several_people_send(chat):
