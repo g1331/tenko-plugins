@@ -85,6 +85,7 @@ from .persona import (
     ignored_hint,
     memory_hint,
     mention_hint,
+    page_hint,
     pending_hint,
     remind_hint,
     repeat_hint,
@@ -1508,31 +1509,48 @@ async def _think(
     running = (target or answer) is not None and bool(_commands())
     try:
         calls = await ask(hint, force and not (searching or running))
-        query = next((str(c.get("query", "")) for c in calls if c.get("tool") == "search"), "")
-        ran = next((str(c.get("command", "")) for c in calls if c.get("tool") == "run_command"), "")
-        found = []
-        if searching and query.strip():
-            found.append(search_hint(query, await _search(key, query)))
-        if running and ran.strip():
-            found.append(await _run_command(session, conversation, ran, target or answer))
+        found: list[str] = []
+        urls: list[str] = []  # 搜到的网址，按结果编号
+        searched = opened = False
+        # 搜一次、打开一页、用一次功能，每样最多一次；做了就带着结果再问一轮（不强制，她才能照结果
+        # 改表情包备注、打开搜到的某条），所以搜完还能接着点开一条看正文。
+        while True:
+            query = _argument(calls, "search", "query")
+            page = _argument(calls, "open_page", "page")
+            ran = _argument(calls, "run_command", "command")
+            new = []
+            if searching and page and not opened and _search_left(key):
+                opened = True
+                want = _argument(calls, "open_page", "want")
+                new.append(await _open(key, conversation, page, want, urls))
+            if searching and query and not searched:
+                searched = True
+                text, urls = await _search(key, query)
+                new.append(search_hint(query, text, can_open=not opened and _search_left(key)))
+            if running and ran and not turn.commanded:
+                turn.commanded = True
+                new.append(await _run_command(session, conversation, ran, target or answer))
+            if not new:
+                break
+            found += new
+            kept = [c for c in calls if c.get("tool") in llm.SIDE_TOOLS]
+            calls = kept + await ask("\n".join([hint, *found]), False, retry=True)
         turn.searched = bool(found)
-        turn.commanded = running and bool(ran.strip())
-        again = None
-        if turn.searched:
-            # 搜完那轮也不强制，她才能照结果改表情包备注；没说话再强制补一句。
-            again = "\n".join([hint, *found])
-        elif force and (searching or running or calls) and all("tool" in c for c in calls):
+        again = "\n".join([hint, *found]) if found else None
+        if (
+            not found
+            and force
+            and (searching or running or calls)
+            and all("tool" in c for c in calls)
+        ):
             # 第一轮没强制（能搜，或眼前有表情包要能收藏）却没说话；或者强制了，
             # DeepSeek 仍去调 search 之类的工具：点明只说话，再强制问一次。
-            again = hint
-        if again is not None:
             kept = [c for c in calls if c.get("tool") in llm.SIDE_TOOLS]
-            if not turn.searched:
-                again = f"{again}\n{_STICKERS_DONE if kept else _JUST_TALK}"
-            calls = kept + await ask(again, force and not turn.searched, retry=True)
-            if force and all("tool" in c for c in calls):
-                # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
-                calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
+            again = f"{hint}\n{_STICKERS_DONE if kept else _JUST_TALK}"
+            calls = kept + await ask(again, True, retry=True)
+        if again is not None and force and all("tool" in c for c in calls):
+            # 强制说话时 DeepSeek 有时仍想改表情包，点明已经改好它才肯说话。
+            calls += await ask(f"{again}\n{_STICKERS_DONE}", True, retry=True)
     except httpx.HTTPStatusError as error:
         if llm.content_risk(error):
             # 不撤掉的话，触发审核的那条一直留在记录里，这个群以后每次请求都被拒，
@@ -2145,8 +2163,16 @@ def _search_left(key: str) -> bool:
     return _searches.get((today, key), 0) < config.search_daily
 
 
-async def _search(key: str, query: str) -> str:
-    """搜一次，整理成给模型看的几行；失败当作没搜到。"""
+def _argument(calls: list[dict], tool: str, name: str) -> str:
+    """这轮调用的 ``tool`` 里第一个填了的 ``name`` 参数，没调用是空的。"""
+
+    return next(
+        (v for c in calls if c.get("tool") == tool and (v := str(c.get(name) or "").strip())), ""
+    )
+
+
+async def _search(key: str, query: str) -> tuple[str, list[str]]:
+    """搜一次，整理成给模型看的几行（带编号，打开时填）和各条的网址；失败当作没搜到。"""
 
     today = datetime.now().date()
     _searches[(today.isoformat(), key)] = _searches.get((today.isoformat(), key), 0) + 1
@@ -2157,16 +2183,45 @@ async def _search(key: str, query: str) -> str:
         )
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as error:
         logger.warning("AI群友搜索失败（{}）：{!r}", name, error)
-        return ""
+        return "", []
     logger.info("AI群友搜索“{}”（{}）：{} 条结果", query, name, len(results))
     provider = websearch.PROVIDERS[name]
     if (results or provider.charge_empty) and provider.cost and not in_sandbox():
         usage_book.add(today, key, {}, provider.cost)
     lines = []
-    for r in results:
+    for number, r in enumerate(results, 1):
         source = "，".join(part for part in (r.site or "未知站点", r.date) if part)
-        lines.append(f"- {r.title}（{source}）：{r.text[:300]}")
-    return "\n".join(lines)
+        lines.append(f"[{number}] {r.title}（{source}）：{r.text[:300]}")
+    return "\n".join(lines), [r.url for r in results]
+
+
+async def _open(key: str, conversation: Conversation, page: str, want: str, urls: list[str]) -> str:
+    """打开她要看的那页，整理成给模型看的提示。只开刚搜到的结果和聊天里出现过的网址，
+    免得她凭印象编一个；和搜索共用每天的次数，打不开当作没内容。"""
+
+    if page.isdigit():
+        url = urls[int(page) - 1] if 0 < int(page) <= len(urls) else ""
+    else:
+        seen = page.startswith(("http://", "https://"))
+        url = page if seen and any(page in line.text for line in conversation.lines) else ""
+    if not url:
+        logger.info("AI群友想打开“{}”：不是搜到的结果，也没在聊天里出现过，没开", page)
+        return page_hint(page, None)
+    today = datetime.now().date()
+    _searches[(today.isoformat(), key)] = _searches.get((today.isoformat(), key), 0) + 1
+    name, api_key, base_url = _search_settings()
+    try:
+        text = await websearch.read(
+            search_client, name, url, want, api_key=api_key, base_url=base_url
+        )
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as error:
+        logger.warning("AI群友打开网页失败（{}）：{} {!r}", name, url, error)
+        return page_hint(url, "")
+    logger.info("AI群友打开网页 {} 找“{}”（{}）：{} 字", url, want, name, len(text))
+    provider = websearch.PROVIDERS[name]
+    if text and provider.read_cost and not in_sandbox():
+        usage_book.add(today, key, {}, provider.read_cost)
+    return page_hint(url, text)
 
 
 async def _compress(key: str, conversation: Conversation, prompt_tokens: int) -> None:

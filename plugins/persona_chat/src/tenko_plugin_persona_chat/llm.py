@@ -154,6 +154,30 @@ SEARCH = {
         },
     },
 }
+OPEN_PAGE = {
+    "type": "function",
+    "function": {
+        "name": "open_page",
+        "description": (
+            "悄悄打开一个网页看正文，看完再回复。搜到的摘要说不清对方要的细节，"
+            "或者有人发了网址问你里面写了什么时用；只能开刚搜到的结果和聊天里出现过的网址。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "page": {
+                    "type": "string",
+                    "description": "刚搜到的结果编号，例如 2；或者聊天里别人发的完整网址",
+                },
+                "want": {
+                    "type": "string",
+                    "description": "想在页面里找什么，一句话，例如“坦克猎手的原型机型号”",
+                },
+            },
+            "required": ["page", "want"],
+        },
+    },
+}
 RUN_COMMAND = {
     "type": "function",
     "function": {
@@ -250,6 +274,7 @@ TOOLS = [
     EDIT_STICKER,
     DELETE_STICKER,
     SEARCH,
+    OPEN_PAGE,
     RUN_COMMAND,
     REMIND,
     CANCEL_REMINDER,

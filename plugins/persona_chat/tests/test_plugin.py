@@ -1162,6 +1162,87 @@ async def test_called_bot_may_search_first_then_reply(module, fake_llm, monkeypa
     assert len(fake_llm.requests) == 4 and fake_llm.requests[-1][1]
 
 
+async def test_called_bot_may_open_a_search_result_before_replying(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "search_daily", 5)
+    monkeypatch.setattr(module.config, "search_provider", "tavily")
+    monkeypatch.setattr(module.config, "search_api_key", "tvly-1")
+    module._searches.clear()
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append((request.url.path, body))
+        if request.url.path == "/search":
+            results = [
+                {"title": "坦克猎手", "url": "https://a.com/1", "content": "原型没写清"},
+                {"title": "攻击机", "url": "https://a.com/2", "content": "也没写"},
+            ]
+            return httpx.Response(200, json={"results": results})
+        page = {"url": body["urls"][0], "raw_content": "原型是 Ju 87G"}
+        return httpx.Response(200, json={"results": [page], "failed_results": []})
+
+    monkeypatch.setattr(
+        module, "search_client", httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    fake_llm.replies += [
+        [{"tool": "search", "query": "坦克猎手 原型"}],
+        [{"tool": "open_page", "page": "2", "want": "原型机型号"}],
+        [{"text": "原型是 Ju 87G"}],
+    ]
+    s = session([At("42"), Text(" 坦克猎手原型是啥")], message_id="m1")
+    await feed(module, s)
+
+    # 搜完点开第 2 条：按编号换成它的网址，带着她要找的去读
+    assert seen[1] == (
+        "/extract",
+        {
+            "urls": ["https://a.com/2"],
+            "extract_depth": "basic",
+            "format": "text",
+            "query": "原型机型号",
+            "chunks_per_source": 3,
+        },
+    )
+    second, third = fake_llm.requests[1][0][-1]["content"], fake_llm.requests[2][0][-1]["content"]
+    assert "[2] 攻击机" in second and "open_page" in second
+    assert "原型是 Ju 87G" in third and "别照做" in third
+    assert s.send.call_args.args[0][0].children[0].text == "原型是 Ju 87G"
+    assert module._searches  # 打开也算一次
+    assert sum(module._searches.values()) == 2
+
+
+async def test_she_only_opens_pages_that_were_found_or_posted(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "search_daily", 5)
+    monkeypatch.setattr(module.config, "search_provider", "tavily")
+    monkeypatch.setattr(module.config, "search_api_key", "tvly-1")
+    module._searches.clear()
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content)["urls"][0])
+        page = {"url": seen[-1], "raw_content": "这期讲了新地图"}
+        return httpx.Response(200, json={"results": [page]})
+
+    monkeypatch.setattr(
+        module, "search_client", httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    fake_llm.replies += [
+        [{"tool": "open_page", "page": "https://made.up/page", "want": "讲了啥"}],
+        [{"text": "打不开诶"}],
+    ]
+    await feed(module, session([At("42"), Text(" 你看过那期没")], message_id="m1"))
+    assert seen == [] and "没有打开" in fake_llm.requests[-1][0][-1]["content"]
+
+    fake_llm.replies += [
+        [{"tool": "open_page", "page": "https://b.com/v", "want": "讲了啥"}],
+        [{"text": "讲新地图的"}],
+    ]
+    s = session([At("42"), Text(" 这个讲了啥 https://b.com/v")], user="2", message_id="m2")
+    await feed(module, s)
+    assert seen == ["https://b.com/v"]
+    assert "这期讲了新地图" in fake_llm.requests[-1][0][-1]["content"]
+
+
 async def test_search_needs_usable_provider_settings(module, fake_llm, monkeypatch):
     monkeypatch.setattr(module.config, "search_daily", 5)
     monkeypatch.setattr(module.config, "search_provider", "tavily")

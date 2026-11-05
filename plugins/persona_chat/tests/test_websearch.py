@@ -86,3 +86,37 @@ def test_problem_explains_unusable_settings(websearch):
     assert "API key" in websearch.problem("tavily", "", "")
     assert "地址" in websearch.problem("searxng", "", "")
     assert "可选" in websearch.problem("google", "k", "")
+
+
+async def test_tavily_reads_the_parts_she_wants(websearch):
+    seen = {}
+
+    def handle(request):
+        seen["url"] = str(request.url)
+        seen["key"] = request.headers["Authorization"]
+        seen["body"] = json.loads(request.content)
+        page = {"url": "https://a.com/x", "raw_content": "跳转到内容\n\n  DLC 有  四个  \n"}
+        return httpx.Response(200, json={"results": [page], "failed_results": []})
+
+    text = await websearch.read(
+        client(handle), "tavily", "https://a.com/x", "有哪些 DLC", api_key="tvly-1"
+    )
+    assert seen["url"] == "https://api.tavily.com/extract" and seen["key"] == "Bearer tvly-1"
+    assert seen["body"]["urls"] == ["https://a.com/x"] and seen["body"]["query"] == "有哪些 DLC"
+    assert text == "跳转到内容\nDLC 有 四个"  # 空行去掉，空白收紧
+
+
+async def test_providers_without_a_reader_use_jina_without_the_key(websearch):
+    seen = {}
+
+    def handle(request):
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, text="正文" * 5000)
+
+    text = await websearch.read(client(handle), "bocha", "https://a.com/x", "", api_key="sk-1")
+    assert seen == {"url": "https://r.jina.ai/https://a.com/x", "auth": None}
+    assert len(text) == 3000
+
+    with pytest.raises(ValueError):
+        await websearch.read(client(handle), "bocha", "file:///etc/passwd", "", api_key="sk-1")
