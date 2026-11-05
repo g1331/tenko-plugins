@@ -125,6 +125,11 @@ def test_cost_doubles_in_weekday_peak_hours(chat):
     assert chat.estimate_cost(usage, saturday) == 0.15
 
 
+def test_cost_reported_upstream_is_used_as_is(chat):
+    usage = {"prompt_cache_miss_tokens": 1_000_000, "completion_tokens": 0, "cost": 0.0123}
+    assert chat.estimate_cost(usage, datetime(2026, 10, 23, 2, tzinfo=UTC)) == 0.0123
+
+
 def test_usage_book_counts_per_key_and_globally_and_keeps_a_week(chat):
     book = chat.UsageBook(MemoryStore())
     usage = {"prompt_cache_miss_tokens": 10, "prompt_cache_hit_tokens": 5, "completion_tokens": 3}
@@ -506,6 +511,48 @@ async def test_forced_thinking_that_stays_quiet_asks_again_without_thinking(modu
     assert usage["completion_tokens"] == 105
     assert usage["prompt_cache_miss_tokens"] == 100
     assert usage["prompt_tokens"] == 50
+
+
+async def test_reasoning_from_openrouter_counts_as_thinking(module):
+    import httpx
+
+    payloads = []
+
+    def reply(request):
+        payloads.append(request)
+        message = {"content": "是康神吧", "reasoning": "甲在猜图里是谁"}
+        return httpx.Response(200, json={"choices": [{"message": message}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        calls, _ = await module.llm.chat(
+            c, model="m", messages=[], force=False, max_tokens=9, effort="high"
+        )
+    # OpenRouter 把思考放在 reasoning：认得出来就不用重问
+    assert calls == [{"text": "是康神吧", "scene": "（想）甲在猜图里是谁"}]
+    assert len(payloads) == 1
+
+
+async def test_openai_style_usage_is_read_as_cache_hits_and_misses(module):
+    import httpx
+
+    usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 20,
+        "prompt_tokens_details": {"cached_tokens": 800},
+        "cost": 0.0001,
+    }
+
+    def reply(request):
+        call = {"function": {"name": "send_message", "arguments": '{"text": "在"}'}}
+        message = {"tool_calls": [call]}
+        return httpx.Response(200, json={"choices": [{"message": message}], "usage": usage})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        _, got = await module.llm.chat(c, model="m", messages=[], force=True, max_tokens=9)
+    # OpenRouter 按 OpenAI 格式报：不换算的话命中、未命中都是 0，每日额度只算输出
+    assert got["prompt_cache_hit_tokens"] == 800
+    assert got["prompt_cache_miss_tokens"] == 200
+    assert got["cost"] == 0.0001
 
 
 async def test_thinking_written_into_content_is_not_said(module):

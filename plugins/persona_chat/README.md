@@ -118,7 +118,7 @@ api_key = "sk-..."
 | `banned_words` | `[]` | 违禁词，含这些词的群友消息她看不到，含这些词的回复不发；不分简繁、全半角和大小写，忽略空格和标点，拼音 8 个字母以上的还按读音比 |
 | `global_daily_tokens` | `0` | 全部会话合计每天的 token 上限，`0` 不限 |
 
-请求关闭了 DeepSeek 的思考模式，人设和规则固定放在请求最前面以命中前缀缓存。`/AI群友 用量` 的费用按 `deepseek-flash` 官方价目估算（工作日 UTC 01–04、06–10 点为高峰价），换用其他模型时只看 token 数即可。
+请求关闭了 DeepSeek 的思考模式，人设和规则固定放在请求最前面以命中前缀缓存。`/AI群友 用量` 的费用：上游在用量里报了实际扣费（OpenRouter 的 `cost`）就照记，否则按 `deepseek-flash` 官方价目估算（工作日 UTC 01–04、06–10 点为高峰价）。缓存命中按 DeepSeek 官方的字段读，没有时读 OpenAI 格式的 `prompt_tokens_details.cached_tokens`，每日 token 额度两种接口都算得对。
 
 ## 图标
 

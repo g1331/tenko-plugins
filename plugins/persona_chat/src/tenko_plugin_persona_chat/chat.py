@@ -636,11 +636,14 @@ _PRICES = (0.15, 0.003, 0.6)
 
 
 def estimate_cost(usage: dict[str, Any], now: datetime) -> float:
-    """按官方价目估算；工作日 UTC 01-04、06-10 点为高峰，价格翻倍。
+    """上游报了实际扣费（OpenRouter 的 ``cost``）就用它；否则按 deepseek-flash 官方价目估算，
+    工作日 UTC 01-04、06-10 点为高峰，价格翻倍。
 
     shortcut: 不认中国法定节假日（官方按闲时计价），节假日的估算会偏高。
     """
 
+    if isinstance(cost := usage.get("cost"), int | float) and not isinstance(cost, bool):
+        return float(cost)
     now = now.astimezone(UTC)
     peak = now.weekday() < 5 and (1 <= now.hour < 4 or 6 <= now.hour < 10)
     tokens = (

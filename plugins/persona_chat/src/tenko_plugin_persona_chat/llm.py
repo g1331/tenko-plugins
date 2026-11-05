@@ -240,7 +240,7 @@ async def summarize(
     )
     response.raise_for_status()
     data = response.json()
-    return (data["choices"][0]["message"].get("content") or "").strip(), data.get("usage") or {}
+    return (data["choices"][0]["message"].get("content") or "").strip(), _usage(data)
 
 
 TOOLS = [
@@ -285,8 +285,24 @@ async def chat(
     return calls, usage
 
 
-# usage 里按 token 计费的几项：再问一次时两次相加；prompt_tokens 取后一次，校准上下文大小用。
-_BILLED = ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "completion_tokens")
+# usage 里计费的几项：再问一次时两次相加；prompt_tokens 取后一次，校准上下文大小用。
+_BILLED = ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "completion_tokens", "cost")
+
+
+def _usage(data: dict[str, Any]) -> dict[str, Any]:
+    """usage 统一成 DeepSeek 官方的字段。OpenRouter 这类按 OpenAI 格式报的，缓存命中写在
+    ``prompt_tokens_details.cached_tokens``：11-05 换过去后命中、未命中都读成 0，
+    每日额度只算了输出。
+    它另报实际扣费 ``cost``（美元），原样带着，记账时优先用。"""
+
+    usage = dict(data.get("usage") or {})
+    if usage and "prompt_cache_hit_tokens" not in usage and "prompt_cache_miss_tokens" not in usage:
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        usage["prompt_cache_hit_tokens"] = cached
+        usage["prompt_cache_miss_tokens"] = max(usage.get("prompt_tokens", 0) - cached, 0)
+    return usage
+
+
 # 和说话一起调用、说完话插件再办的工具：没开口要强制再问时留着，不然白调了。
 SIDE_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker", "remind", "cancel_reminder")
 # 思考的 token 也算在 max_tokens 里；给它另留一份，不然想完了没字数说话。
@@ -348,10 +364,13 @@ async def _chat(
         elif isinstance(arguments.get("text"), str):
             calls.extend(_quoted(arguments))
     said = (message.get("content") or "").strip()
-    usage = data.get("usage") or {}
+    usage = _usage(data)
     if not (effort and said and not any("tool" not in c for c in calls)):
         return calls, usage, False
-    thought = " ".join((message.get("reasoning_content") or "").split())[:150]
+    # DeepSeek 官方把思考放在 reasoning_content，OpenRouter 放在 reasoning：11-05 换到 OpenRouter
+    # 后只认前者，每次都当成没想，次次重问。
+    thought = message.get("reasoning_content") or message.get("reasoning") or ""
+    thought = " ".join(thought.split())[:150]
     if not thought:
         # 思考是空的，content 多半就是她的思考：11-05 她把“这个话题我插不上什么，可以短回一句
         # ……stay_silent也行”整段写进 content，拆成两条发到了群里。思考为空时她本来也没想，
@@ -426,7 +445,7 @@ async def digest(
         result = json.loads(data["choices"][0]["message"].get("content") or "{}")
     except ValueError:
         result = {}
-    return result if isinstance(result, dict) else {}, data.get("usage") or {}
+    return result if isinstance(result, dict) else {}, _usage(data)
 
 
 async def pick_sticker(
@@ -477,4 +496,4 @@ async def pick_sticker(
         and isinstance(item.get("name"), str)
         and isinstance(item.get("score"), int | float)
     ]
-    return picks, data.get("usage") or {}
+    return picks, _usage(data)
