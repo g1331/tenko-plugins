@@ -1,50 +1,46 @@
 """战地一查询：战绩、武器、载具、最近对局和服务器，行动和交换，百科和小贴士，以及入群审核。
 
-查询数据来自 bf-manager 的公开查询接口，百科和小贴士在 :mod:`.codex`；这里解析命令、取数据，
-图片排版在 :mod:`.pages`，渲染不了时回文字。
+这里只声明命令和事件监听，每条命令取出参数后交给对应模块：
+
+- :mod:`.stats` 玩家战绩、武器载具、信息、最近对局、收藏
+- :mod:`.servers` 搜服务器、服务器详情
+- :mod:`.game` 全服概况、行动、交换
+- :mod:`.wiki` 百科、小贴士、戳一戳
+- :mod:`.binding` 绑定 EA 账号
+- :mod:`.review` 入群审核
+
+数据来自 bf-manager 的公开查询接口（:mod:`.api`），图片排版在 :mod:`.pages`，渲染不了时回文字。
 """
 
 from __future__ import annotations
 
-import asyncio
-import random
-import re
-import time
-from datetime import date, datetime
 from typing import Any
-from urllib.parse import urlparse
 
-import httpx
 from arclet.alconna import Alconna, AllParam, Args, CommandMeta, Option
-from arclet.entari import (
-    BasicConfModel,
-    MessageChain,
-    MessageCreatedEvent,
-    Session,
-    command,
-    plugin,
-)
+from arclet.entari import MessageCreatedEvent, Session, command, plugin
 from arclet.entari.command import Query
 from arclet.entari.event.base import GuildMemberAddedEvent, InternalEvent
-from loguru import logger
-from satori import At, Author, Element, Image, Quote, Text
-from sqlalchemy import BigInteger, String, select
-from sqlalchemy.orm import Mapped, mapped_column
-from tenko_api.accounts import Account, accounts_for_group, online_accounts
-from tenko_api.features import declare, feature_enabled, feature_required
+from tenko_api.features import declare, feature_required
 from tenko_api.perm import Permission, require_perm
 from tenko_api.render import RenderService
-from tenko_api.storage import Model, Store, get_session
 
-from . import codex, groups, pages
-
-
-class Bf1Config(BasicConfModel):
-    """对应 config/tenko.toml 中的 ``[plugin_config.bf1]``。"""
-
-    base_url: str = "https://bfm.umrbotech.com"
-    """bf-manager 地址，不带 /api/v1。"""
-
+from . import binding, game, groups, review, servers, stats, wiki
+from .api import Bf1Error
+from .config import Bf1Config
+from .entry import (
+    ITEM_OPTIONS,
+    TEXT,
+    card_of,
+    commands,
+    group_and_name,
+    items_answer,
+    items_commands,
+    keyword_of,
+    name_of,
+    player_commands,
+    service_for,
+)
+from .reply import answer
 
 plugin.metadata(
     "战地一查询",
@@ -62,937 +58,11 @@ plugin.metadata(
 )
 declare(scope="group", default_enabled=True)
 
-config = plugin.get_config(Bf1Config)
 
-TOP = 10
-RECENT = 6
+# —— 玩家 ——
 
 
-class Binding(Model):
-    """QQ 号 → 绑定的 EA 账号（按 PID 查，改名不影响）。"""
-
-    user_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    pid: Mapped[int] = mapped_column(BigInteger)
-    # 从旧 bot 迁过来的绑定有些没有名字
-    name: Mapped[str | None] = mapped_column(String(64))
-
-
-# 0.1.4–0.1.5 把绑定存在这个 JSON 里，第一次用到绑定时导入数据库
-_legacy = Store("bindings", version=1)
-_legacy_lock = asyncio.Lock()
-
-
-async def _import_legacy() -> None:
-    if not _legacy.path.exists():
-        return
-    async with _legacy_lock:
-        if not _legacy.path.exists():
-            return
-        data = _legacy.load(default={})
-        async with get_session() as db:
-            existing = set(await db.scalars(select(Binding.user_id)))
-            db.add_all(
-                Binding(user_id=user_id, pid=bound["pid"], name=bound.get("name"))
-                for user_id, bound in data.items()
-                if user_id not in existing
-            )
-            await db.commit()
-        _legacy.path.rename(_legacy.path.with_name(f"{_legacy.path.name}.imported"))
-        logger.info("已把 {} 条绑定从 {} 导入数据库", len(data), _legacy.path.name)
-
-
-async def _bound(user_id: str) -> Binding | None:
-    await _import_legacy()
-    async with get_session() as db:
-        return await db.get(Binding, user_id)
-
-
-class Bf1Error(Exception):
-    """要原样回给群友的错误。"""
-
-
-class NoSuchPlayer(Bf1Error):
-    """按名字没找到玩家。"""
-
-
-async def _get(path: str, **params: Any) -> Any:
-    # EA 接口慢，战绩和武器常要好几秒。
-    url = f"{config.base_url.rstrip('/')}/api/v1/bf1{path}"
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(url, params=params)
-    except httpx.HTTPError as error:
-        logger.warning("bf-manager 请求失败：{} {}", url, type(error).__name__)
-        raise Bf1Error("查询服务暂时连不上，稍后再试") from error
-    if response.status_code >= 400:
-        try:
-            message = response.json()["error"]["message"]
-        except (ValueError, KeyError, TypeError):
-            message = f"查询失败（{response.status_code}）"
-        raise Bf1Error(message)
-    return response.json()
-
-
-async def _persona(name: str) -> dict[str, Any]:
-    result = await _get("/players/search", name=name)
-    personas = result["personas"]
-    # 搜索是模糊匹配，精确同名的不一定排第一。
-    exact = [p for p in personas if p["display_name"].casefold() == name.casefold()]
-    if not exact:
-        if not personas:
-            raise NoSuchPlayer(f"没找到玩家 {name}")
-        names = "、".join(p["display_name"] for p in personas[:5])
-        raise NoSuchPlayer(f"没找到玩家 {name}，相近的有：{names}")
-    # 重名时 bf-manager 会回填生涯时长，0 是没玩过 BF1 的空号。
-    return next((p for p in exact if p.get("time_played_hours")), exact[0])
-
-
-def _hours(seconds: float | None) -> str:
-    return f"{(seconds or 0) / 3600:.1f} 小时"
-
-
-def _kpm(kills: int | None, seconds: float | None) -> str:
-    return f"{(kills or 0) / (seconds / 60):.2f}" if seconds else "-"
-
-
-def _n(value: Any) -> Any:
-    return "-" if value is None else value
-
-
-def format_stats(
-    name: str,
-    stats: dict[str, Any],
-    platoon: dict[str, Any] | None = None,
-    dogtags: list[str] | None = None,
-) -> str:
-    s = stats["summary"]
-    wins, losses = s.get("wins") or 0, s.get("losses") or 0
-    win_rate = f"{wins / (wins + losses):.1%}" if wins + losses else "-"
-    kd = f"{s['kd']:.2f}" if s.get("kd") is not None else "-"
-    kpm = f"{s['kpm']:.2f}" if s.get("kpm") is not None else "-"
-    best = pages.CLASSES.get(s.get("best_class") or "", s.get("best_class") or "-")
-    longest = s.get("longest_headshot_meters")
-    return "\n".join(
-        [
-            f"{name} 的战地一战绩",
-            f"等级 {_n(s.get('rank'))} | 技巧 {_n(s.get('skill'))} | "
-            f"时长 {_hours(s.get('time_played_seconds'))}",
-            f"击杀 {_n(s.get('kills'))} | 死亡 {_n(s.get('deaths'))} | KD {kd} | KPM {kpm}",
-            f"胜 {wins} | 负 {losses} | 胜率 {win_rate}",
-            f"步兵击杀 {_n(s.get('infantry_kills'))} | 载具击杀 {_n(s.get('vehicle_kills'))}",
-            f"协助 {_n(s.get('assists'))} | 复活 {_n(s.get('revives'))} | "
-            f"治疗 {_n(s.get('heals'))} | 修理 {_n(s.get('repairs'))}",
-            f"狗牌 {_n(s.get('dogtags'))} | 最高连杀 {_n(s.get('max_killstreak'))} | "
-            f"最远爆头 {f'{longest:.1f} 米' if longest is not None else '-'}",
-            f"最佳兵种 {best}",
-            *([f"装备狗牌：{' / '.join(dogtags)}"] if dogtags else []),
-            *_platoon_lines(platoon),
-            *_career_lines(stats),
-        ]
-    )
-
-
-def _platoon_lines(platoon: dict[str, Any] | None) -> list[str]:
-    if not platoon:
-        return []
-    head = f"战队：[{platoon.get('tag') or '-'}] {platoon.get('name') or ''}".rstrip()
-    if platoon.get("size"):
-        head += f"（{platoon['size']} 人{'，EA 认证' if platoon.get('verified') else ''}）"
-    description = " ".join((platoon.get("description") or "").split())
-    return [head, *([f"战队描述：{description}"] if description else [])]
-
-
-def _career_lines(stats: dict[str, Any]) -> list[str]:
-    """荣誉、细项、模式、精英兵、常玩地图；接口没给的部分不写。"""
-
-    lines = []
-    honors, misc = stats.get("honors"), stats.get("misc")
-    if honors:
-        honor = (
-            f"MVP {_n(honors.get('mvp'))} | 王牌小队 {_n(honors.get('ace_squad'))} | "
-            f"勋带 {_n(honors.get('ribbons'))} | 勋章 {_n(honors.get('medals'))}"
-        )
-        if misc and misc.get("completion_rate") is not None:
-            honor += f" | 完成率 {misc['completion_rate']:.1%}"
-        lines.append(honor)
-    if details := pages.career_details(stats):
-        lines.append(" | ".join(f"{label} {value}" for label, value in details))
-    if elite := pages.elite_kits(stats.get("elite_kits") or []):
-        lines.append(
-            "精英兵：" + "；".join(f"{k['name']} {k['time']} 击杀 {k['kills']}" for k in elite)
-        )
-    if modes := pages.career_modes(stats.get("modes") or []):
-        lines.append(
-            "模式：" + "；".join(f"{m['name']} {m['record']}（{m['rate']}）" for m in modes)
-        )
-    if maps := pages.career_maps(stats.get("maps"), ""):
-        lines.append("常玩地图：" + "；".join(f"{m['name']} {m['hours']}" for m in maps))
-    return lines
-
-
-def _weapon_line(w: dict[str, Any]) -> str:
-    kills = w.get("kills") or 0
-    accuracy = f"{w['accuracy']:.1f}%" if w.get("accuracy") is not None else "-"
-    headshot = f"{(w.get('headshots') or 0) / kills:.1%}" if kills else "-"
-    return (
-        f"{pages.cn(w.get('name'))} · {pages.cn(w.get('category')) or '-'}\n"
-        f"   击杀 {kills} | KPM {_kpm(kills, w.get('time_seconds'))} | "
-        f"命中 {accuracy} | 爆头 {headshot} | {_hours(w.get('time_seconds'))}"
-    )
-
-
-def _vehicle_line(v: dict[str, Any]) -> str:
-    kills = v.get("kills") or 0
-    return (
-        f"{pages.cn(v.get('name'))} · {pages.cn(v.get('category')) or '-'}\n"
-        f"   击杀 {kills} | KPM {_kpm(kills, v.get('time_seconds'))} | "
-        f"摧毁 {v.get('destroyed') or 0} | {_hours(v.get('time_seconds'))}"
-    )
-
-
-def format_items(kind: str, heading: str, items: list[dict[str, Any]]) -> str:
-    line = _weapon_line if kind == "weapons" else _vehicle_line
-    return "\n".join([heading, *(f"{i}. {line(item)}" for i, item in enumerate(items, 1))])
-
-
-def _items_heading(
-    name: str, label: str, sort: pages.Sort, keyword: str | None, shown: int, total: int
-) -> tuple[str, list[str]]:
-    """文字版的第一行，和卡片名字右边的排序、搜索说明；默认按击杀排时卡片上不写。"""
-
-    least = pages.MIN_RATE_KILLS
-    floor = ""
-    if sort.rate:
-        # 搜索时样本不够的也列，置灰接在后面
-        floor = f"击杀不到 {least} 的置后" if keyword else f"击杀 ≥ {least}"
-    note = [f"名字含「{keyword}」· {total} 件"] if keyword else []
-    if keyword or sort.key != "kills":
-        note.append(" · ".join(x for x in (f"按{sort.label}排序", floor) if x))
-    if keyword:
-        top = f"前 {shown}" if total > shown else ""
-        later = f"，击杀不到 {least} 的排在后面" if sort.rate else ""
-        found = f"{name} 的{label}里名字含「{keyword}」的有 {total} 件"
-        return f"{found}，按{sort.label}排{top}{later}", note
-    if sort.key == "kills":
-        return f"{name} 的{label}击杀前 {shown}", note
-    floor = f"（击杀不少于 {least} 的）" if sort.rate else ""
-    return f"{name} 的{label}按{sort.label}排前 {shown}{floor}", note
-
-
-def format_servers(keyword: str, servers: list[dict[str, Any]], total: int) -> str:
-    if not servers:
-        return f"没找到名字含「{keyword}」的服务器（空服不在列表里）"
-    more = f"，人最多的 {len(servers)} 个" if total > len(servers) else ""
-    lines = [f"「{keyword}」找到 {total} 个服务器{more}："]
-    for index, s in enumerate(servers, 1):
-        queue = f"[{s['queue_count']}]" if s.get("queue_count") else ""
-        lines.append(
-            f"{index}. {s['name']}\n"
-            f"   {s['player_count']}/{s['max_player_count']}{queue} | "
-            f"{s.get('mode_display_name') or '-'}·{s.get('map_display_name') or '-'} | "
-            f"{s.get('region_display_name') or '-'} | gameId {s.get('game_id')}"
-        )
-    return "\n".join(lines)
-
-
-def _source() -> str:
-    return urlparse(config.base_url).netloc or config.base_url
-
-
-async def _optional(path: str, **params: Any) -> Any:
-    """封禁、战队、在线状态这类附加信息拿不到就不显示，不影响主战绩。"""
-
-    try:
-        return await _get(path, **params)
-    except Bf1Error:
-        return None
-
-
-def _player_link(pid: int, tab: str = "") -> str:
-    """bf-manager 网页的玩家页，分区记在 # 后面。"""
-
-    return f"{config.base_url.rstrip('/')}/bf1/player/{pid}{tab and '#' + tab}"
-
-
-async def _reply(
-    service,
-    template: str,
-    context,
-    fallback: str,
-    link: str | None = None,
-    caption: str | None = None,
-) -> MessageChain | str:
-    """出图时 caption 跟在图后面，方便复制；回退文字时 fallback 里已经有了，不再重复。"""
-
-    image = await pages.render(service, template, context)
-    if not image:
-        return f"{fallback}\n{link}" if link else fallback
-    chain = MessageChain(Image.of(raw=image, mime="image/jpeg"))
-    after = "\n".join(t for t in (caption, link) if t)
-    return chain + Text(after) if after else chain
-
-
-_BIND_HINT = "使用 /bf1绑定 你的EA名字，或者在命令后面带上名字"
-# 群名片开头的 [战队]、【战队】、(xx) 这类前缀
-_CARD_PREFIX = re.compile(r"^(?:\s*[\[【(（<《「『][^\]】)）>》」』]*[\]】)）>》」』])+\s*")
-# EA 名字只有字母、数字、- 和 _
-_EA_NAME = re.compile(r"[A-Za-z0-9_-]{2,32}")
-
-
-def card_name(card: str | None) -> str | None:
-    """群名片去掉前缀后像 EA 名字就用它，不像（中文、带空格）返回 None。"""
-
-    name = _CARD_PREFIX.sub("", card or "").strip()
-    return name if _EA_NAME.fullmatch(name) else None
-
-
-async def _player(name: str | None, user_id: str, card: str | None = None) -> dict[str, Any]:
-    """带名字按名字查，#PID 按 PID 查；不带就查发消息的人绑定的号（按 PID，改名也不影响），
-    没绑定时把群名片当 EA 名字查（只认精确同名）。
-    """
-
-    if name and name.startswith("#"):
-        if not name[1:].isdigit():
-            raise Bf1Error("PID 只能是数字，例如 #1004198901469")
-        return await _get(f"/players/{name[1:]}")
-    if name:
-        return await _persona(name)
-    bound = await _bound(user_id)
-    if bound:
-        return await _get(f"/players/{bound.pid}")
-    guess = card_name(card)
-    if not guess:
-        raise Bf1Error(f"还没绑定：{_BIND_HINT}")
-    try:
-        return await _persona(guess)
-    except NoSuchPlayer as error:
-        raise Bf1Error(f"还没绑定，按群名片 {guess} 查：{error}。{_BIND_HINT}") from error
-
-
-async def stats_reply(
-    name: str | None, service, user_id: str = "", card: str | None = None
-) -> MessageChain | str:
-    reply, _, _ = await _stats_card(await _player(name, user_id, card), service)
-    return reply
-
-
-async def _stats_card(persona: dict[str, Any], service) -> tuple[MessageChain | str, Any, Any]:
-    """战绩卡片，连同取到的生涯数据和封禁状态（入群审核要用）。"""
-
-    pid = persona["persona_id"]
-    stats, weapons, vehicles, ban, platoon, online, found = await asyncio.gather(
-        _get(f"/stats/{pid}"),
-        _get(f"/stats/{pid}/weapons"),
-        _get(f"/stats/{pid}/vehicles"),
-        _optional(f"/stats/{pid}/ban"),
-        _optional(f"/stats/{pid}/platoon"),
-        _optional(f"/stats/{pid}/online"),
-        _optional(f"/stats/{pid}/collection"),
-    )
-    # 装备的狗牌只有收藏接口给，取不到就不画
-    dogtags = pages.equipped_dogtags((found or {}).get("equipped"), config.base_url)
-    context = pages.stats_page(
-        persona,
-        stats,
-        weapons["weapons"],
-        vehicles["vehicles"],
-        ban,
-        platoon,
-        online,
-        _source(),
-        config.base_url,
-        None if platoon else codex.random_tip(),
-        dogtags,
-    )
-    reply = await _reply(
-        service,
-        "stats.html",
-        context,
-        format_stats(persona["display_name"], stats, platoon, [t["name"] for t in dogtags]),
-        _player_link(pid),
-    )
-    return reply, stats, ban
-
-
-async def items_reply(
-    kind: str,
-    name: str | None,
-    service,
-    user_id: str = "",
-    group: groups.Group | None = None,
-    layout: tuple[int, int] = (pages.ITEM_COLS, pages.ITEM_ROWS),
-    keyword: str | None = None,
-    sort_word: str | None = None,
-    card: str | None = None,
-) -> MessageChain | str:
-    """武器或载具排行；给了分组（步枪、突击兵、坦克……）就只排这一组。
-
-    layout 是卡片的列数和行数，文字版也按列 × 行的数量列；keyword 是旧 bot 的 -n 名字搜索，
-    sort_word 是 -s 的排序方式。
-    """
-
-    whole = "武器" if kind == "weapons" else "载具"
-    sort = pages.SORTS[kind][0]
-    if sort_word and not (sort := pages.find_sort(kind, sort_word)):
-        choices = "、".join(s.label for s in pages.SORTS[kind])
-        raise Bf1Error(f"{whole}没有「{sort_word}」这种排法，可以按 {choices} 排")
-    persona = await _player(name, user_id, card)
-    pid = persona["persona_id"]
-    result, platoon = await asyncio.gather(
-        _get(f"/stats/{pid}/{kind}"), _optional(f"/stats/{pid}/platoon")
-    )
-    items = result[kind]
-    if group:
-        items = [i for i in items if i in group]
-    label = group.label if group else whole
-    ranked = pages.rank_items(items, sort, keyword)
-    display = persona["display_name"]
-    if not ranked:
-        if keyword:
-            return f"{display} 的{label}里没有名字含「{keyword}」的"
-        if sort.rate:
-            return f"{display} 还没有击杀满 {pages.MIN_RATE_KILLS} 的{label}"
-        return f"{display} 还没有{label}击杀记录"
-    cols, rows = layout
-    shown = ranked[: cols * rows]
-    heading, note = _items_heading(display, label, sort, keyword, len(shown), len(ranked))
-    title = f"{whole} · {group.label}" if group else whole
-    context = pages.items_page(
-        kind, persona, platoon, shown, _source(), cols, rows, title, sort, note
-    )
-    text = format_items(kind, heading, shown)
-    return await _reply(service, "items.html", context, text, _player_link(pid, kind))
-
-
-INFO_SERVERS = 8
-
-
-def format_info(context: dict[str, Any]) -> str:
-    platoon = context["platoon"]
-    online = context["online"]
-    status = "状态未知" if online is None else "离线" if not online else "在线"
-    if online and context["online_server"]:
-        status = f"正在游戏：{context['online_server']}"
-    states = {"clean": "无记录", "unknown": "无信息"}
-    bans = " | ".join(
-        f"{b['source']} {b['hit_text'] if b['state'] == 'hit' else states[b['state']]}"
-        for b in context["bans"]
-    )
-    lines = [f"{context['name']}（PID {context['pid']}）"]
-    if platoon:
-        lines.append(f"战队：[{platoon.get('tag') or '-'}] {platoon.get('name') or ''}".rstrip())
-    lines.append(f"{status} | {bans}")
-    if context["rsp"]:
-        counts = " · ".join(f"{r['label']} {r['total']}" for r in context["roles"])
-        lines.append(f"私服身份（bf-manager 收录的 {context['tracked']} 个私服）：{counts}")
-        for r in context["roles"]:
-            if r["rows"]:
-                lines.append(f"{r['label']}：")
-                lines += [f"{i}. {row['name']}" for i, row in enumerate(r["rows"], 1)]
-                if r["more"]:
-                    lines.append(f"……还有 {r['more']} 个，加 -{r['key'][0]} 全部列出")
-            elif r["full"]:
-                lines.append(f"{r['label']}：没有")
-    else:
-        lines.append("私服身份暂时查不到")
-    if context["recent"]:
-        lines.append("最近游玩（bf-manager 跟踪到的对局）：")
-        lines += [f"· {s['name']}（{s['when']}，{s['rounds']} 局）" for s in context["recent"]]
-    return "\n".join(lines)
-
-
-async def _nothing() -> None:
-    return None
-
-
-async def info_reply(
-    name: str | None,
-    service,
-    user_id: str = "",
-    full: tuple[str, ...] = (),
-    card: str | None = None,
-) -> MessageChain | str:
-    """full 是要全部列出的身份（owner/admin/vip/ban），这时不查最近游玩。"""
-
-    persona = await _player(name, user_id, card)
-    pid = persona["persona_id"]
-    # 最近玩过的服用 bf-manager 跟踪到的对局：EA 的“最近游玩”不准
-    rsp, rounds, ban, online, platoon = await asyncio.gather(
-        _optional(f"/stats/{pid}/servers"),
-        _nothing() if full else _optional(f"/stats/{pid}/rounds", limit=100),
-        *(_optional(f"/stats/{pid}/{p}") for p in ("ban", "online", "platoon")),
-    )
-    if full and rsp is None:
-        raise Bf1Error("私服身份暂时查不到，稍后再试")
-    items = rounds["items"] if rounds else None
-    context = pages.info_page(
-        persona, rsp, items, ban, online, platoon, _source(), INFO_SERVERS, full
-    )
-    # 查 info 多半是要名字和 PID 去封人、加白，图里的字复制不了
-    caption = f"玩家名：{context['name']}\nPID：{pid}"
-    link = _player_link(pid)
-    return await _reply(service, "info.html", context, format_info(context), link, caption)
-
-
-def format_recent(name: str, context: dict[str, Any]) -> str:
-    rounds = context["rounds"]
-    lines = [
-        f"{name} 最近 {len(rounds)} 局",
-        " | ".join(f"{label} {value}" for label, value in context["kpis"]),
-    ]
-    for index, r in enumerate(rounds, 1):
-        gear = "、".join(f"{g['name']} {g['kills']} 杀" for g in r["gear"])
-        badges = "".join(f" {b}" for b, on in (("MVP", r["mvp"]), ("王牌", r["ace"])) if on)
-        score = next(c["value"] for c in r["stats"] if c["label"] == "得分")
-        honors = [text for text, _ in r["growth"]]
-        honors += [f"{x['name']}×{x['count']}" for x in r["ribbons"]]
-        compare = [
-            f"{c['label']} {c['value']}（生涯 {c['compare']['career']}"
-            + (f" {c['compare']['shift']}" if c["compare"]["shift"] else "")
-            + "）"
-            for c in r["stats"]
-            if c["compare"]
-        ]
-        lines += [
-            f"{index}. {r['when']} {r['map']}·{r['mode'] or '-'} {r['outcome']}{badges}",
-            f"   {r['kd']} | KD {r['ratio']} | KPM {r['kpm']} | 得分 {score} | "
-            f"{r['minutes']} | {r['kit']}",
-            *([f"   对比生涯：{'；'.join(compare)}"] if compare else []),
-            *(
-                [
-                    "   得分构成："
-                    + " | ".join(f"{x['label']} {x['value']}" for x in r["parts"]["segments"])
-                    + f" | 总经验 {r['parts']['total']}"
-                ]
-                if r["parts"]
-                else []
-            ),
-            *([f"   {'、'.join(honors)}"] if honors else []),
-            *([f"   {gear}"] if gear else []),
-            f"   {r['server']}",
-        ]
-    return "\n".join(lines)
-
-
-async def _recent_card(
-    persona: dict[str, Any], service, link: bool = True, count: int = RECENT
-) -> MessageChain | str | None:
-    """最近 count 局的卡片；bf-manager 没记录到能看的对局时返回 None。"""
-
-    pid = persona["persona_id"]
-    # 多取一些：排队、观战、进服就走的局会被筛掉；接口一次最多 100 局
-    limit = min(100, max(20, count * 4))
-    result, platoon = await asyncio.gather(
-        _get(f"/stats/{pid}/rounds", limit=limit), _optional(f"/stats/{pid}/platoon")
-    )
-    # 和生涯比要单局详情：每局一个请求，几局一起取，取不到的局就不比
-    played = pages.played_rounds(result["items"], count)
-    found = await asyncio.gather(*(_optional(f"/rounds/{i['round']['id']}") for i in played))
-    details = {d["id"]: d for d in found if d}
-    context = pages.recent_page(
-        persona, platoon, result["items"], _source(), count, details, config.base_url
-    )
-    if not context["rounds"]:
-        return None
-    text = format_recent(persona["display_name"], context)
-    return await _reply(
-        service, "recent.html", context, text, _player_link(pid, "rounds") if link else None
-    )
-
-
-async def recent_reply(
-    name: str | None,
-    service,
-    user_id: str = "",
-    count: int = RECENT,
-    card: str | None = None,
-) -> MessageChain | str:
-    persona = await _player(name, user_id, card)
-    reply = await _recent_card(persona, service, count=count)
-    if reply is None:
-        raise Bf1Error(
-            f"还没有记录到 {persona['display_name']} 的对局（bf-manager 跟踪到的才有，保留 90 天）"
-        )
-    return reply
-
-
-def format_collection(context: dict[str, Any]) -> str:
-    lines = [f"{context['name']} 的收藏"]
-    if context["equipped"]:
-        lines.append("佩戴的狗牌：" + "、".join(t["name"] for t in context["equipped"]))
-    got = [m["name"] for _, items in context["medals"] for m in items if m["got"]]
-    going = [
-        f"{m['name']} {m['progress']}"
-        for _, items in context["medals"]
-        for m in items
-        if m["progress"]
-    ]
-    lines.append(f"勋章 {context['medals_got']}/{context['medals_total']}")
-    if got:
-        lines.append("已获得：" + "、".join(got))
-    if going:
-        lines.append("进行中：" + "、".join(going))
-    lines.append(
-        f"狗牌 {context['dogtags_got']}/{context['dogtags_total']}："
-        + "；".join(
-            f"{category} {sum(t['got'] for t in items)}/{len(items)}"
-            for category, items in context["dogtags"]
-        )
-    )
-    if context["ribbons"]:
-        top = sorted(
-            (r for _, items in context["ribbons"] for r in items if r["count"]),
-            key=lambda r: -r["count"],
-        )[:10]
-        lines.append(
-            f"勋带 {context['ribbons_got']}/{context['ribbons_total']} 种，"
-            f"共 {context['ribbons_sum']:,} 次；最多的："
-            + "、".join(f"{r['name']} ×{r['count']:,}" for r in top)
-        )
-    return "\n".join(lines)
-
-
-async def collection_reply(
-    name: str | None, service, user_id: str = "", card: str | None = None
-) -> MessageChain | str:
-    """勋章、狗牌和佩戴的狗牌；勋带次数在生涯战绩里，拿不到就不画勋带墙。"""
-
-    persona = await _player(name, user_id, card)
-    pid = persona["persona_id"]
-    found, stats, platoon = await asyncio.gather(
-        _get(f"/stats/{pid}/collection"),
-        _optional(f"/stats/{pid}"),
-        _optional(f"/stats/{pid}/platoon"),
-    )
-    context = pages.collection_page(persona, platoon, stats, found, _source(), config.base_url)
-    caption = f"玩家名：{persona['display_name']}\nPID：{pid}"
-    return await _reply(
-        service, "collection.html", context, format_collection(context), _player_link(pid), caption
-    )
-
-
-async def _bind(user_id: str, persona: dict[str, Any]) -> None:
-    await _import_legacy()
-    async with get_session() as db:
-        await db.merge(
-            Binding(user_id=user_id, pid=persona["persona_id"], name=persona["display_name"])
-        )
-        await db.commit()
-
-
-async def bind_reply(name: str | None, user_id: str) -> str:
-    if not name:
-        bound = await _bound(user_id)
-        if not bound:
-            return "用法：/bf1绑定 <EA 名字>"
-        return f"当前绑定：{bound.name or '名字未知'}（PID {bound.pid}）"
-    persona = await _persona(name)
-    before = await _bound(user_id)
-    await _bind(user_id, persona)
-    pid, new = persona["persona_id"], persona["display_name"]
-    reply = f"已绑定 {new}（PID {pid}）"
-    if before is None:
-        return reply
-    old = before.name or "名字未知"
-    if before.pid != pid:
-        return f"绑定变更：{old}（PID {before.pid}）→ {new}（PID {pid}）"
-    if before.name and before.name != new:
-        return f"{reply}，改过名：{old} → {new}"
-    return reply
-
-
-async def _search_servers(keyword: str) -> tuple[list[dict[str, Any]], int]:
-    result = await _get("/servers", name=keyword, limit=100)
-    # 接口不按人数排；多取一些自己排，total 是全部匹配数。
-    servers = sorted(result["items"], key=lambda s: s.get("player_count") or 0, reverse=True)
-    return servers, result["total"]
-
-
-async def servers_reply(keyword: str, service) -> MessageChain | str:
-    servers, total = await _search_servers(keyword)
-    servers = servers[:TOP]
-    context = pages.servers_page(keyword, servers, total, _source())
-    return await _reply(service, "servers.html", context, format_servers(keyword, servers, total))
-
-
-def format_server(detail: dict[str, Any], players: dict[str, Any] | None) -> str:
-    s = detail["summary"]
-    owner = ((detail.get("extras") or {}).get("owner") or {}).get("display_name") or "-"
-    lines = [
-        s["name"],
-        f"{s.get('player_count')}/{s.get('max_player_count')} | "
-        f"{s.get('mode_display_name') or '-'}·{s.get('map_display_name') or '-'} | "
-        f"{s.get('region_display_name') or '-'} | gameId {s.get('game_id')}",
-        f"服主 {owner}",
-    ]
-    for team in (players or {}).get("teams") or []:
-        names = "、".join(map(_roster_name, team.get("players") or []))
-        lines.append(f"{team.get('faction') or '-'}（{len(team.get('players') or [])}）：{names}")
-    for label, key in [("排队", "queued"), ("观战", "spectators")]:
-        if waiting := (players or {}).get(key):
-            names = "、".join(map(_roster_name, waiting))
-            lines.append(f"{label}（{len(waiting)}）：{names}")
-    if loading := ((players or {}).get("summary") or {}).get("loading_count"):
-        lines.append(f"载入中 {loading} 人")
-    return "\n".join(lines)
-
-
-def _roster_name(p: dict[str, Any]) -> str:
-    name = p.get("display_name") or "-"
-    return f"{name}（载入中）" if p.get("loading") else name
-
-
-async def server_reply(keyword: str, service) -> MessageChain | str:
-    note = ""
-    # gameId 是十几位数；短数字（比如服名里的 3090）按名字搜
-    if keyword.isdigit() and len(keyword) >= 10:
-        game_id = int(keyword)
-    else:
-        servers, total = await _search_servers(keyword)
-        if not servers:
-            raise Bf1Error(f"没找到名字含「{keyword}」的服务器（空服不在列表里）")
-        game_id = servers[0]["game_id"]
-        if total > 1:
-            note = f"其他 {total - 1} 个：/bf1ss {keyword}"
-    detail, players = await asyncio.gather(
-        _get(f"/servers/{game_id}"), _optional(f"/servers/{game_id}/players")
-    )
-    context = pages.server_page(detail, players, _source())
-    # 匹配说明和网页链接跟在图后面当文字，不画进图里
-    link = f"{config.base_url.rstrip('/')}/bf1/server/{game_id}#players"
-    fallback = format_server(detail, players)
-    return await _reply(
-        service, "server.html", context, fallback, f"{note}\n{link}" if note else link
-    )
-
-
-def format_overview(overview: dict[str, Any]) -> str:
-    players, servers = overview.get("players") or {}, overview.get("servers") or {}
-    lines = [
-        f"战地一当前在线 {players.get('total', '-')} 人，{servers.get('total', '-')} 个服务器",
-        f"亚服 {players.get('asia', '-')} | 欧服 {players.get('eu', '-')} | "
-        f"其他 {players.get('other', '-')}",
-    ]
-    for m in (overview.get("top_map_modes") or [])[:5]:
-        lines.append(f"{m.get('label')}：{m.get('players')} 人 / {m.get('servers')} 服")
-    return "\n".join(lines)
-
-
-async def overview_reply(service) -> MessageChain | str:
-    overview = await _get("/overview")
-    if not overview.get("available"):
-        raise Bf1Error("全服概况暂时没有数据，稍后再试")
-    context = pages.overview_page(overview, _source())
-    link = f"{config.base_url.rstrip('/')}/stats"
-    return await _reply(service, "overview.html", context, format_overview(overview), link)
-
-
-def format_campaign(context: dict[str, Any]) -> str:
-    lines = [f"当前行动：{context['name']}"]
-    if context["description"]:
-        lines.append(context["description"])
-    if context["operations"]:
-        lines.append("包含：" + "、".join(o["name"] for o in context["operations"]))
-    if context["ended"]:
-        lines.append(f"已于 {context['ends']} 结束")
-    else:
-        lines.append(f"剩余 {context['left']}（{context['ends']} 结束）")
-    lines.append(f"距每日重置 {context['reset_left']}（每天 {context['reset']}，北京时间）")
-    return "\n".join(lines)
-
-
-async def campaign_reply(service) -> MessageChain | str:
-    campaign = await _get("/campaign")
-    if not campaign:
-        raise Bf1Error("当前没有进行中的行动")
-    context = pages.campaign_page(campaign, _source())
-    link = f"{config.base_url.rstrip('/')}/bf1/campaign"
-    return await _reply(service, "campaign.html", context, format_campaign(context), link)
-
-
-# 旧 bot 的 -t 日期写 2023.01.01；也认 2023-01-01、2023/1/1、2023年1月1日 和 20230101
-_DAY = re.compile(r"(\d{4})\s*[-./年]\s*(\d{1,2})\s*[-./月]\s*(\d{1,2})\s*日?")
-EXCHANGE_LIST = ("列表", "历史", "全部", "期数", "list")
-_EXCHANGE_HINT = "发 /交换 列表 看全部期数，/交换 2023.01.01 看那天的交换"
-
-
-def parse_day(text: str) -> date | None:
-    text = text.strip()
-    if re.fullmatch(r"\d{8}", text):
-        parts = text[:4], text[4:6], text[6:]
-    elif found := _DAY.fullmatch(text):
-        parts = found.groups()
-    else:
-        return None
-    try:
-        return date(*map(int, parts))
-    except ValueError:
-        return None
-
-
-def format_exchange(context: dict[str, Any]) -> str:
-    span = (
-        f"{context['start']} ~ {context['until']}" if context["until"] else f"{context['start']} 起"
-    )
-    number = f"第 {context['number']}/{context['total']} 期，" if context["number"] else ""
-    which = "当期" if context["latest"] else "历史"
-    lines = [f"战地一交换（{which}，{number}{span}，北京时间）"]
-    if context["stale"]:
-        lines.append(
-            f"这一期已经 {context['stale']} 天没换过，之后 EA 就没再更新交换，游戏里一直是这一期"
-        )
-    for group in context["groups"]:
-        lines.append(f"{group['label']}（{len(group['tiles'])} 件）：")
-        lines += [f"· {t['name']} · {t['parent']} · {t['price']} 废料" for t in group["tiles"]]
-    return "\n".join(lines)
-
-
-def format_exchange_periods(dates: list[date]) -> str:
-    """按年列出全部期数，旧的在前，最新一期在最后。"""
-
-    years: dict[int, list[date]] = {}
-    for day in sorted(dates):
-        years.setdefault(day.year, []).append(day)
-    lines = [f"交换共 {len(dates)} 期（{min(dates)} ~ {max(dates)}，北京时间，按每期开始日期）："]
-    lines += [
-        f"{year}（{len(days)} 期）：" + "、".join(d.strftime("%m-%d") for d in days)
-        for year, days in years.items()
-    ]
-    lines.append("发 /交换 日期 看那天的交换，比如 /交换 2023.01.01")
-    return "\n".join(lines)
-
-
-async def exchange_reply(
-    service, day: date | None = None, listing: bool = False
-) -> MessageChain | str:
-    """不给日期查最新一期，给了查那天生效的一期；listing 时按年列出全部期数。"""
-
-    dates = pages.exchange_dates(await _get("/exchange/periods"))
-    if not dates:
-        raise Bf1Error("还没有交换记录")
-    if listing:
-        return format_exchange_periods(dates)
-    first, last = dates[-1], dates[0]
-    if day and day < first:
-        raise Bf1Error(
-            f"{day} 还没有交换记录：bf-manager 收录的是 {first} 到 {last} 的 {len(dates)} 期。"
-            f"{_EXCHANGE_HINT}"
-        )
-    today = datetime.now(pages.BEIJING).date()
-    if day and day > today:
-        raise Bf1Error(f"{day} 还没到，查当期直接发 /交换")
-    snapshot = await _get("/exchange", **({"date": day.isoformat()} if day else {}))
-    context = pages.exchange_page(snapshot, dates, _source(), today)
-    link = f"{config.base_url.rstrip('/')}/bf1/exchange"
-    return await _reply(service, "exchange.html", context, format_exchange(context), link)
-
-
-async def _answer(query) -> MessageChain | str:
-    try:
-        return await query
-    except Bf1Error as error:
-        return str(error)
-
-
-def _meta(description: str, usage: str, example: str, aliases: list[str]) -> CommandMeta:
-    """主命令的说明里列出旧名字；旧名字本身不进帮助列表。"""
-
-    also = "；也可以用 " + " ".join(f"/{a}" for a in aliases) if aliases else ""
-    return CommandMeta(description + also, usage=usage, example=example)
-
-
-# 旧 bot 的 -t：不出图，只回文字
-TEXT = Option("-t|-text|--text", help_text="只回文字，不出图")
-
-
-# 旧 bot 的 -r/-c：武器、载具卡片排几行几列
-ROWS = Option("-r|-row|-行", Args["rows", int], dest="rows", help_text="排几行，最多 10")
-COLS = Option("-c|-col|-列", Args["cols", int], dest="cols", help_text="排几列，最多 8")
-
-# 旧 bot 的 -n 按名字搜、-s 排序（Alconna 自带 -h、-sct、-cp，不和这些撞）
-SEARCH = Option(
-    "-n|-name|-名字", Args["keyword", str], dest="search", help_text="按名字搜，没用过的也列出"
-)
-SORT = Option(
-    "-s|-sort|-排序",
-    Args["sort", str],
-    dest="sort",
-    help_text="排序：击杀、时长、KPM、命中率、爆头率（载具是击杀、时长、KPM、摧毁）",
-)
-ITEM_OPTIONS = (TEXT, COLS, ROWS, SEARCH, SORT)
-
-
-def _layout(cols: Query[int], rows: Query[int]) -> tuple[int, int]:
-    """没给的用默认，超出范围的夹到 1 和上限之间。"""
-
-    def pick(query: Query[int], default: int, most: int) -> int:
-        return max(1, min(query.result, most)) if query.available else default
-
-    return (
-        pick(cols, pages.ITEM_COLS, pages.MAX_COLS),
-        pick(rows, pages.ITEM_ROWS, pages.MAX_ROWS),
-    )
-
-
-def _service(text: Query[Any], render_service: RenderService) -> RenderService | None:
-    """带了 -t 就不给渲染服务，各个 reply 自然回退成文字。"""
-
-    return None if text.available else render_service
-
-
-def _commands(
-    names: list[str],
-    args: Args,
-    description: str,
-    usage: str,
-    example: str,
-    *options: Option,
-):
-    """一组同义命令：/bf1s 这类主命令，加上旧 bot 用过的 /stat、/战绩 等。
-
-    不用 Alconna 别名或 shortcut：entari 先按命令名前缀派发，别名到不了处理函数，
-    所以每个名字单独注册一条，共用同一个处理函数。
-    """
-
-    main, aliases = names[0], names[1:]
-
-    def register(handler):
-        meta = _meta(description, usage, example, aliases)
-        command.on(Alconna(main, args, *options, meta=meta))(handler)
-        for alias in aliases:
-            meta = CommandMeta(description, usage=usage.replace(main, alias, 1), hide=True)
-            command.on(Alconna(alias, args, *options, meta=meta))(handler)
-        return handler
-
-    return register
-
-
-def _player_commands(
-    names: list[str], what: str, flags: str = "", example: str = "", *options: Option
-):
-    return _commands(
-        names,
-        Args["name?", str],
-        f"查询战地一玩家的{what}，绑定过可以不带名字，也可以用 #PID 查；加 -t 只回文字",
-        f"{names[0]} [EA 名字]{flags} [-t]",
-        f"/{names[0]} SHlSAN13{example}",
-        TEXT,
-        *options,
-    )
-
-
-def _name(name: Query[str]) -> str | None:
-    return name.result if name.available else None
-
-
-def _card(session: Session) -> str | None:
-    """群名片：OneBot 适配器把它放在 member.nick 里；私聊没有。"""
-
-    member = getattr(session.event, "member", None)
-    return getattr(member, "nick", None) or None
-
-
-@_player_commands(["bf1s", "stat", "生涯", "战绩"], "生涯战绩")
+@player_commands(["bf1s", "stat", "生涯", "战绩"], "生涯战绩")
 async def bf1s(
     session: Session,
     name: Query[str] = Query("name"),  # noqa: B008
@@ -1000,69 +70,13 @@ async def bf1s(
     *,
     render_service: RenderService,
 ):
-    service = _service(text, render_service)
-    return await _answer(stats_reply(_name(name), service, session.user.id, _card(session)))
-
-
-def _group_and_name(
-    kind: str, first: Query[str], second: Query[str]
-) -> tuple[groups.Group | None, str | None]:
-    """/武器 步枪 abc、/武器 abc 步枪、/武器 abc 都行：EA 名字不会是中文，认得出的就是分组。"""
-
-    words = [q.result for q in (first, second) if q.available]
-    group = next((g for w in words if (g := groups.find(kind, w))), None)
-    names = [w for w in words if not groups.find(kind, w)]
-    return group, names[0] if names else None
-
-
-def _items_commands(kind: str, names: list[str]):
-    what = "武器" if kind == "weapons" else "载具"
-    sample = "步枪、突击兵" if kind == "weapons" else "坦克、飞机"
-    return _commands(
-        names,
-        Args["first?", str]["second?", str],
-        f"查询战地一玩家的{what}击杀排行，可以按类别或兵种筛选（{sample}等，也可以直接发 /"
-        f"{groups.GROUPS[kind][0].names[0]}）；绑定过可以不带名字，-n 按名字搜，"
-        f"-s 换排序（{'、'.join(s.label for s in pages.SORTS[kind])}），-c 几列 -r 几行自己排，"
-        "加 -t 只回文字",
-        f"{names[0]} [类别] [EA 名字] [-n 名字] [-s 排序] [-c 列] [-r 行] [-t]",
-        f"/{names[0]} {sample.split('、')[0]} SHlSAN13 -s KPM",
-        *ITEM_OPTIONS,
+    service = service_for(text, render_service)
+    return await answer(
+        stats.stats_reply(name_of(name), service, session.user.id, card_of(session))
     )
 
 
-def _items_answer(
-    kind: str,
-    group: groups.Group | None,
-    name: str | None,
-    session: Session,
-    text: Query[Any],
-    cols: Query[int],
-    rows: Query[int],
-    search: Query[str],
-    sort: Query[str],
-    render_service: RenderService,
-):
-    service = _service(text, render_service)
-    layout = _layout(cols, rows)
-    # 旧 bot 的用法里常给名字加引号
-    keyword = _name(search).strip("\"'“”") if search.available else None
-    return _answer(
-        items_reply(
-            kind,
-            name,
-            service,
-            session.user.id,
-            group,
-            layout,
-            keyword or None,
-            _name(sort),
-            _card(session),
-        )
-    )
-
-
-@_items_commands("weapons", ["bf1w", "wp", "weapon", "武器"])
+@items_commands("weapons", ["bf1w", "wp", "weapon", "武器"])
 async def bf1w(
     session: Session,
     first: Query[str] = Query("first"),  # noqa: B008
@@ -1075,13 +89,13 @@ async def bf1w(
     *,
     render_service: RenderService,
 ):
-    group, name = _group_and_name("weapons", first, second)
-    return await _items_answer(
+    group, name = group_and_name("weapons", first, second)
+    return await items_answer(
         "weapons", group, name, session, text, cols, rows, search, sort, render_service
     )
 
 
-@_items_commands("vehicles", ["bf1v", "vc", "vehicle", "载具"])
+@items_commands("vehicles", ["bf1v", "vc", "vehicle", "载具"])
 async def bf1v(
     session: Session,
     first: Query[str] = Query("first"),  # noqa: B008
@@ -1094,14 +108,17 @@ async def bf1v(
     *,
     render_service: RenderService,
 ):
-    group, name = _group_and_name("vehicles", first, second)
-    return await _items_answer(
+    group, name = group_and_name("vehicles", first, second)
+    return await items_answer(
         "vehicles", group, name, session, text, cols, rows, search, sort, render_service
     )
 
 
-def _group_command(kind: str, group: groups.Group):
-    """旧 bot 的 -步枪、-突击兵、-坦克 等：每个名字一条命令，不进帮助列表。"""
+def group_command(kind: str, group: groups.Group):
+    """旧 bot 的 -步枪、-突击兵、-坦克 等：每个名字一条命令，不进帮助列表。
+
+    处理函数得在插件自己的模块里定义，entari 不认子模块里注册的。
+    """
 
     async def handler(
         session: Session,
@@ -1114,8 +131,8 @@ def _group_command(kind: str, group: groups.Group):
         *,
         render_service: RenderService,
     ):
-        return await _items_answer(
-            kind, group, _name(name), session, text, cols, rows, search, sort, render_service
+        return await items_answer(
+            kind, group, name_of(name), session, text, cols, rows, search, sort, render_service
         )
 
     what = "武器" if kind == "weapons" else "载具"
@@ -1130,8 +147,9 @@ def _group_command(kind: str, group: groups.Group):
     return handler
 
 
+# 旧 bot 的 -步枪、-突击兵、-坦克 等，一个分组名一条隐藏命令
 GROUP_HANDLERS = {
-    (kind, group.label): _group_command(kind, group)
+    (kind, group.label): group_command(kind, group)
     for kind, kind_groups in groups.GROUPS.items()
     for group in kind_groups
 }
@@ -1146,7 +164,7 @@ FULL = {
 }
 
 
-@_player_commands(
+@player_commands(
     ["bf1info", "info", "信息", "tyc", "天眼查"],
     "信息：私服身份、最近玩过的服、战队和封禁标记；-o 服主 -a 管理 -v VIP -b 封禁，"
     "列出这类身份的全部服务器",
@@ -1167,11 +185,13 @@ async def bf1info(
 ):
     flags = {"owner": owner, "admin": admin, "vip": vip, "ban": ban}
     full = tuple(key for key, flag in flags.items() if flag.available)
-    service = _service(text, render_service)
-    return await _answer(info_reply(_name(name), service, session.user.id, full, _card(session)))
+    service = service_for(text, render_service)
+    return await answer(
+        stats.info_reply(name_of(name), service, session.user.id, full, card_of(session))
+    )
 
 
-@_player_commands(
+@player_commands(
     ["bf1c", "收藏", "勋章", "狗牌", "collection"], "收藏：佩戴的狗牌、勋章、狗牌和勋带"
 )
 async def bf1c(
@@ -1181,8 +201,10 @@ async def bf1c(
     *,
     render_service: RenderService,
 ):
-    service = _service(text, render_service)
-    return await _answer(collection_reply(_name(name), service, session.user.id, _card(session)))
+    service = service_for(text, render_service)
+    return await answer(
+        stats.collection_reply(name_of(name), service, session.user.id, card_of(session))
+    )
 
 
 # 旧 bot 的 -n：查几局；一局一个详情请求，所以设上限
@@ -1192,9 +214,9 @@ COUNT = Option(
 )
 
 
-@_player_commands(
+@player_commands(
     ["bf1r", "recent", "match", "最近", "对局"],
-    f"最近对局，默认 {RECENT} 局，-n 指定局数（最多 {MAX_RECENT}）",
+    f"最近对局，默认 {stats.RECENT} 局，-n 指定局数（最多 {MAX_RECENT}）",
     " [-n 局数]",
     " -n 10",
     COUNT,
@@ -1207,14 +229,14 @@ async def bf1r(
     *,
     render_service: RenderService,
 ):
-    rounds = max(1, min(count.result, MAX_RECENT)) if count.available else RECENT
-    service = _service(text, render_service)
-    return await _answer(
-        recent_reply(_name(name), service, session.user.id, rounds, _card(session))
+    rounds = max(1, min(count.result, MAX_RECENT)) if count.available else stats.RECENT
+    service = service_for(text, render_service)
+    return await answer(
+        stats.recent_reply(name_of(name), service, session.user.id, rounds, card_of(session))
     )
 
 
-@_commands(
+@commands(
     ["bf1绑定", "bf1b", "绑定", "bind"],
     Args["name?", str],
     "把自己的 EA 名字记下来，之后查战绩可以不带名字；不带名字查看当前绑定",
@@ -1222,14 +244,13 @@ async def bf1r(
     "/bf1绑定 SHlSAN13",
 )
 async def bf1bind(session: Session, name: Query[str] = Query("name")):  # noqa: B008
-    return await _answer(bind_reply(_name(name), session.user.id))
+    return await answer(binding.bind_reply(name_of(name), session.user.id))
 
 
-def _keyword(keyword: Query[list]) -> str:
-    return " ".join(str(part) for part in keyword.result).strip()
+# —— 服务器 ——
 
 
-@_commands(
+@commands(
     ["bf1ss", "ss", "搜服务器"],
     Args["keyword", AllParam],
     "按名字搜索有人的战地一私服",
@@ -1242,12 +263,12 @@ async def bf1ss(
     *,
     render_service: RenderService,
 ):
-    if not (text := _keyword(keyword)):
+    if not (text := keyword_of(keyword)):
         return "用法：/bf1ss <服务器名关键字>"
-    return await _answer(servers_reply(text, render_service))
+    return await answer(servers.servers_reply(text, render_service))
 
 
-@_commands(
+@commands(
     ["bf1pl", "ds", "详细服务器"],
     Args["keyword", AllParam],
     "查看战地一服务器的玩家列表；关键字匹配多个时显示人最多的",
@@ -1260,17 +281,20 @@ async def bf1pl(
     *,
     render_service: RenderService,
 ):
-    if not (text := _keyword(keyword)):
+    if not (text := keyword_of(keyword)):
         return "用法：/bf1pl <服务器名关键字 | gameId>"
-    return await _answer(server_reply(text, render_service))
+    return await answer(servers.server_reply(text, render_service))
 
 
-@_commands(["bf1", "bfstat"], Args(), "战地一全服在线人数、地区分布和热门地图", "bf1", "/bf1")
+# —— 全服 ——
+
+
+@commands(["bf1", "bfstat"], Args(), "战地一全服在线人数、地区分布和热门地图", "bf1", "/bf1")
 async def bf1(session: Session, *, render_service: RenderService):
-    return await _answer(overview_reply(render_service))
+    return await answer(game.overview_reply(render_service))
 
 
-@_commands(
+@commands(
     ["bf1行动", "行动", "战役", "op"],
     Args(),
     "战地一当前的行动战役：包含哪些行动、还剩多久、每日什么时候重置；加 -t 只回文字",
@@ -1284,7 +308,7 @@ async def bf1op(
     *,
     render_service: RenderService,
 ):
-    return await _answer(campaign_reply(_service(text, render_service)))
+    return await answer(game.campaign_reply(service_for(text, render_service)))
 
 
 # 交换的 -t 沿用旧 bot，是日期；只回文字用 -text
@@ -1292,7 +316,7 @@ EXCHANGE_TEXT = Option("-text|--text", dest="text", help_text="只回文字，�
 EXCHANGE_DAY = Option("-t|-time|-日期", Args["day", str], dest="day", help_text="日期")
 
 
-@_commands(
+@commands(
     ["bf1交换", "交换", "exchange", "ex"],
     Args["when?", str],
     "战地一交换（废料兑换皮肤）：不带参数看最新一期，带日期看那天的一期，"
@@ -1310,91 +334,14 @@ async def bf1exchange(
     *,
     render_service: RenderService,
 ):
-    word = (_name(day) or _name(when) or "").strip()
-    service = _service(text, render_service)
-    if word.casefold() in EXCHANGE_LIST:
-        return await _answer(exchange_reply(service, listing=True))
-    parsed = parse_day(word) if word else None
-    if word and parsed is None:
-        return f"看不懂日期「{word}」，写成 2023.01.01 这样。{_EXCHANGE_HINT}"
-    return await _answer(exchange_reply(service, parsed))
+    word = (name_of(day) or name_of(when) or "").strip()
+    return await answer(game.exchange_query(word, service_for(text, render_service)))
 
 
-# —— 百科和小贴士：游戏里的典籍和载入画面小贴士，被戳时随机发一条 ——
-
-WIKI_LIST = 20
-TIP_LIST = 5
-POKE_COOLDOWN = 10
-_WIKI_HINT = "可以搜武器、载具、地名、战役、人物，或者发分类名：" + "、".join(codex.CATEGORIES)
+# —— 百科和小贴士 ——
 
 
-def format_entry(entry: codex.Entry) -> str:
-    lines = [f"#{entry.no} {entry.title}（{entry.category}）", *entry.taglines]
-    return "\n".join([*lines, f"解锁：{entry.unlock}", entry.description])
-
-
-def _wiki_line(entry: codex.Entry) -> str:
-    tagline = f" · {entry.taglines[0]}" if entry.taglines else ""
-    return f"#{entry.no} {entry.title}{tagline}（{entry.category}）"
-
-
-def format_tip(tip: codex.Tip) -> str:
-    return f"【{'·'.join(tip.tags)}】{tip.text}" if tip.tags else tip.text
-
-
-async def _wiki_card(entry: codex.Entry, service) -> MessageChain | str:
-    context = pages.wiki_page(entry, len(codex.WIKI))
-    return await _reply(service, "wiki.html", context, format_entry(entry))
-
-
-async def wiki_reply(keyword: str, service) -> MessageChain | str:
-    if not keyword:
-        return await _wiki_card(codex.random_entry(), service)
-    if keyword.strip() in ("目录", "分类"):
-        counts = "、".join(
-            f"{c} {sum(e.category == c for e in codex.WIKI)} 条" for c in codex.CATEGORIES
-        )
-        return f"百科共 {len(codex.WIKI)} 条：{counts}。发 /百科 分类名 看目录，/百科 序号 看条目"
-    entries = codex.search_wiki(keyword)
-    if not entries:
-        raise Bf1Error(f"百科里没找到“{keyword}”。{_WIKI_HINT}")
-    if len(entries) == 1:
-        return await _wiki_card(entries[0], service)
-    head = f"“{keyword}”找到 {len(entries)} 条，发 /百科 序号 查看"
-    if (category := keyword.strip()) in codex.CATEGORIES:
-        text = f"{head}：\n" + "、".join(f"{e.no} {e.name}" for e in entries)
-        return await _reply(service, "catalog.html", pages.catalog_page(category, entries), text)
-    lines = [_wiki_line(e) for e in entries[:WIKI_LIST]]
-    if len(entries) > WIKI_LIST:
-        lines.append(f"……还有 {len(entries) - WIKI_LIST} 条，换个更准的词")
-    return f"{head}：\n" + "\n".join(lines)
-
-
-def tip_reply(keyword: str) -> str:
-    if not keyword:
-        return format_tip(codex.random_tip())
-    tips = codex.search_tips(keyword)
-    if not tips:
-        raise Bf1Error(f"没有带“{keyword}”的小贴士，可以搜地图名、模式名或者正文里的词")
-    if len(tips) <= TIP_LIST:
-        head = f"带“{keyword}”的小贴士有 {len(tips)} 条："
-    else:
-        head = f"带“{keyword}”的小贴士有 {len(tips)} 条，随机 {TIP_LIST} 条："
-        tips = random.sample(tips, TIP_LIST)
-    return head + "".join(f"\n· {format_tip(t)}" for t in tips)
-
-
-async def poke_reply(user_id: str, service) -> list[Element]:
-    """@ 戳的人，跟一条随机的小贴士或百科卡片。"""
-
-    item = codex.pick()
-    if isinstance(item, codex.Tip):
-        return [At(user_id), Text(f"\n{format_tip(item)}")]
-    card = await _wiki_card(item, service)
-    return [At(user_id), Text("\n"), *_chain(card)]
-
-
-@_commands(
+@commands(
     ["bf1百科", "百科", "wiki"],
     Args["keyword?", AllParam],
     "战地一游戏里的百科（典籍）；不带关键词随机看一条",
@@ -1407,11 +354,11 @@ async def bf1wiki(
     *,
     render_service: RenderService,
 ):
-    text = _keyword(keyword) if keyword.available else ""
-    return await _answer(wiki_reply(text, render_service))
+    text = keyword_of(keyword) if keyword.available else ""
+    return await answer(wiki.wiki_reply(text, render_service))
 
 
-@_commands(
+@commands(
     ["bf1tip", "tip", "小贴士"],
     Args["keyword?", AllParam],
     "战地一载入画面的小贴士；不带关键词随机看一条，可以按地图、模式或正文搜",
@@ -1419,335 +366,32 @@ async def bf1wiki(
     "/bf1tip 亚眠",
 )
 async def bf1tip(session: Session, keyword: Query[list] = Query("keyword")):  # noqa: B008
-    text = _keyword(keyword) if keyword.available else ""
+    text = keyword_of(keyword) if keyword.available else ""
     try:
-        return tip_reply(text)
+        return wiki.tip_reply(text)
     except Bf1Error as error:
         return str(error)
 
 
-_poked: dict[tuple[str, str], float] = {}
-
-
 @plugin.listen(InternalEvent)
 async def on_poke(event: InternalEvent, *, render_service: RenderService):
-    # satori 的 onebot11 适配器不转换戳一戳，原样作为 INTERNAL 事件送来
-    origin = event._origin
-    data = getattr(origin, "_data", None)
-    if getattr(origin, "_type", None) == "notice.notify.poke" and isinstance(data, dict):
-        await poked(event.account, data, render_service)
+    await wiki.on_poke(event, render_service)
 
 
-async def poked(receiver: Account, data: dict[str, Any], service) -> bool:
-    """群里有人戳 bot 时回一条；回了返回 True。"""
-
-    if data.get("group_id") is None:
-        return False
-    group, user, target = (str(data.get(k)) for k in ("group_id", "user_id", "target_id"))
-    if not feature_enabled("bf1", group):
-        return False
-    # 宿主按群选路，事件只交给一个号；被戳的可能是群里另一个 bot 号，由它来回
-    accounts = {str(a.self_id): a for a in accounts_for_group(group, platform=receiver.platform)}
-    accounts.setdefault(str(receiver.self_id), receiver)
-    if target not in accounts or user in accounts:
-        return False
-    now = time.monotonic()
-    if now - _poked.get((group, user), -POKE_COOLDOWN) < POKE_COOLDOWN:
-        return False
-    if len(_poked) > 1000:
-        _poked.clear()
-    _poked[(group, user)] = now
-    await accounts[target].protocol.send_message(group, await poke_reply(user, service))
-    return True
-
-
-# —— 入群审核：申请时把申请者填的 EA 名字查一遍发到群里，管理员回复这条消息同意或拒绝 ——
-
-_REVIEW_HINT = "回复本消息「y」同意，回复其他文字作为理由拒绝"
-
-
-class JoinReview(Model):
-    """开了入群审核的群。"""
-
-    group_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-
-
-class JoinRequest(Model):
-    """待审的入群申请。
-
-    不设时限：flag 是 QQ 群通知的 seq，NapCat 处理时在收到申请那个号最近 100 条群通知里找，
-    申请还在通知里就能处理，bot 重启也不影响。处理掉或者申请者已经进群才删。
-    """
-
-    group_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    applicant: Mapped[str] = mapped_column(String(32), primary_key=True)
-    # 每个管理员号的群通知各编各的 seq，得用收到申请的那个号处理
-    self_id: Mapped[str] = mapped_column(String(32))
-    flag: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[float]
-    # 查到的 EA 号，同意时给申请者绑定
-    pid: Mapped[int | None] = mapped_column(BigInteger)
-    name: Mapped[str | None] = mapped_column(String(64))
-
-
-# 认领申请、管理员抢着回复时，查和写之间不能插进别的协程
-_request_lock = asyncio.Lock()
-
-
-def _join_answer(comment: str) -> str:
-    """QQ 把入群问题拼成「问题：…\\n答案：…」；没设问题时整段附言就是答案。"""
-
-    return comment.rpartition("答案：")[2].strip()
-
-
-async def _verdict(applicant: str, persona: dict[str, Any], stats: Any, ban: Any) -> str:
-    if not stats["summary"].get("time_played_seconds"):
-        return "有这个 EA 账号，但没玩过战地一"
-    ban = ban or {}
-    notes = [
-        f"{source.upper()} 实锤 {ban.get(f'{source}_url') or ''}".rstrip()
-        for source in ("bfeac", "bfban")
-        if ban.get(source) == "hit"
-    ]
-    bound = await _bound(applicant)
-    if bound and bound.pid != persona["persona_id"]:
-        notes.append(f"这个 QQ 绑定的是 {bound.name or f'PID {bound.pid}'}，不是同一个号")
-    return "；".join(notes) or "有效 ID"
-
-
-async def review_request(
-    applicant: str, nickname: str, comment: str, service
-) -> tuple[list[Element], dict[str, Any] | None]:
-    """审核消息和查到的玩家。审核消息第一行带申请者 QQ，管理员回复时靠它找回申请。"""
-
-    answer = _join_answer(comment)
-    persona = card = recent = None
-    rounds_note = ""
-    if not answer:
-        verdict = "没填 EA 名字"
-    else:
-        try:
-            persona = await _persona(answer)
-            (card, stats, ban), recent = await asyncio.gather(
-                _stats_card(persona, service), _optional_recent(persona, service)
-            )
-        except Bf1Error as error:
-            verdict = str(error)
-        else:
-            verdict = await _verdict(applicant, persona, stats, ban)
-            if recent is None and stats["summary"].get("time_played_seconds"):
-                rounds_note = "最近对局：bf-manager 90 天内没记录到\n"
-    head = (
-        f"收到 {nickname}({applicant}) 的入群申请\n答案：{answer or '-'}\n检查：{verdict}\n"
-        + rounds_note
-    )
-    parts = [Text(head), *_chain(card)]
-    if recent is not None:
-        # 两张都回退成文字时中间空一行；战绩卡片已经带了玩家页链接，对局卡片不再带
-        gap = "\n\n" if isinstance(card, str) and isinstance(recent, str) else ""
-        parts += _chain(f"{gap}{recent}" if isinstance(recent, str) else recent)
-    return [*parts, Text(f"\n{_REVIEW_HINT}")], persona
-
-
-def _chain(reply: MessageChain | str | None) -> list[Element]:
-    if reply is None:
-        return []
-    return [Text(reply)] if isinstance(reply, str) else list(reply)
-
-
-async def _optional_recent(persona: dict[str, Any], service) -> MessageChain | str | None:
-    """审核时对局记录查不到不耽误战绩卡片。"""
-
-    try:
-        return await _recent_card(persona, service, link=False)
-    except Bf1Error:
-        return None
-
-
-async def _claim(group_id: str, applicant: str, self_id: str, flag: str) -> bool:
-    """同一份申请每个号各收到一次；几秒内已经有号接手的就不再处理。重复申请照常处理。"""
-
-    async with _request_lock, get_session() as db:
-        pending = await db.get(JoinRequest, (group_id, applicant))
-        if pending is not None and pending.created_at > time.time() - 30:
-            return False
-        await db.merge(
-            JoinRequest(
-                group_id=group_id,
-                applicant=applicant,
-                self_id=self_id,
-                flag=flag,
-                created_at=time.time(),
-                pid=None,
-                name=None,
-            )
-        )
-        await db.commit()
-    return True
-
-
-async def _remember_persona(group_id: str, applicant: str, persona: dict[str, Any]) -> None:
-    async with get_session() as db:
-        if pending := await db.get(JoinRequest, (group_id, applicant)):
-            pending.pid, pending.name = persona["persona_id"], persona["display_name"]
-            await db.commit()
-
-
-async def _drop_request(group_id: str, applicant: str) -> None:
-    async with get_session() as db:
-        if pending := await db.get(JoinRequest, (group_id, applicant)):
-            await db.delete(pending)
-            await db.commit()
-
-
-async def _review_on(group_id: str) -> bool:
-    async with get_session() as db:
-        return await db.get(JoinReview, group_id) is not None
-
-
-async def _onebot(account: Account, action: str, **params: Any) -> Any:
-    """OneBot 原始接口；失败时 satori 抛 ActionFailed。
-
-    直接走 ``call_api``：Entari 包装 ``protocol.internal`` 时会把关键字参数整个包成一项
-    ``kwargs``，NapCat 收不到参数。
-    """
-
-    # shortcut: 绕开 Entari 的包装缺陷，ArcletProject/Entari#32 修复后改回 protocol.internal。
-    return await asyncio.wait_for(account.protocol.call_api(f"internal/{action}", params), 10)
-
-
-async def rename_member(group: str, user_id: str, accounts: list[Account]) -> str | None:
-    """进群的人绑定过 EA 号，就把群名片改成它现在的名字；改成了返回名字。
-
-    进群通知只交给选路选中的一个号，它不一定是管理员，所以挨个问账号在群里的身份，
-    用第一个群主或管理员号改。
-    """
-
-    bound = await _bound(user_id)
-    if bound is None:
-        return None
-    try:
-        name = (await _get(f"/players/{bound.pid}"))["display_name"]
-    except Bf1Error:
-        name = bound.name
-    if not name:
-        return None
-    for account in accounts:
-        try:
-            me = await _onebot(
-                account,
-                "get_group_member_info",
-                group_id=int(group),
-                user_id=int(account.self_id),
-                no_cache=True,
-            )
-            if (me or {}).get("role") not in ("owner", "admin"):
-                continue
-            await _onebot(
-                account, "set_group_card", group_id=int(group), user_id=int(user_id), card=name
-            )
-        except Exception as error:  # 掉线、超时、不是 QQ 群：换下一个号
-            logger.warning("用 {} 改 {} 的群名片失败：{!r}", account.self_id, user_id, error)
-            continue
-        return name
-    logger.info("群 {} 里没有能改名片的管理员号，{} 的名片没改", group, user_id)
-    return None
+# —— 入群审核 ——
 
 
 @plugin.listen(GuildMemberAddedEvent)
 async def on_join_request(
     session: Session[GuildMemberAddedEvent], *, render_service: RenderService
 ):
-    # shortcut: satori 的 onebot11 适配器把加群申请（request.group.add）也报成 GUILD_MEMBER_ADDED，
-    # 只能靠带不带 message（flag 和附言）区分真入群；上游改成 GUILD_MEMBER_REQUEST 后改听那个事件
-    request = getattr(session.event._origin, "message", None)
-    group, applicant = session.guild.id, session.user.id
-    if request is None:
-        # 真进群了：在 QQ 里直接同意的申请不会再有人回复，这里清掉
-        await _drop_request(group, applicant)
-        if feature_enabled("bf1", group) and await _review_on(group):
-            receiver = session.account
-            others = accounts_for_group(group, platform=receiver.platform)
-            accounts = [receiver, *(a for a in others if str(a.self_id) != str(receiver.self_id))]
-            if name := await rename_member(group, applicant, accounts):
-                await session.send(
-                    MessageChain([At(applicant), Text(f" 已自动将你的群名片改为 {name}")])
-                )
-        return
-    if not feature_enabled("bf1", group) or not await _review_on(group):
-        return
-    # QQ 把申请推给群里每个管理员号，宿主也都放行，第一个收到的处理
-    if not await _claim(group, applicant, str(session.account.self_id), request.id):
-        return
-    message, persona = await review_request(
-        applicant, session.user.name or applicant, request.content, render_service
-    )
-    if persona:
-        await _remember_persona(group, applicant, persona)
-    await session.send(message)
-
-
-def _quoted_applicant(elements: list[Element], self_ids: set[str]) -> str | None:
-    """回复的是 bot 发的审核消息时，取出申请者 QQ。
-
-    每个 NapCat 各编各的消息号，事件可能由另一个号收到，所以不比消息号，看引用里的原文。
-    """
-
-    quote = next((e for e in elements if isinstance(e, Quote)), None)
-    if quote is None:
-        return None
-    author = next((c for c in quote.children if isinstance(c, Author)), None)
-    if author is None or author.id not in self_ids:
-        return None
-    said = "".join(c.text for c in quote.children if isinstance(c, Text))
-    found = re.match(r"收到 .*\((\d+)\) 的入群申请", said)
-    return found[1] if found else None
-
-
-async def decide(group: str, applicant: str, said: str) -> str:
-    """管理员的回复：y 同意，其他文字作为理由拒绝。"""
-
-    async with _request_lock, get_session() as db:
-        pending = await db.get(JoinRequest, (group, applicant))
-        if pending is None:
-            return f"{applicant} 的入群申请已经处理过了"
-        account = next((a for a in online_accounts() if str(a.self_id) == pending.self_id), None)
-        if account is None:
-            return f"收到申请的号 {pending.self_id} 不在线，上线后再回复"
-        flag, pid, name = pending.flag, pending.pid, pending.name
-        # 先删再调接口：失败多半是申请在 QQ 里已经处理过了，留着也没用
-        await db.delete(pending)
-        await db.commit()
-    approve = said.casefold() == "y"
-    try:
-        await account.protocol.guild_member_approve(flag, approve, "" if approve else said)
-    except Exception as error:  # NapCat 的报错（不是管理员、申请已被别人处理）原样告诉管理员
-        logger.warning("处理入群申请失败：{!r}", error)
-        return f"处理 {applicant} 的入群申请失败：{error}"
-    if not approve:
-        return f"已拒绝 {applicant} 的入群申请，理由：{said}"
-    if pid is not None and not await _bound(applicant):
-        await _bind(applicant, {"persona_id": pid, "display_name": name})
-    return f"已同意 {applicant} 的入群申请"
+    await review.on_join(session, render_service)
 
 
 @plugin.listen(MessageCreatedEvent)
 @feature_required()
 async def on_review_reply(session: Session[MessageCreatedEvent]):
-    if session.event.guild is None:
-        return
-    elements = list(session.event.message.message)
-    self_ids = {str(a.self_id) for a in online_accounts()} | {str(session.account.self_id)}
-    applicant = _quoted_applicant(elements, self_ids)
-    if applicant is None:
-        return
-    async with get_session() as db:
-        if await db.get(JoinRequest, (session.guild.id, applicant)) is None:
-            return
-    said = "".join(e.text for e in elements if isinstance(e, Text)).strip()
-    if not said or not await require_perm(session, Permission.GroupAdmin):
-        return
-    await session.send(await decide(session.guild.id, applicant, said))
+    await review.on_reply(session)
 
 
 review_command = Alconna(
@@ -1766,16 +410,6 @@ review_command = Alconna(
 async def bf1review(session: Session, switch: Query[str] = Query("switch")):  # noqa: B008
     if session.event.guild is None:
         return "入群审核只能在群里开关"
-    group = session.guild.id
-    if not switch.available:
-        return f"本群入群审核：{'开' if await _review_on(group) else '关'}"
-    if not await require_perm(session, Permission.GroupAdmin):
+    if switch.available and not await require_perm(session, Permission.GroupAdmin):
         return "只有群管理员及以上能开关入群审核"
-    async with get_session() as db:
-        row = await db.get(JoinReview, group)
-        if switch.result == "开" and row is None:
-            db.add(JoinReview(group_id=group))
-        elif switch.result == "关" and row is not None:
-            await db.delete(row)
-        await db.commit()
-    return f"本群入群审核已{switch.result}"
+    return await review.switch(session.guild.id, switch.result if switch.available else None)

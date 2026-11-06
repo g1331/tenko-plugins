@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 from arclet.alconna import command_manager
 from arclet.entari.command import _commands
-from satori import Author, Image, Quote, Text
+from satori import At, Author, Image, Quote, Text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -73,11 +73,11 @@ def api(module, monkeypatch):
     async def fake_get(path, **params):
         # 和真接口一样：查不到的（比如没准备的单局详情）报 Bf1Error
         if path not in routes:
-            raise module.Bf1Error(f"测试里没有 {path}")
+            raise module.api.Bf1Error(f"测试里没有 {path}")
         handler = routes[path]
         return handler(**params) if callable(handler) else handler
 
-    monkeypatch.setattr(module, "_get", fake_get)
+    monkeypatch.setattr(module.api, "get", fake_get)
     return routes
 
 
@@ -126,7 +126,7 @@ async def test_plugin_loads_on_by_default(runtime):
 
 async def test_stats_renders_the_real_account_as_an_image(module, player, rendered):
     rendered["result"] = b"jpeg"
-    reply = await module.stats_reply("abc", object())
+    reply = await module.stats.stats_reply("abc", object())
     assert isinstance(reply[0], Image)
     assert reply[1] == Text("https://bfm.umrbotech.com/bf1/player/2")
     ctx = rendered["context"]
@@ -164,11 +164,11 @@ def html_has(module, ctx, *parts):
 
 async def test_stats_falls_back_to_text_and_survives_missing_extras(module, player, rendered):
     def down(**_):
-        raise module.Bf1Error("x")
+        raise module.api.Bf1Error("x")
 
     player["/stats/2/ban"] = down
     player["/stats/2/online"] = down
-    reply = await module.stats_reply("abc", None)
+    reply = await module.stats.stats_reply("abc", None)
     assert reply.startswith("abc 的战地一战绩")
     assert reply.endswith("\nhttps://bfm.umrbotech.com/bf1/player/2")
     assert "最佳兵种 突击兵" in reply
@@ -178,7 +178,7 @@ async def test_stats_falls_back_to_text_and_survives_missing_extras(module, play
 
 
 async def test_weapon_rows_sorted_with_rarity(module, player, rendered):
-    reply = await module.items_reply("weapons", "abc", None)
+    reply = await module.stats.items_reply("weapons", "abc", None)
     ctx = rendered["context"]
     rows = ctx["items"]
     assert ctx["tag"] == "EA"
@@ -191,14 +191,16 @@ async def test_weapon_rows_sorted_with_rarity(module, player, rendered):
 
 
 async def test_vehicle_rows(module, player, rendered):
-    await module.items_reply("vehicles", "abc", None)
+    await module.stats.items_reply("vehicles", "abc", None)
     row = rendered["context"]["items"][0]
     assert row["stats"] == ["89", "0.59", "13", "2h 30m"]
 
 
 async def test_errors_become_replies(module, api):
     api["/players/search"] = {"personas": []}
-    assert await module._answer(module.stats_reply("nobody", None)) == "没找到玩家 nobody"
+    assert (
+        await module.reply.answer(module.stats.stats_reply("nobody", None)) == "没找到玩家 nobody"
+    )
 
 
 async def test_fuzzy_search_picks_the_exact_name(module, api):
@@ -208,8 +210,8 @@ async def test_fuzzy_search_picks_the_exact_name(module, api):
             {"persona_id": 2, "display_name": "YueMaT", "time_played_hours": None},
         ]
     }
-    assert (await module._persona("yuemat"))["persona_id"] == 2
-    reply = await module._answer(module._persona("yue"))
+    assert (await module.api.find_persona("yuemat"))["persona_id"] == 2
+    reply = await module.reply.answer(module.api.find_persona("yue"))
     assert reply == "没找到玩家 yue，相近的有：YuEmAt34、YueMaT"
 
 
@@ -230,7 +232,7 @@ async def test_servers_sorted_by_players(module, api, rendered):
             for i in range(12)
         ],
     }
-    reply = await module.servers_reply("test", None)
+    reply = await module.servers.servers_reply("test", None)
     lines = reply.splitlines()
     assert lines[0] == "「test」找到 12 个服务器，人最多的 10 个："
     assert lines[1] == "1. [S11] test"
@@ -238,7 +240,7 @@ async def test_servers_sorted_by_players(module, api, rendered):
     assert rendered["context"]["servers"][0]["ratio"] == 17
     assert rendered["context"]["summary"] == "共找到 12 个有人的服务器，按人数显示前 10 个"
     api["/servers"] = {"total": 0, "items": []}
-    assert "没找到" in await module.servers_reply("none", None)
+    assert "没找到" in await module.servers.servers_reply("none", None)
 
 
 @pytest_asyncio.fixture
@@ -247,40 +249,43 @@ async def db(module, monkeypatch):
 
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
     async with engine.begin() as conn:
-        await conn.run_sync(module.Binding.__table__.create)
-        await conn.run_sync(module.JoinReview.__table__.create)
-        await conn.run_sync(module.JoinRequest.__table__.create)
-    monkeypatch.setattr(module, "get_session", lambda: AsyncSession(engine))
+        await conn.run_sync(module.binding.Binding.__table__.create)
+        await conn.run_sync(module.review.JoinReview.__table__.create)
+        await conn.run_sync(module.review.JoinRequest.__table__.create)
+    monkeypatch.setattr(module.binding, "get_session", lambda: AsyncSession(engine))
+    monkeypatch.setattr(module.review, "get_session", lambda: AsyncSession(engine))
     yield
     await engine.dispose()
 
 
 async def test_binding_lets_queries_skip_the_name(module, player, rendered, db):
-    reply = await module._answer(module.stats_reply(None, None, "qq1"))
+    reply = await module.reply.answer(module.stats.stats_reply(None, None, "qq1"))
     assert reply == "还没绑定：使用 /bf1绑定 你的EA名字，或者在命令后面带上名字"
-    assert await module.bind_reply(None, "qq1") == "用法：/bf1绑定 <EA 名字>"
-    assert (await module.bind_reply("abc", "qq1")).startswith("已绑定 abc（PID 2）")
-    assert await module.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
-    assert await module.bind_reply("abc", "qq1") == "已绑定 abc（PID 2）"
+    assert await module.binding.bind_reply(None, "qq1") == "用法：/bf1绑定 <EA 名字>"
+    assert (await module.binding.bind_reply("abc", "qq1")).startswith("已绑定 abc（PID 2）")
+    assert await module.binding.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
+    assert await module.binding.bind_reply("abc", "qq1") == "已绑定 abc（PID 2）"
     # 同一个号改了名再绑，提示改名
     renamed = {**PERSONA, "display_name": "abd", "time_played_hours": 884}
     player["/players/search"] = {"personas": [renamed]}
-    assert await module.bind_reply("abd", "qq1") == "已绑定 abd（PID 2），改过名：abc → abd"
+    assert await module.binding.bind_reply("abd", "qq1") == "已绑定 abd（PID 2），改过名：abc → abd"
     player["/players/2"] = PERSONA
-    reply = await module.stats_reply(None, None, "qq1")
+    reply = await module.stats.stats_reply(None, None, "qq1")
     assert reply.startswith("abc 的战地一战绩")
 
 
 async def test_old_json_bindings_move_into_the_database(module, player, db):
-    module._legacy.save({"qq1": {"pid": 9, "name": "old"}, "qq2": {"pid": 8, "name": "kept"}})
-    assert await module.bind_reply("abc", "qq1") == "绑定变更：old（PID 9）→ abc（PID 2）"
+    module.binding._legacy.save(
+        {"qq1": {"pid": 9, "name": "old"}, "qq2": {"pid": 8, "name": "kept"}}
+    )
+    assert await module.binding.bind_reply("abc", "qq1") == "绑定变更：old（PID 9）→ abc（PID 2）"
     # 新绑定覆盖 JSON 里的旧值，JSON 里别人的绑定原样导入
-    assert await module.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
-    assert await module.bind_reply(None, "qq2") == "当前绑定：kept（PID 8）"
+    assert await module.binding.bind_reply(None, "qq1") == "当前绑定：abc（PID 2）"
+    assert await module.binding.bind_reply(None, "qq2") == "当前绑定：kept（PID 8）"
     # 换了个号再绑，说一声原来的
-    assert await module.bind_reply("abc", "qq2") == "绑定变更：kept（PID 8）→ abc（PID 2）"
-    assert not module._legacy.path.exists()
-    module._legacy.path.with_name("bindings.json.imported").unlink()
+    assert await module.binding.bind_reply("abc", "qq2") == "绑定变更：kept（PID 8）→ abc（PID 2）"
+    assert not module.binding._legacy.path.exists()
+    module.binding._legacy.path.with_name("bindings.json.imported").unlink()
 
 
 SERVER = {
@@ -330,7 +335,7 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
             "defender": "不认识",
         },
     }
-    reply = await module.server_reply("test", None)
+    reply = await module.servers.server_reply("test", None)
     ctx = rendered["context"]
     assert ctx["owner"] == "boss" and ctx["roles"][0] == ("管理", 1)
     team = ctx["teams"][0]
@@ -358,11 +363,11 @@ async def test_server_detail_picks_the_busiest_match(module, api, rendered):
     assert page.count('class="ld"') == 2 and "载入中：3" in page
 
     def down(**_):
-        raise module.Bf1Error("x")
+        raise module.api.Bf1Error("x")
 
     api["/servers/7/players"] = down
     # 服名里的短数字按名字搜，不当 gameId
-    assert "其他 1 个：/bf1ss 3090" in await module.server_reply("3090", None)
+    assert "其他 1 个：/bf1ss 3090" in await module.servers.server_reply("3090", None)
     assert rendered["context"]["players_missing"]
 
 
@@ -377,37 +382,44 @@ async def test_overview(module, api, rendered):
         "mode_distribution": [{"label": "征服", "players": 3}, {"label": "行动", "players": 1}],
         "history": [{"players": 10}, {"players": 20}],
     }
-    reply = await module.overview_reply(None)
+    reply = await module.game.overview_reply(None)
     ctx = rendered["context"]
     assert ctx["players"] == "10,708" and ctx["modes"][0] == ("征服", "3", 75)
     assert ctx["trend"]["line"] == "0.0,150.0 900.0,0.0"
     assert reply.startswith("战地一当前在线 10708 人，274 个服务器")
     assert reply.endswith("\nhttps://bfm.umrbotech.com/stats")
     api["/overview"] = {"available": False}
-    assert await module._answer(module.overview_reply(None)) == "全服概况暂时没有数据，稍后再试"
+    assert (
+        await module.reply.answer(module.game.overview_reply(None))
+        == "全服概况暂时没有数据，稍后再试"
+    )
 
 
 async def test_join_request_shows_the_card_and_flags_problems(module, rounds, rendered, db):
     player = rounds
     rendered["result"] = b"jpeg"
-    message, persona = await module.review_request("10", "新人", "问题：EA名字\n答案：abc", None)
+    message, persona = await module.review.review_request(
+        "10", "新人", "问题：EA名字\n答案：abc", None
+    )
     assert message[0] == Text("收到 新人(10) 的入群申请\n答案：abc\n检查：BFBAN 实锤\n")
     # 战绩卡片带玩家页链接，后面跟最近对局卡片
     assert isinstance(message[1], Image) and message[2].text.endswith("/bf1/player/2")
     assert isinstance(message[3], Image) and len(message) == 5
     assert message[-1].text.endswith("作为理由拒绝")
     assert persona["persona_id"] == 2
-    await module.bind_reply("abc", "10")
+    await module.binding.bind_reply("abc", "10")
     player["/stats/2/ban"] = {"bfban": "unknown", "bfeac": "unknown"}
-    message, _ = await module.review_request("10", "新人", "abc", None)
+    message, _ = await module.review.review_request("10", "新人", "abc", None)
     assert "检查：有效 ID" in message[0].text
 
 
 async def test_join_request_without_a_usable_name(module, player, rendered, db):
-    message, persona = await module.review_request("10", "新人", "问题：EA名字\n答案：", None)
+    message, persona = await module.review.review_request(
+        "10", "新人", "问题：EA名字\n答案：", None
+    )
     assert "答案：-\n检查：没填 EA 名字" in message[0].text and persona is None
     player["/players/search"] = {"personas": []}
-    message, persona = await module.review_request("10", "新人", "nobody", None)
+    message, persona = await module.review.review_request("10", "新人", "nobody", None)
     assert "检查：没找到玩家 nobody" in message[0].text and persona is None
     assert len(message) == 2
 
@@ -417,50 +429,50 @@ async def test_join_request_flags_a_mismatched_binding_and_unplayed_account(
 ):
     player = rounds
     player["/stats/2/rounds"] = {"items": [], "next_before": None}
-    await module._bind("10", {"persona_id": 9, "display_name": "other"})
-    message, _ = await module.review_request("10", "新人", "abc", None)
+    await module.binding.bind("10", {"persona_id": 9, "display_name": "other"})
+    message, _ = await module.review.review_request("10", "新人", "abc", None)
     assert "这个 QQ 绑定的是 other，不是同一个号" in message[0].text
     player["/stats/2"] = {**STATS, "summary": {**STATS["summary"], "time_played_seconds": 0}}
-    message, _ = await module.review_request("10", "新人", "abc", None)
+    message, _ = await module.review.review_request("10", "新人", "abc", None)
     assert message[0].text.endswith("检查：有这个 EA 账号，但没玩过战地一\n")
 
 
 async def test_join_request_lists_recent_rounds(module, rounds, rendered, db):
-    message, _ = await module.review_request("10", "新人", "abc", None)
+    message, _ = await module.review.review_request("10", "新人", "abc", None)
     # 两张卡片都回退成文字，中间空一行，对局部分不带链接
     assert message[1].text.endswith("/bf1/player/2")
     assert message[2].text.startswith("\n\nabc 最近 3 局\n")
     assert "#rounds" not in message[2].text
     rounds["/stats/2/rounds"] = {"items": [ROUNDS[1]], "next_before": None}
-    message, _ = await module.review_request("10", "新人", "abc", None)
+    message, _ = await module.review.review_request("10", "新人", "abc", None)
     assert message[0].text.endswith("最近对局：bf-manager 90 天内没记录到\n")
     assert len(message) == 3
 
 
 async def test_join_request_survives_a_rounds_failure(module, rounds, rendered, db):
     def broken(limit):
-        raise module.Bf1Error("bf-manager 出错")
+        raise module.api.Bf1Error("bf-manager 出错")
 
     rounds["/stats/2/rounds"] = broken
-    message, persona = await module.review_request("10", "新人", "abc", None)
+    message, persona = await module.review.review_request("10", "新人", "abc", None)
     assert "检查：BFBAN 实锤" in message[0].text and persona["persona_id"] == 2
 
 
 def test_reply_to_the_review_message_finds_the_applicant(module):
     said = Text("收到 新人(10) 的入群申请\n答案：abc\n")
     quote = Quote("1")(Author("bot"), said)
-    assert module._quoted_applicant([quote, Text("y")], {"bot"}) == "10"
-    assert module._quoted_applicant([quote, Text("y")], {"other"}) is None
+    assert module.review._quoted_applicant([quote, Text("y")], {"bot"}) == "10"
+    assert module.review._quoted_applicant([quote, Text("y")], {"other"}) is None
     other = Quote("1")(Author("bot"), Text("随便说的"))
-    assert module._quoted_applicant([other], {"bot"}) is None
-    assert module._quoted_applicant([Text("y")], {"bot"}) is None
+    assert module.review._quoted_applicant([other], {"bot"}) is None
+    assert module.review._quoted_applicant([Text("y")], {"bot"}) is None
 
 
 def _admin(module, monkeypatch, approve, self_id="bot"):
     account = SimpleNamespace(
         self_id=self_id, protocol=SimpleNamespace(guild_member_approve=approve)
     )
-    monkeypatch.setattr(module, "online_accounts", lambda: (account,))
+    monkeypatch.setattr(module.review, "online_accounts", lambda: (account,))
 
 
 async def test_admin_decides_and_approval_binds_the_name(module, db, monkeypatch):
@@ -470,16 +482,16 @@ async def test_admin_decides_and_approval_binds_the_name(module, db, monkeypatch
         calls.append((flag, ok, comment))
 
     _admin(module, monkeypatch, approve)
-    assert await module._claim("g", "10", "bot", "f1")
-    await module._remember_persona("g", "10", PERSONA)
-    assert await module.decide("g", "10", "Y") == "已同意 10 的入群申请"
-    assert await module.bind_reply(None, "10") == "当前绑定：abc（PID 2）"
-    assert await module._claim("g", "11", "bot", "f2")
-    await module._remember_persona("g", "11", PERSONA)
-    assert await module.decide("g", "11", "ID 不对") == "已拒绝 11 的入群申请，理由：ID 不对"
+    assert await module.review._claim("g", "10", "bot", "f1")
+    await module.review._remember_persona("g", "10", PERSONA)
+    assert await module.review.decide("g", "10", "Y") == "已同意 10 的入群申请"
+    assert await module.binding.bind_reply(None, "10") == "当前绑定：abc（PID 2）"
+    assert await module.review._claim("g", "11", "bot", "f2")
+    await module.review._remember_persona("g", "11", PERSONA)
+    assert await module.review.decide("g", "11", "ID 不对") == "已拒绝 11 的入群申请，理由：ID 不对"
     assert calls == [("f1", True, ""), ("f2", False, "ID 不对")]
-    assert await module.bind_reply(None, "11") == "用法：/bf1绑定 <EA 名字>"
-    assert await module.decide("g", "11", "y") == "11 的入群申请已经处理过了"
+    assert await module.binding.bind_reply(None, "11") == "用法：/bf1绑定 <EA 名字>"
+    assert await module.review.decide("g", "11", "y") == "11 的入群申请已经处理过了"
 
 
 async def test_a_request_waits_for_its_account_without_a_deadline(module, db, monkeypatch):
@@ -489,19 +501,19 @@ async def test_a_request_waits_for_its_account_without_a_deadline(module, db, mo
         calls.append(flag)
 
     _admin(module, monkeypatch, approve, self_id="other")
-    assert await module._claim("g", "10", "bot", "f")
-    reply = await module.decide("g", "10", "y")
+    assert await module.review._claim("g", "10", "bot", "f")
+    reply = await module.review.decide("g", "10", "y")
     assert reply == "收到申请的号 bot 不在线，上线后再回复" and not calls
     # 一天后这个号上线了，申请照样能处理
-    monkeypatch.setattr(module.time, "time", lambda: 1e12)
+    monkeypatch.setattr(module.review.time, "time", lambda: 1e12)
     _admin(module, monkeypatch, approve)
-    assert await module.decide("g", "10", "y") == "已同意 10 的入群申请" and calls == ["f"]
+    assert await module.review.decide("g", "10", "y") == "已同意 10 的入群申请" and calls == ["f"]
 
 
 async def test_joining_clears_the_pending_request(module, db):
-    assert await module._claim("g", "10", "bot", "f")
-    await module._drop_request("g", "10")
-    assert await module.decide("g", "10", "y") == "10 的入群申请已经处理过了"
+    assert await module.review._claim("g", "10", "bot", "f")
+    await module.review._drop_request("g", "10")
+    assert await module.review.decide("g", "10", "y") == "10 的入群申请已经处理过了"
 
 
 async def test_approval_failure_is_reported(module, db, monkeypatch):
@@ -509,17 +521,17 @@ async def test_approval_failure_is_reported(module, db, monkeypatch):
         raise RuntimeError("不是管理员")
 
     _admin(module, monkeypatch, approve)
-    assert await module._claim("g", "10", "bot", "f")
-    assert await module.decide("g", "10", "y") == "处理 10 的入群申请失败：不是管理员"
+    assert await module.review._claim("g", "10", "bot", "f")
+    assert await module.review.decide("g", "10", "y") == "处理 10 的入群申请失败：不是管理员"
 
 
 async def test_the_first_admin_account_claims_the_request(module, db, monkeypatch):
-    assert await module._claim("g", "10", "bot", "f")
-    assert not await module._claim("g", "10", "bot2", "f")
+    assert await module.review._claim("g", "10", "bot", "f")
+    assert not await module.review._claim("g", "10", "bot2", "f")
     # 一分钟前的申请没审完、又申请了一次：照常处理新的
-    now = module.time.time()
-    monkeypatch.setattr(module.time, "time", lambda: now + 60)
-    assert await module._claim("g", "10", "bot2", "f9")
+    now = module.review.time.time()
+    monkeypatch.setattr(module.review.time, "time", lambda: now + 60)
+    assert await module.review._claim("g", "10", "bot2", "f9")
 
 
 def _bot(self_id, role, calls, fail=False):
@@ -535,12 +547,12 @@ def _bot(self_id, role, calls, fail=False):
 async def test_joining_renames_a_bound_member_with_an_admin_account(module, player, db):
     calls = []
     member, admin = _bot("1", "member", calls), _bot("2", "admin", calls)
-    assert await module.rename_member("100", "10", [member, admin]) is None
+    assert await module.review.rename_member("100", "10", [member, admin]) is None
     assert calls == []
-    await module._bind("10", PERSONA)
+    await module.binding.bind("10", PERSONA)
     # 绑定后改了名：用现在的名字
     player["/players/2"] = {**PERSONA, "display_name": "abd"}
-    assert await module.rename_member("100", "10", [member, admin]) == "abd"
+    assert await module.review.rename_member("100", "10", [member, admin]) == "abd"
     assert calls[-1] == (
         "2",
         "internal/set_group_card",
@@ -550,19 +562,19 @@ async def test_joining_renames_a_bound_member_with_an_admin_account(module, play
 
 
 async def test_renaming_skips_broken_accounts_and_gives_up_without_an_admin(module, api, db):
-    await module._bind("10", PERSONA)
+    await module.binding.bind("10", PERSONA)
 
     def down():
-        raise module.Bf1Error("查询服务暂时连不上，稍后再试")
+        raise module.api.Bf1Error("查询服务暂时连不上，稍后再试")
 
     api["/players/2"] = down
     calls = []
     # 查不到现在的名字就用绑定时记下的
-    named = await module.rename_member(
+    named = await module.review.rename_member(
         "100", "10", [_bot("1", "admin", calls, fail=True), _bot("2", "owner", calls)]
     )
     assert named == "abc" and calls[-1][0] == "2"
-    assert await module.rename_member("100", "10", [_bot("1", "member", [])]) is None
+    assert await module.review.rename_member("100", "10", [_bot("1", "member", [])]) is None
 
 
 def _alconna(name):
@@ -618,8 +630,8 @@ def test_text_flag(module):
     assert _alconna("info").parse("/info abc").query("text") is None
     assert _alconna("info").parse("/info -t abc").query("name") == "abc"
     service = object()
-    assert module._service(_query(), service) is service
-    assert module._service(_query(...), service) is None
+    assert module.entry.service_for(_query(), service) is service
+    assert module.entry.service_for(_query(...), service) is None
     assert "-t" in _alconna("bf1info").meta.description
 
 
@@ -697,7 +709,7 @@ def rounds(player):
 
 async def test_recent_rounds_card(module, rounds, rendered):
     rendered["result"] = b"jpeg"
-    reply = await module.recent_reply("abc", object())
+    reply = await module.stats.recent_reply("abc", object())
     assert str(reply).endswith("/bf1/player/2#rounds")
     ctx = rendered["context"]
     assert rendered["template"] == "recent.html"
@@ -713,8 +725,8 @@ async def test_recent_rounds_card(module, rounds, rendered):
 
 
 async def test_recent_rounds_fall_back_to_text(module, rounds, rendered, db):
-    await module._bind("u1", PERSONA)
-    reply = await module.recent_reply(None, None, "u1")
+    await module.binding.bind("u1", PERSONA)
+    reply = await module.stats.recent_reply(None, None, "u1")
     assert reply.startswith("abc 最近 3 局\n")
     assert "罗斯 MKIII（步兵） 20 杀、军铲 10 杀" in reply
     assert reply.endswith("/bf1/player/2#rounds")
@@ -722,7 +734,7 @@ async def test_recent_rounds_fall_back_to_text(module, rounds, rendered, db):
 
 async def test_no_recent_rounds(module, rounds, rendered):
     rounds["/stats/2/rounds"] = {"items": [ROUNDS[1]], "next_before": None}
-    reply = await module._answer(module.recent_reply("abc", None))
+    reply = await module.reply.answer(module.stats.recent_reply("abc", None))
     assert reply.startswith("还没有记录到 abc 的对局")
     assert "template" not in rendered
 
@@ -747,34 +759,34 @@ def test_tip_search_covers_map_names(module):
     tips = module.codex.search_tips("亚眠")
     assert any("亚眠" in t.tags and "亚眠" not in t.text for t in tips)
     assert all("亚眠" in t.tags or "亚眠" in t.text for t in tips)
-    assert module.format_tip(module.codex.Tip("记得防守旗帜！", ("征服", "抢攻"))) == (
+    assert module.wiki.format_tip(module.codex.Tip("记得防守旗帜！", ("征服", "抢攻"))) == (
         "【征服·抢攻】记得防守旗帜！"
     )
 
 
 async def test_wiki_reply(module, rendered):
     rendered["result"] = b"jpeg"
-    reply = await module.wiki_reply("托尔金", object())
+    reply = await module.wiki.wiki_reply("托尔金", object())
     assert isinstance(reply[0], Image) and len(reply) == 1
     assert rendered["template"] == "wiki.html" and rendered["context"]["total"] == 310
     rendered["result"] = None
-    text = await module.wiki_reply("mp18", None)
+    text = await module.wiki.wiki_reply("mp18", None)
     assert text.startswith("#") and "解锁：用 MP18 冲锋枪进行" in text
-    listed = await module.wiki_reply("坦克", None)
+    listed = await module.wiki.wiki_reply("坦克", None)
     assert listed.startswith("“坦克”找到") and "\n#" in listed
-    catalog = await module.wiki_reply("全世界", None)
+    catalog = await module.wiki.wiki_reply("全世界", None)
     assert catalog.startswith("“全世界”找到 17 条") and "、" in catalog
-    missing = await module._answer(module.wiki_reply("不存在的东西", None))
+    missing = await module.reply.answer(module.wiki.wiki_reply("不存在的东西", None))
     assert missing.startswith("百科里没找到“不存在的东西”")
-    assert (await module.wiki_reply("", None)).startswith("#")
+    assert (await module.wiki.wiki_reply("", None)).startswith("#")
 
 
 def test_tip_reply(module):
-    assert module.tip_reply("")
-    many = module.tip_reply("凡尔登")
-    assert many.startswith("带“凡尔登”的小贴士有") and many.count("\n· ") == module.TIP_LIST
-    with pytest.raises(module.Bf1Error):
-        module.tip_reply("不存在的东西")
+    assert module.wiki.tip_reply("")
+    many = module.wiki.tip_reply("凡尔登")
+    assert many.startswith("带“凡尔登”的小贴士有") and many.count("\n· ") == module.wiki.TIP_LIST
+    with pytest.raises(module.api.Bf1Error):
+        module.wiki.tip_reply("不存在的东西")
 
 
 @pytest.fixture
@@ -794,9 +806,9 @@ def bots(module, monkeypatch):
         )
 
     accounts = [bot("1"), bot("2")]
-    monkeypatch.setattr(module, "accounts_for_group", lambda group, platform: accounts)
-    monkeypatch.setattr(module, "feature_enabled", lambda feature, group: True)
-    monkeypatch.setattr(module, "_poked", {})
+    monkeypatch.setattr(module.wiki, "accounts_for_group", lambda group, platform: accounts)
+    monkeypatch.setattr(module.wiki, "feature_enabled", lambda feature, group: True)
+    monkeypatch.setattr(module.wiki, "_poked", {})
     return SimpleNamespace(accounts=accounts, sent=sent)
 
 
@@ -805,23 +817,27 @@ async def test_poking_a_bot_gets_a_tip_or_wiki_entry(module, bots, rendered, mon
     poke = {"group_id": 100, "user_id": 10, "target_id": 2}
     tip = module.codex.TIPS[0]
     monkeypatch.setattr(module.codex, "pick", lambda: tip)
-    assert await module.poked(receiver, poke, None)
+    assert await module.wiki.poked(receiver, poke, None)
     # 被戳的号来回，@ 戳的人
-    assert bots.sent == [("2", "100", [module.At("10"), Text(f"\n{module.format_tip(tip)}")])]
+    assert bots.sent == [("2", "100", [At("10"), Text(f"\n{module.wiki.format_tip(tip)}")])]
     # 冷却期内再戳不回
-    assert not await module.poked(receiver, poke, None)
+    assert not await module.wiki.poked(receiver, poke, None)
     monkeypatch.setattr(module.codex, "pick", lambda: module.codex.WIKI[2])
     rendered["result"] = b"jpeg"
-    assert await module.poked(receiver, {**poke, "user_id": 11}, None)
+    assert await module.wiki.poked(receiver, {**poke, "user_id": 11}, None)
     assert isinstance(bots.sent[-1][2][-1], Image)
 
 
 async def test_pokes_that_are_not_for_us(module, bots, rendered):
     receiver = bots.accounts[0]
     # 戳群友、bot 互戳、私聊戳
-    assert not await module.poked(receiver, {"group_id": 100, "user_id": 10, "target_id": 9}, None)
-    assert not await module.poked(receiver, {"group_id": 100, "user_id": 1, "target_id": 2}, None)
-    assert not await module.poked(receiver, {"user_id": 10, "target_id": 2}, None)
+    assert not await module.wiki.poked(
+        receiver, {"group_id": 100, "user_id": 10, "target_id": 9}, None
+    )
+    assert not await module.wiki.poked(
+        receiver, {"group_id": 100, "user_id": 1, "target_id": 2}, None
+    )
+    assert not await module.wiki.poked(receiver, {"user_id": 10, "target_id": 2}, None)
     assert bots.sent == []
 
 
@@ -870,7 +886,7 @@ def _query(value=None):
 
 
 def test_category_and_name_in_either_order(module):
-    split = module._group_and_name
+    split = module.entry.group_and_name
     assert split("weapons", _query("步枪"), _query("abc"))[0].label == "步枪"
     group, name = split("weapons", _query("abc"), _query("突击兵"))
     assert (group.label, name) == ("突击兵", "abc")
@@ -881,12 +897,12 @@ def test_category_and_name_in_either_order(module):
 async def test_items_by_group(module, player, rendered):
     rendered["result"] = b"jpeg"
     medic = module.groups.find("weapons", "医疗")
-    await module.items_reply("weapons", "abc", object(), group=medic)
+    await module.stats.items_reply("weapons", "abc", object(), group=medic)
     ctx = rendered["context"]
     assert ctx["title"] == "武器 · 医疗兵"
     assert [i["name"] for i in ctx["items"]] == ["费德洛夫自动步枪"]
     rendered["result"] = None
-    text = await module.items_reply(
+    text = await module.stats.items_reply(
         "vehicles", "abc", None, group=module.groups.find("vehicles", "飞机")
     )
     assert text.startswith("abc 还没有飞机击杀记录")
@@ -905,7 +921,7 @@ def test_item_layout_flags(module):
         2,
     )
     assert _alconna("载具").parse("/载具 -c 4").matched
-    layout = module._layout
+    layout = module.entry.layout_of
     assert layout(_query(), _query()) == (2, 5)
     assert layout(_query(3), _query(4)) == (3, 4)
     assert layout(_query(99), _query(0)) == (8, 1)
@@ -918,26 +934,26 @@ async def test_items_in_columns_and_rows(module, player, rendered):
         for i in range(30)
     ]
     player["/stats/2/weapons"] = {"weapons": many}
-    await module.items_reply("weapons", "abc", object(), layout=(3, 4))
+    await module.stats.items_reply("weapons", "abc", object(), layout=(3, 4))
     ctx = rendered["context"]
     assert len(ctx["items"]) == 12 and ctx["cols"] == 3 and ctx["width"] == 1485
-    await module.items_reply("weapons", "abc", object())
+    await module.stats.items_reply("weapons", "abc", object())
     assert rendered["context"]["width"] == 1000 and len(rendered["context"]["items"]) == 10
     # 不够一行就收窄
     player["/stats/2/weapons"] = {"weapons": many[:2]}
-    await module.items_reply("weapons", "abc", object(), layout=(4, 2))
+    await module.stats.items_reply("weapons", "abc", object(), layout=(4, 2))
     assert rendered["context"]["cols"] == 2 and rendered["context"]["width"] == 1000
     rendered["result"] = None
     player["/stats/2/weapons"] = {"weapons": many}
-    text = await module.items_reply("weapons", "abc", None, layout=(1, 3))
+    text = await module.stats.items_reply("weapons", "abc", None, layout=(1, 3))
     assert text.startswith("abc 的武器击杀前 3\n") and "\n3. W2 · " in text
 
 
 async def test_players_by_pid(module, player, rendered):
     player["/players/2"] = PERSONA
-    text = await module.stats_reply("#2", None)
+    text = await module.stats.stats_reply("#2", None)
     assert text.startswith("abc")
-    wrong = await module._answer(module.stats_reply("#x2", None))
+    wrong = await module.reply.answer(module.stats.stats_reply("#x2", None))
     assert wrong == "PID 只能是数字，例如 #1004198901469"
 
 
@@ -971,7 +987,7 @@ async def test_player_info(module, player, rendered):
     rounds = [ROUNDS[0], ROUNDS[1], _elsewhere(ROUNDS[2], 7, "R2"), ROUNDS[3]]
     player["/stats/2/rounds"] = lambda limit: {"items": rounds[:limit], "next_before": None}
     rendered["result"] = b"jpeg"
-    reply = await module.info_reply("abc", object())
+    reply = await module.stats.info_reply("abc", object())
     # 名字和 PID 用文字跟在图后面，好复制
     assert isinstance(reply[0], Image)
     caption = str(reply[1])
@@ -985,7 +1001,7 @@ async def test_player_info(module, player, rendered):
     assert recent == [("S1", 2, "亚眠 · 征服"), ("R2", 1, "亚眠 · 征服")]
     assert ctx["recent"][0]["when"].startswith("2026-")
     rendered["result"] = None
-    text = await module.info_reply("abc", None)
+    text = await module.stats.info_reply("abc", None)
     assert text.startswith("abc（PID 2）\n战队：[EA] Electronic Arts\n正在游戏：S1 | ")
     assert "BFBAN 实锤 | BFEAC 无信息" in text
     assert "私服身份（bf-manager 收录的 369 个私服）：服主 0 · 管理 10 · VIP 0 · 封禁 1" in text
@@ -1015,7 +1031,7 @@ async def test_player_info_full_list(module, player, rendered):
 
     player["/stats/2/rounds"] = unused
     rendered["result"] = b"jpeg"
-    await module.info_reply("abc", object(), full=("admin", "vip"))
+    await module.stats.info_reply("abc", object(), full=("admin", "vip"))
     ctx = rendered["context"]
     roles = {r["key"]: r for r in ctx["roles"]}
     assert len(roles["admin"]["rows"]) == 10 and roles["admin"]["more"] == 0
@@ -1025,39 +1041,39 @@ async def test_player_info_full_list(module, player, rendered):
     assert ctx["full"] and not ctx["recent"] and (ctx["columns"], ctx["width"]) == (1, 1000)
     many = {**INFO_SERVERS, "ban": INFO_SERVERS["admin"] * 7}
     player["/stats/2/servers"] = many
-    await module.info_reply("abc", object(), full=("ban",))
+    await module.stats.info_reply("abc", object(), full=("ban",))
     assert (rendered["context"]["columns"], rendered["context"]["width"]) == (3, 1900)
     rendered["result"] = None
     player["/stats/2/servers"] = INFO_SERVERS
-    text = await module.info_reply("abc", None, full=("admin", "vip"))
+    text = await module.stats.info_reply("abc", None, full=("admin", "vip"))
     assert "管理：\n1. S0\n" in text and "\n10. S9\n" in text and "VIP：没有" in text
     assert "还有" not in text and "最近游玩" not in text
 
 
 async def test_player_info_without_rsp(module, player, rendered):
     def down():
-        raise module.Bf1Error("查询服务暂时连不上，稍后再试")
+        raise module.api.Bf1Error("查询服务暂时连不上，稍后再试")
 
     player["/stats/2/servers"] = down
     player["/stats/2/rounds"] = lambda limit: down()
     rendered["result"] = b"jpeg"
-    await module.info_reply("abc", object())
+    await module.stats.info_reply("abc", object())
     assert not rendered["context"]["rounds"] and rendered["context"]["recent"] == []
     rendered["result"] = None
-    text = await module.info_reply("abc", None)
+    text = await module.stats.info_reply("abc", None)
     assert "私服身份暂时查不到" in text and "最近游玩" not in text
 
 
 async def test_wiki_catalog(module, rendered):
     rendered["result"] = b"jpeg"
-    reply = await module.wiki_reply("武器", object())
+    reply = await module.wiki.wiki_reply("武器", object())
     assert isinstance(reply[0], Image)
     ctx = rendered["context"]
     assert rendered["template"] == "catalog.html" and ctx["count"] == 123
     assert len(ctx["columns"]) == 4 and ctx["columns"][0][0] == (1, "MP18")
     assert sum(len(c) for c in ctx["columns"]) == 123
     assert module.pages.catalog_page("全世界", module.codex.search_wiki("全世界"))["width"] == 980
-    overview = await module.wiki_reply("目录", None)
+    overview = await module.wiki.wiki_reply("目录", None)
     assert overview.startswith("百科共 310 条：武器 123 条、载具 40 条")
 
 
@@ -1099,7 +1115,7 @@ def test_collection_data(module):
 async def test_stats_card_career_extras(module, player, rendered):
     player["/stats/2"] = {**STATS, **CAREER}
     rendered["result"] = b"jpeg"
-    await module.stats_reply("abc", object())
+    await module.stats.stats_reply("abc", object())
     ctx = rendered["context"]
     kpis = dict(ctx["kpis"])
     assert (kpis["MVP"], kpis["王牌小队"]) == ("109", "426")
@@ -1124,7 +1140,7 @@ async def test_stats_card_career_extras(module, player, rendered):
     assert [r["count"] for r in ctx["ribbons"]] == [6872, 4097]
     assert dict(ctx["honors"])["完成率"] == "76.0%"
     rendered["result"] = None
-    text = await module.stats_reply("abc", None)
+    text = await module.stats.stats_reply("abc", None)
     assert "MVP 109 | 王牌小队 426 | 勋带 51487 | 勋章 82 | 完成率 76.0%" in text
     assert "模式：征服 1,036 / 1,101（48.5%）；突袭 3 / 7（30.0%）" in text
     assert "常玩地图：法乌克斯要塞 2 小时；阿奇巴巴 1 小时" in text
@@ -1134,7 +1150,7 @@ async def test_stats_card_without_career_extras(module, player, rendered):
     """旧的接口没有这些字段：对应部分不画，也不出错。"""
 
     rendered["result"] = b"jpeg"
-    await module.stats_reply("abc", object())
+    await module.stats.stats_reply("abc", object())
     ctx = rendered["context"]
     assert len(ctx["kpis"]) == 4 and not ctx["details"] and not ctx["modes"]
     assert not ctx["maps"] and not ctx["elite"] and not ctx["honors"] and not ctx["ribbons"]
@@ -1181,7 +1197,7 @@ async def test_recent_rounds_with_honors_and_career(module, rounds, rendered):
         },
     )
     rendered["result"] = b"jpeg"
-    await module.recent_reply("abc", object())
+    await module.stats.recent_reply("abc", object())
     first, left = rendered["context"]["rounds"][:2]
     assert first["mvp"] and not first["ace"]
     # 不是正数的项（“其他”的负零头、没有的结算奖励）不画；总经验是含奖励的总分
@@ -1208,7 +1224,7 @@ async def test_recent_rounds_with_honors_and_career(module, rounds, rendered):
         module.collection.RIBBON["r15"].name,
     ]
     rendered["result"] = None
-    text = await module.recent_reply("abc", None)
+    text = await module.stats.recent_reply("abc", None)
     assert "胜利 MVP\n" in text and "得分 7,700" in text
     assert "对比生涯：KD 3.00（生涯 2.00 +0.50%）；KPM 3.00（生涯 1.50 持平）" in text
     assert "升到 87 级、侦察兵升级" in text and "×3" in text
@@ -1243,7 +1259,7 @@ async def test_collection_card(module, player, rendered):
     player["/stats/2/collection"] = COLLECTION
     player["/stats/2"] = {**STATS, **CAREER}
     rendered["result"] = b"jpeg"
-    reply = await module.collection_reply("abc", object())
+    reply = await module.stats.collection_reply("abc", object())
     assert str(reply[1]).startswith("玩家名：abc\nPID：2\n")
     ctx = rendered["context"]
     assert rendered["template"] == "collection.html"
@@ -1256,7 +1272,7 @@ async def test_collection_card(module, player, rendered):
     assert (ctx["medals_got"], ctx["dogtags_got"], ctx["ribbons_got"]) == (1, 1, 2)
     assert ctx["ribbons_sum"] == 6872 + 4097 and len(ctx["ribbons"]) == 6
     rendered["result"] = None
-    text = await module.collection_reply("abc", None)
+    text = await module.stats.collection_reply("abc", None)
     assert "勋章 1/60" in text and "进行中：" in text and "2/5" in text
     assert "狗牌 1/320：" in text and "勋带 2/47 种，共 10,969 次" in text
 
@@ -1265,10 +1281,10 @@ async def test_collection_without_ribbons_or_data(module, player, rendered):
     player["/stats/2/collection"] = COLLECTION
     player["/stats/2"] = STATS  # 旧接口没有勋带
     rendered["result"] = b"jpeg"
-    await module.collection_reply("abc", object())
+    await module.stats.collection_reply("abc", object())
     assert rendered["context"]["ribbons"] == []
     del player["/stats/2/collection"]
-    reply = await module._answer(module.collection_reply("abc", None))
+    reply = await module.reply.answer(module.stats.collection_reply("abc", None))
     assert reply.startswith("测试里没有")
 
 
@@ -1300,10 +1316,10 @@ def test_weapon_against_its_own_career(module):
 
 async def test_recent_rounds_two_columns(module, rounds, rendered):
     rendered["result"] = b"jpeg"
-    await module.recent_reply("abc", object())
+    await module.stats.recent_reply("abc", object())
     assert (rendered["context"]["columns"], rendered["context"]["width"]) == (2, 1760)
     rounds["/stats/2/rounds"] = {"items": [ROUNDS[0]], "next_before": None}
-    await module.recent_reply("abc", object())
+    await module.stats.recent_reply("abc", object())
     assert (rendered["context"]["columns"], rendered["context"]["width"]) == (1, 1000)
 
 
@@ -1318,16 +1334,16 @@ async def test_stats_card_platoon_panel(module, player, rendered):
         "verified": True,
     }
     rendered["result"] = b"jpeg"
-    await module.stats_reply("abc", object())
+    await module.stats.stats_reply("abc", object())
     platoon = rendered["context"]["platoon"]
     assert platoon["description"].startswith("Employees") and platoon["emblem_url"] is None
     assert not rendered["context"]["tip"]["text"]
     rendered["result"] = None
-    text = await module.stats_reply("abc", None)
+    text = await module.stats.stats_reply("abc", None)
     assert "战队：[EA] Electronic Arts（77 人，EA 认证）\n战队描述：Employees of" in text
     player["/stats/2/platoon"] = None
     rendered["result"] = b"jpeg"
-    await module.stats_reply("abc", object())
+    await module.stats.stats_reply("abc", object())
     assert rendered["context"]["platoon"] is None and rendered["context"]["tip"]["text"]
 
 
@@ -1337,16 +1353,16 @@ async def test_stats_card_equipped_dogtags(module, player, rendered):
     name = module.collection.DOGTAG["df082"].name
     player["/stats/2/collection"] = COLLECTION
     rendered["result"] = b"jpeg"
-    await module.stats_reply("abc", object())
+    await module.stats.stats_reply("abc", object())
     ctx = rendered["context"]
     assert [t["name"] for t in ctx["equipped"]] == [name]
     assert ctx["equipped"][0]["image"].endswith("/bf1/codex/dogtags/df082.webp")
     assert html_has(module, ctx, 'class="worn"', name)
     rendered["result"] = None
-    assert f"装备狗牌：{name}\n" in await module.stats_reply("abc", None)
+    assert f"装备狗牌：{name}\n" in await module.stats.stats_reply("abc", None)
     del player["/stats/2/collection"]
     rendered["result"] = b"jpeg"
-    await module.stats_reply("abc", object())
+    await module.stats.stats_reply("abc", object())
     assert rendered["context"]["equipped"] == []
     assert not html_has(module, rendered["context"], 'class="worn"')
 
@@ -1405,21 +1421,23 @@ async def test_items_sorted_by_a_rate_need_enough_kills(module, player, rendered
             _gun("D", 0, seconds=0),
         ]
     }
-    await module.items_reply("weapons", "abc", object(), sort_word="爆头率")
+    await module.stats.items_reply("weapons", "abc", object(), sort_word="爆头率")
     ctx = rendered["context"]
     assert [i["name"] for i in ctx["items"]] == ["C", "A"]
     assert ctx["highlight"] == 3 and ctx["note"] == ["按爆头率排序 · 击杀 ≥ 10"]
     assert 'class="stat hl"><div class="label">爆头率' in module.pages.html("items.html", ctx)
     rendered["result"] = None
-    text = await module.items_reply("weapons", "abc", None, sort_word="acc")
+    text = await module.stats.items_reply("weapons", "abc", None, sort_word="acc")
     assert text.startswith("abc 的武器按命中率排前 2（击杀不少于 10 的）\n1. C · ")
     # 默认按击杀，卡片上不写说明
-    await module.items_reply("weapons", "abc", None)
+    await module.stats.items_reply("weapons", "abc", None)
     assert rendered["context"]["highlight"] == 0 and rendered["context"]["note"] == []
-    wrong = await module._answer(module.items_reply("vehicles", "abc", None, sort_word="爆头"))
+    wrong = await module.reply.answer(
+        module.stats.items_reply("vehicles", "abc", None, sort_word="爆头")
+    )
     assert wrong == "载具没有「爆头」这种排法，可以按 击杀、KPM、摧毁、时长 排"
     player["/stats/2/weapons"] = {"weapons": [_gun("B", 9, headshots=9)]}
-    assert await module.items_reply("weapons", "abc", None, sort_word="kpm") == (
+    assert await module.stats.items_reply("weapons", "abc", None, sort_word="kpm") == (
         "abc 还没有击杀满 10 的武器"
     )
 
@@ -1434,7 +1452,7 @@ async def test_item_search_lists_unused_ones_too(module, player, rendered):
             _gun("SMLE MKIII（步兵）", 900),
         ]
     }
-    await module.items_reply("weapons", "abc", object(), keyword="gewehr", sort_word="hs")
+    await module.stats.items_reply("weapons", "abc", object(), keyword="gewehr", sort_word="hs")
     ctx = rendered["context"]
     # 样本够的先按爆头率，剩下的按击杀接在后面；没用过的也列
     assert [i["name"] for i in ctx["items"]] == [
@@ -1446,11 +1464,11 @@ async def test_item_search_lists_unused_ones_too(module, player, rendered):
     assert [i["muted"] for i in ctx["items"]] == [False, True, True]
     assert ctx["note"] == ["名字含「gewehr」· 3 件", "按爆头率排序 · 击杀不到 10 的置后"]
     rendered["result"] = None
-    text = await module.items_reply("weapons", "abc", None, layout=(1, 2), keyword="gewehr")
+    text = await module.stats.items_reply("weapons", "abc", None, layout=(1, 2), keyword="gewehr")
     assert text.startswith("abc 的武器里名字含「gewehr」的有 3 件，按击杀排前 2\n")
     assert "爆头 -" not in text.split("\n")[2]
     rifles = module.groups.find("weapons", "步枪")
-    missing = await module.items_reply("weapons", "abc", None, group=rifles, keyword="mp18")
+    missing = await module.stats.items_reply("weapons", "abc", None, group=rifles, keyword="mp18")
     assert missing == "abc 的步枪里没有名字含「mp18」的"
 
 
@@ -1482,11 +1500,11 @@ def test_campaign_page_in_beijing_time(module):
 async def test_campaign_reply(module, api, rendered):
     api["/campaign"] = CAMPAIGN
     rendered["result"] = b"jpeg"
-    reply = await module.campaign_reply(object())
+    reply = await module.game.campaign_reply(object())
     assert isinstance(reply[0], Image) and str(reply[1]).endswith("/bf1/campaign")
     assert rendered["template"] == "campaign.html"
     rendered["result"] = None
-    text = await module.campaign_reply(None)
+    text = await module.game.campaign_reply(None)
     lines = text.split("\n")
     assert lines[:3] == [
         "当前行动：帝国陨落",
@@ -1496,12 +1514,12 @@ async def test_campaign_reply(module, api, rendered):
     assert lines[3].startswith("剩余 ") or lines[3].startswith("已于 ")
     assert "（每天 08:00，北京时间）" in text
     api["/campaign"] = None
-    assert await module._answer(module.campaign_reply(None)) == "当前没有进行中的行动"
+    assert await module.reply.answer(module.game.campaign_reply(None)) == "当前没有进行中的行动"
     assert _alconna("行动").parse("/行动 -t").query("text") is not None
 
 
 def test_group_card_as_an_ea_name(module):
-    name = module.card_name
+    name = module.binding.card_name
     assert name("[EA]abc") == "abc" and name("【EA】 abc_1") == "abc_1"
     assert name("[EA][SC](x) Ab-c") == "Ab-c" and name("abc") == "abc"
     assert name("张三") is None and name("abc 张三") is None and name("") is None
@@ -1512,16 +1530,18 @@ async def test_unbound_member_falls_back_to_the_group_card(module, player, rende
     player["/players/search"] = lambda name: {
         "personas": [{**PERSONA, "time_played_hours": 1}] if name == "abc" else []
     }
-    text = await module.stats_reply(None, None, "10", card="[EA]abc")
+    text = await module.stats.stats_reply(None, None, "10", card="[EA]abc")
     assert text.startswith("abc 的战地一战绩")
-    wrong = await module._answer(module.stats_reply(None, None, "10", card="【EA】nobody"))
+    wrong = await module.reply.answer(
+        module.stats.stats_reply(None, None, "10", card="【EA】nobody")
+    )
     assert wrong.startswith("还没绑定，按群名片 nobody 查：没找到玩家 nobody。使用 /bf1绑定")
-    unusable = await module._answer(module.stats_reply(None, None, "10", card="张三"))
+    unusable = await module.reply.answer(module.stats.stats_reply(None, None, "10", card="张三"))
     assert unusable.startswith("还没绑定：使用 /bf1绑定")
     # 绑定过的不看群名片
     player["/players/2"] = PERSONA
-    await module._bind("10", PERSONA)
-    text = await module.stats_reply(None, None, "10", card="nobody")
+    await module.binding.bind("10", PERSONA)
+    text = await module.stats.stats_reply(None, None, "10", card="nobody")
     assert text.startswith("abc 的战地一战绩")
 
 
@@ -1529,9 +1549,9 @@ def test_card_comes_from_the_member_nick(module):
     def session(member):
         return SimpleNamespace(event=SimpleNamespace(member=member))
 
-    assert module._card(session(SimpleNamespace(nick="[EA]abc"))) == "[EA]abc"
-    assert module._card(session(SimpleNamespace(nick=""))) is None
-    assert module._card(session(None)) is None
+    assert module.entry.card_of(session(SimpleNamespace(nick="[EA]abc"))) == "[EA]abc"
+    assert module.entry.card_of(session(SimpleNamespace(nick=""))) is None
+    assert module.entry.card_of(session(None)) is None
 
 
 async def test_recent_round_count(module, rounds, rendered):
@@ -1542,9 +1562,9 @@ async def test_recent_round_count(module, rounds, rendered):
         return {"items": ROUNDS, "next_before": None}
 
     rounds["/stats/2/rounds"] = history
-    await module.recent_reply("abc", None, count=1)
+    await module.stats.recent_reply("abc", None, count=1)
     assert len(rendered["context"]["rounds"]) == 1 and asked[-1] == 20
-    await module.recent_reply("abc", None, count=12)
+    await module.stats.recent_reply("abc", None, count=12)
     assert len(rendered["context"]["rounds"]) == 3 and asked[-1] == 48
     result = _alconna("最近").parse("/最近 abc -n 10")
     assert (result.query("name"), result.query("count.count")) == ("abc", 10)
@@ -1579,7 +1599,7 @@ EXCHANGE = {
 
 
 def test_exchange_dates(module):
-    parse = module.parse_day
+    parse = module.game.parse_day
     for text in ["2023.01.01", "2023-01-01", "2023/1/1", "20230101", "2023年1月1日"]:
         assert parse(text) == date(2023, 1, 1), text
     assert parse("2023.13.01") is None and parse("昨天") is None and parse("2023") is None
@@ -1622,23 +1642,23 @@ def exchange(api):
 
 async def test_exchange_reply(module, exchange, rendered):
     rendered["result"] = b"jpeg"
-    reply = await module.exchange_reply(object())
+    reply = await module.game.exchange_reply(object())
     assert isinstance(reply[0], Image) and str(reply[1]).endswith("/bf1/exchange")
     assert rendered["template"] == "exchange.html" and exchange[-1] == {}
     rendered["result"] = None
-    text = await module.exchange_reply(None, date(2025, 6, 5))
+    text = await module.game.exchange_reply(None, date(2025, 6, 5))
     assert exchange[-1] == {"date": "2025-06-05"}
     lines = text.split("\n")
     assert lines[0] == "战地一交换（当期，第 3/3 期，2025-06-03 起，北京时间）"
     assert lines[1].startswith("这一期已经 ") and lines[1].endswith("游戏里一直是这一期")
     assert lines[2:4] == ["传奇（2 件）：", "· 黄金甲 · 轻机枪 · 10,000 废料"]
-    early = await module._answer(module.exchange_reply(None, date(2020, 1, 1)))
+    early = await module.reply.answer(module.game.exchange_reply(None, date(2020, 1, 1)))
     assert early.startswith(
         "2020-01-01 还没有交换记录：bf-manager 收录的是 2022-07-18 到 2025-06-03 的 3 期"
     )
-    future = await module._answer(module.exchange_reply(None, date(2099, 1, 1)))
+    future = await module.reply.answer(module.game.exchange_reply(None, date(2099, 1, 1)))
     assert future.startswith("2099-01-01 还没到")
-    listing = await module.exchange_reply(None, listing=True)
+    listing = await module.game.exchange_reply(None, listing=True)
     assert listing.split("\n")[:3] == [
         "交换共 3 期（2022-07-18 ~ 2025-06-03，北京时间，按每期开始日期）：",
         "2022（1 期）：07-18",
@@ -1665,10 +1685,10 @@ async def test_joining_greets_the_renamed_member(module, db, monkeypatch):
     async def rename(group, user, accounts):
         return "abd"
 
-    monkeypatch.setattr(module, "feature_enabled", lambda plugin, group: True)
-    monkeypatch.setattr(module, "_review_on", review_on)
-    monkeypatch.setattr(module, "rename_member", rename)
-    monkeypatch.setattr(module, "accounts_for_group", lambda group, platform: [])
+    monkeypatch.setattr(module.review, "feature_enabled", lambda plugin, group: True)
+    monkeypatch.setattr(module.review, "_review_on", review_on)
+    monkeypatch.setattr(module.review, "rename_member", rename)
+    monkeypatch.setattr(module.review, "accounts_for_group", lambda group, platform: [])
     sent = []
 
     async def send(message):
@@ -1683,6 +1703,6 @@ async def test_joining_greets_the_renamed_member(module, db, monkeypatch):
     )
     await module.on_join_request(session, render_service=None)
     assert [str(e) for e in sent[0]] == [
-        str(module.At("10")),
+        str(At("10")),
         str(Text(" 已自动将你的群名片改为 abd")),
     ]
