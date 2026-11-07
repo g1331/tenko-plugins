@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -21,6 +22,10 @@ MIME = {
     ".webp": "image/webp",
     ".bmp": "image/bmp",
 }
+
+
+lock = asyncio.Lock()
+"""改老婆库、婚姻登记和投稿记录时都先拿这把锁，同一时间只有一处在改。"""
 
 
 class LibraryError(Exception):

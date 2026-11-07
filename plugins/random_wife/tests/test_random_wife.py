@@ -45,7 +45,7 @@ def sent(module, monkeypatch):
         messages.append((group, content))
         return True
 
-    monkeypatch.setattr(module, "_send", send)
+    monkeypatch.setattr(module.manage, "_send", send)
     return messages
 
 
@@ -155,42 +155,44 @@ def test_old_command_names_reach_the_same_handler(module):
 
 
 async def test_draw_from_an_empty_and_a_filled_library(module, library, clean):
-    assert "老婆库还是空的" in await module.draw("g", "1", "甲")
+    assert "老婆库还是空的" in await module.daily.draw("g", "1", "甲")
     library.add("芙莉莲", PNG)
-    reply = await module.draw("g", "1", "甲")
+    reply = await module.daily.draw("g", "1", "甲")
     assert _text(reply).startswith("你今天的老婆是芙莉莲")
     assert any(isinstance(e, Image) for e in reply)
-    assert "你抽到了芙莉莲，是【甲】的老婆" in _text(await module.draw("g", "2", "乙"))
-    assert "你抢走了【甲】的老婆芙莉莲" in _text(await module.draw("g", "2", "乙"))
-    assert await module.divorce("g", "1") == "你还没有老婆，先 /抽老婆 抽一个吧~"
-    assert await module.divorce("g", "2") == "你已经和芙莉莲离婚了~"
+    assert "你抽到了芙莉莲，是【甲】的老婆" in _text(await module.daily.draw("g", "2", "乙"))
+    assert "你抢走了【甲】的老婆芙莉莲" in _text(await module.daily.draw("g", "2", "乙"))
+    assert await module.daily.divorce("g", "1") == "你还没有老婆，先 /抽老婆 抽一个吧~"
+    assert await module.daily.divorce("g", "2") == "你已经和芙莉莲离婚了~"
 
 
 async def test_member_submission_is_reviewed_in_the_review_group(module, library, clean, sent):
-    assert await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
+    assert await module.manage.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
         "投稿已提交给管理员，审核通过后会加进老婆库"
     )
-    assert "已经有人投稿了芙莉莲" in await module.submit("g", "qq-client", "11", "b", "芙莉莲", GIF)
+    assert "已经有人投稿了芙莉莲" in await module.manage.submit(
+        "g", "qq-client", "11", "b", "芙莉莲", GIF
+    )
     group, content = sent[0]
     assert group == "900" and any(isinstance(e, Image) for e in content)
     said = _text(content)
     assert "群友(10) 添加老婆【芙莉莲】的申请（编号 1）" in said
 
     quote = Quote("1")(Author("bot"), Text(said))
-    assert module._quoted_request([quote, Text("y")], {"bot"}) == "1"
-    assert module._quoted_request([quote, Text("y")], {"other"}) is None
-    assert module._quoted_request([Text("y")], {"bot"}) is None
+    assert module.manage._quoted_request([quote, Text("y")], {"bot"}) == "1"
+    assert module.manage._quoted_request([quote, Text("y")], {"other"}) is None
+    assert module.manage._quoted_request([Text("y")], {"bot"}) is None
 
-    assert await module.decide("1", "Y") == "已同意 群友(10) 投稿的芙莉莲"
+    assert await module.manage.decide("1", "Y") == "已同意 群友(10) 投稿的芙莉莲"
     assert "芙莉莲" in library.wives()
     assert sent[-1][0] == "g" and "审核通过" in _text(sent[-1][1])
-    assert "已经处理过或过期" in await module.decide("1", "y")
+    assert "已经处理过或过期" in await module.manage.decide("1", "y")
     assert not any(library.folder("pending").iterdir())
 
 
 async def test_rejection_carries_the_reason(module, library, clean, sent):
-    await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
-    assert await module.decide("1", "图太糊了") == "已拒绝 群友(10) 投稿的芙莉莲"
+    await module.manage.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
+    assert await module.manage.decide("1", "图太糊了") == "已拒绝 群友(10) 投稿的芙莉莲"
     assert "芙莉莲" not in library.wives()
     assert "没有通过，理由：图太糊了" in _text(sent[-1][1])
 
@@ -201,23 +203,25 @@ async def test_submission_that_cannot_reach_the_review_group_is_dropped(
     async def fail(group, platform, content):
         return False
 
-    monkeypatch.setattr(module, "_send", fail)
-    assert "没能发到审核群" in await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
-    assert module._pending()["items"] == {}
+    monkeypatch.setattr(module.manage, "_send", fail)
+    assert "没能发到审核群" in await module.manage.submit(
+        "g", "qq-client", "10", "群友", "芙莉莲", PNG
+    )
+    assert module.manage._pending()["items"] == {}
 
 
 @pytest.fixture
 def master(module, monkeypatch):
     """没配审核群：投稿经 notify_master 发给 Master。"""
 
-    monkeypatch.setattr(module.config, "review_group", "")
+    monkeypatch.setattr(module.config.config, "review_group", "")
     state = SimpleNamespace(notices=[], result=SimpleNamespace(delivered=True, reason=None))
 
     async def notify(content, *, key=None):
         state.notices.append((content, key))
         return state.result
 
-    monkeypatch.setattr(module, "notify_master", notify)
+    monkeypatch.setattr(module.manage, "notify_master", notify)
     return state
 
 
@@ -228,7 +232,7 @@ def _listener(handler):
 async def test_without_a_review_group_master_reviews(
     module, library, clean, sent, master, monkeypatch
 ):
-    assert await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
+    assert await module.manage.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
         "投稿已提交给管理员，审核通过后会加进老婆库"
     )
     content, key = master.notices[0]
@@ -248,7 +252,7 @@ async def test_without_a_review_group_master_reviews(
     async def reply(session):
         return next(replies)
 
-    monkeypatch.setattr(module, "master_reply", reply)
+    monkeypatch.setattr(module.manage, "master_reply", reply)
     session = SimpleNamespace(send=AsyncMock())
     for _ in range(4):
         await _listener(module.on_master_reply)(session)
@@ -259,12 +263,14 @@ async def test_without_a_review_group_master_reviews(
 
 async def test_master_rate_limit_drops_the_submission(module, library, clean, master):
     master.result = SimpleNamespace(delivered=False, reason="rate_limited")
-    assert await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
+    assert await module.manage.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG) == (
         "最近投稿的人太多了，过一会儿再来"
     )
     master.result = SimpleNamespace(delivered=False, reason="no_account")
-    assert "没能发给管理员" in await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
-    assert module._pending()["items"] == {}
+    assert "没能发给管理员" in await module.manage.submit(
+        "g", "qq-client", "10", "群友", "芙莉莲", PNG
+    )
+    assert module.manage._pending()["items"] == {}
     assert not any(library.folder("pending").iterdir())
 
 
@@ -276,21 +282,24 @@ async def test_admin_adds_directly_and_members_need_an_image(module, library, cl
         assert src == "http://x/a.png"
         return PNG
 
-    monkeypatch.setattr(module, "require_perm", perm)
+    monkeypatch.setattr(module.manage, "require_perm", perm)
     monkeypatch.setattr(library, "download", download)
 
     def session(elements, admin=True):
         event = SimpleNamespace(message=SimpleNamespace(message=elements), guild=None)
         return SimpleNamespace(event=event, admin=admin)
 
-    assert "要带上老婆的图片" in await module.add_wife(session([Text("x")]), "芙莉莲")
+    assert "要带上老婆的图片" in await module.manage.add_wife(session([Text("x")]), "芙莉莲")
     quoted = Quote("1")(Author("someone"), Image(src="http://x/a.png"))
-    assert await module.add_wife(session([quoted, Text("x")]), "芙莉莲") == "已把芙莉莲加进老婆库"
+    assert (
+        await module.manage.add_wife(session([quoted, Text("x")]), "芙莉莲")
+        == "已把芙莉莲加进老婆库"
+    )
     assert library.wives()["芙莉莲"].suffix == ".png"
     with pytest.raises(library.LibraryError):
-        await module.add_wife(session([Image(src="http://x/a.png")]), "芙莉莲")
+        await module.manage.add_wife(session([Image(src="http://x/a.png")]), "芙莉莲")
     member = session([Image(src="http://x/a.png")], admin=False)
-    assert await module.add_wife(member, "别的") == "投稿要在群里发"
+    assert await module.manage.add_wife(member, "别的") == "投稿要在群里发"
 
 
 def _real_png(color="pink", size=(60, 90)) -> bytes:
@@ -362,12 +371,14 @@ def test_thumbnails_are_cached_and_follow_changes(module, library, clean):
 
 async def test_list_falls_back_to_text_without_a_browser(module, library, clean):
     library.add("芙莉莲", _real_png())
-    assert await module.wife_list(None, 1) == "老婆库里一共 1 位（第 1/1 页）\n1. 芙莉莲  1 KB"
+    assert (
+        await module.manage.wife_list(None, 1) == "老婆库里一共 1 位（第 1/1 页）\n1. 芙莉莲  1 KB"
+    )
 
 
 async def test_real_notify_master_without_accounts(module, library, clean, monkeypatch):
     # 不替换宿主接口：测试宿主没有在线账号，送不到 Master，投稿撤回
-    monkeypatch.setattr(module.config, "review_group", "")
-    reply = await module.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
+    monkeypatch.setattr(module.config.config, "review_group", "")
+    reply = await module.manage.submit("g", "qq-client", "10", "群友", "芙莉莲", PNG)
     assert reply == "投稿没能发给管理员，稍后再试"
-    assert module._pending()["items"] == {}
+    assert module.manage._pending()["items"] == {}
