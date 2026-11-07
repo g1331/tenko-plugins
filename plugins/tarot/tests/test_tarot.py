@@ -42,8 +42,8 @@ async def clean(module, monkeypatch):
 
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
     async with engine.begin() as conn:
-        await conn.run_sync(module.Reading.__table__.create)
-    monkeypatch.setattr(module, "get_session", lambda: AsyncSession(engine))
+        await conn.run_sync(module.readings.Reading.__table__.create)
+    monkeypatch.setattr(module.readings, "get_session", lambda: AsyncSession(engine))
     yield
     await engine.dispose()
 
@@ -155,56 +155,56 @@ def test_festival_notes(module):
 
 
 async def test_daily_card_stays_the_same_all_day(module, clean):
-    first = await module.daily("1", now=_at(2026, 11, 2, 8))
-    again = await module.daily("1", now=_at(2026, 11, 2, 22))
+    first = await module.readings.daily("1", now=_at(2026, 11, 2, 8))
+    again = await module.readings.daily("1", now=_at(2026, 11, 2, 22))
     assert _text(first).startswith("你今天的塔罗牌是【")
     assert _text(again).startswith("你今天已经抽过了，今天的牌是【")
     assert _text(first).split("【")[1] == _text(again).split("【")[1]
     assert any(isinstance(e, Image) for e in first)
-    readings = await module.history("1")
+    readings = await module.readings.history("1")
     assert len(readings) == 1 and readings[0].kind == "daily"
 
 
 async def test_three_card_spread_waits_and_shows_the_last_result(module, clean):
-    reply = await module.spread("three", "1", "甲", "这周的面试", now=_at(2026, 11, 2, 10))
+    reply = await module.readings.spread("three", "1", "甲", "这周的面试", now=_at(2026, 11, 2, 10))
     assert reply.startswith("三张牌阵「这周的面试」\n1. 过去：")  # 没有浏览器：文字版
-    wait = await module.spread("three", "1", "甲", "下周呢", now=_at(2026, 11, 2, 10, 20))
+    wait = await module.readings.spread("three", "1", "甲", "下周呢", now=_at(2026, 11, 2, 10, 20))
     assert wait.startswith("三张牌阵每 60 分钟只能占一次，再等 40 分钟吧。\n")
     assert wait.splitlines()[1].startswith("上次「这周的面试」：过去 ")
-    later = await module.spread("three", "1", "甲", "下周呢", now=_at(2026, 11, 2, 11))
+    later = await module.readings.spread("three", "1", "甲", "下周呢", now=_at(2026, 11, 2, 11))
     assert later.startswith("三张牌阵「下周呢」")
-    assert [r.question for r in await module.history("1")] == ["下周呢", "这周的面试"]
+    assert [r.question for r in await module.readings.history("1")] == ["下周呢", "这周的面试"]
 
 
 async def test_celtic_cross_is_once_a_day(module, clean):
-    first = await module.spread("celtic", "1", "甲", None, now=_at(2026, 11, 2, 10))
-    again = await module.spread("celtic", "1", "甲", "换个问题", now=_at(2026, 11, 2, 20))
+    first = await module.readings.spread("celtic", "1", "甲", None, now=_at(2026, 11, 2, 10))
+    again = await module.readings.spread("celtic", "1", "甲", "换个问题", now=_at(2026, 11, 2, 20))
     assert first.startswith("凯尔特十字\n1. 现状：") and first.count("\n") == 10
     assert again == f"你今天已经占过凯尔特十字了，这是今天的结果：\n{first}"
     # 别人不受影响
-    other = await module.spread("celtic", "2", "乙", None, now=_at(2026, 11, 2, 20))
+    other = await module.readings.spread("celtic", "2", "乙", None, now=_at(2026, 11, 2, 20))
     assert not other.startswith("你今天已经占过")
 
 
 async def test_records_list_the_latest_readings(module, clean):
-    assert await module.records("1") == "你还没有占卜过，先来一张 /今日塔罗 吧"
-    await module.daily("1", now=_at(2026, 11, 1, 8))
-    await module.spread("three", "1", "甲", "面试", now=_at(2026, 11, 1, 9))
+    assert await module.readings.records("1") == "你还没有占卜过，先来一张 /今日塔罗 吧"
+    await module.readings.daily("1", now=_at(2026, 11, 1, 8))
+    await module.readings.spread("three", "1", "甲", "面试", now=_at(2026, 11, 1, 9))
     for hour in range(10, 15):
-        await module.spread("three", "1", "甲", None, now=_at(2026, 11, 1, hour))
-    lines = (await module.records("1")).splitlines()
+        await module.readings.spread("three", "1", "甲", None, now=_at(2026, 11, 1, hour))
+    lines = (await module.readings.records("1")).splitlines()
     assert lines[0] == "你最近的 5 次占卜：" and len(lines) == 6
     assert lines[1].startswith("11-01 14:00 三张牌阵：过去 ")
     assert lines[5].startswith("11-01 10:00 三张牌阵：")
 
 
 def test_lookup_a_card(module):
-    reply = module.lookup("宝剑三")
+    reply = module.readings.lookup("宝剑三")
     assert _text(reply).startswith("宝剑三 Three of Swords · 小阿卡那 · 宝剑\n")
     assert "\n正位：感情受到伤害" in _text(reply) and "\n逆位：" in _text(reply)
     assert any(isinstance(e, Image) for e in reply)
-    assert module.lookup("权杖").startswith("名字带“权杖”的牌有 14 张：权杖王牌、权杖二")
-    assert module.lookup("咖啡").startswith("没有找到“咖啡”这张牌")
+    assert module.readings.lookup("权杖").startswith("名字带“权杖”的牌有 14 张：权杖王牌、权杖二")
+    assert module.readings.lookup("咖啡").startswith("没有找到“咖啡”这张牌")
 
 
 def test_lore_has_facts(module):
@@ -220,7 +220,7 @@ def test_spread_page_lists_every_position(module):
     draws = [(f"major-{n:02d}", n % 2 == 1) for n in range(10)]
     page = render.context("celtic", draws, question="今年的工作", user="甲", at=_at(2026, 11, 2))
     html = render.html(page)
-    for position in module.SPREADS["celtic"].positions:
+    for position in module.spreads.SPREADS["celtic"].positions:
         assert position in html
     assert html.count('class="face rev"') == 5 and "今年的工作" in html
     assert page["cards"][1]["img"].startswith("data:image/jpeg;base64,")
