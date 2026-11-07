@@ -38,8 +38,8 @@ async def db(module, monkeypatch):
 
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
     async with engine.begin() as conn:
-        await conn.run_sync(module.Snapshot.__table__.create)
-    monkeypatch.setattr(module, "get_session", lambda: AsyncSession(engine))
+        await conn.run_sync(module.info.Snapshot.__table__.create)
+    monkeypatch.setattr(module.info, "get_session", lambda: AsyncSession(engine))
     yield
     await engine.dispose()
 
@@ -55,8 +55,8 @@ async def test_player(module, monkeypatch):
         seen.update(params, path=path)
         return PLAYER
 
-    monkeypatch.setattr(module, "_get", fake_get)
-    reply = await module.player_reply("abc", "PS5")
+    monkeypatch.setattr(module.api, "get", fake_get)
+    reply = await module.info.player_reply("abc", "PS5")
     assert seen == {"path": "/bridge", "player": "abc", "platform": "PS4"}
     assert "等级 120（1 转）| 段位 钻石 2 14500 分" in reply.replace(" |", "|")
     assert "状态 比赛中 (05:12) | 当前英雄 恶灵" in reply
@@ -69,33 +69,33 @@ async def test_player(module, monkeypatch):
 
 
 async def test_bad_platform_and_missing_key(module, monkeypatch):
-    assert await module._answer(module.player_reply("abc", "nes")) == (
+    assert await module.info.answer(module.info.player_reply("abc", "nes")) == (
         "平台只能是 PC、PS、Xbox 或 Switch"
     )
-    monkeypatch.setattr(module.config, "api_key", "")
-    assert "api_key" in await module._answer(module.rotation_reply())
+    monkeypatch.setattr(module.config.config, "api_key", "")
+    assert "api_key" in await module.info.answer(module.info.rotation_reply())
 
 
 def _respond(module, monkeypatch, status, body):
     transport = httpx.MockTransport(lambda request: httpx.Response(status, json=body))
     monkeypatch.setattr(
-        module.httpx, "AsyncClient", lambda **kw: _REAL_CLIENT(transport=transport, **kw)
+        module.api.httpx, "AsyncClient", lambda **kw: _REAL_CLIENT(transport=transport, **kw)
     )
 
 
 async def test_api_errors_become_replies(module, monkeypatch):
     _respond(module, monkeypatch, 200, {"Error": "Player abc not found"})
-    assert await module._answer(module.player_reply("abc", None)) == (
+    assert await module.info.answer(module.info.player_reply("abc", None)) == (
         "没找到这名玩家：PC 玩家要用 EA 账号名，其他平台记得带上平台"
     )
     _respond(module, monkeypatch, 429, {})
-    assert await module._answer(module.predator_reply()) == "查得太快了，过几秒再试"
+    assert await module.info.answer(module.info.predator_reply()) == "查得太快了，过几秒再试"
     _respond(module, monkeypatch, 500, None)
-    assert await module._answer(module.predator_reply()) == "查询失败（500）"
+    assert await module.info.answer(module.info.predator_reply()) == "查询失败（500）"
 
 
 async def test_rotation_predator_news(module):
-    rotation = module.format_rotation(
+    rotation = module.info.format_rotation(
         {
             "battle_royale": {
                 "current": {"map": "Kings Canyon", "remainingTimer": "00:12:34"},
@@ -109,15 +109,15 @@ async def test_rotation_predator_news(module):
     assert "排位：电力区\n" in rotation
     assert "限时模式：子弹时间 · 栖息地" in rotation
 
-    predator = module.format_predator(
+    predator = module.info.format_predator(
         {"RP": {"PC": {"val": 15000, "totalMastersAndPreds": 9000}, "SWITCH": None}}
     )
     assert "PC：15000 分 | 大师及猎杀 9000 人" in predator
     assert "Switch" not in predator
 
-    news = module.format_news([{"title": "改版", "date": "2026-10-20", "url": "u"}])
+    news = module.info.format_news([{"title": "改版", "date": "2026-10-20", "url": "u"}])
     assert news.endswith("1. [10-20] 改版\n   u")
-    assert module.format_news([]) == "暂时没有资讯"
+    assert module.info.format_news([]) == "暂时没有资讯"
 
 
 @pytest.fixture
@@ -140,9 +140,9 @@ async def test_player_card(module, monkeypatch, rendered):
     async def fake_get(path, **params):
         return PLAYER
 
-    monkeypatch.setattr(module, "_get", fake_get)
+    monkeypatch.setattr(module.api, "get", fake_get)
     rendered["result"] = b"jpeg"
-    reply = await module.player_reply("abc", None, object())
+    reply = await module.info.player_reply("abc", None, object())
     assert isinstance(reply[0], Image)
     ctx = rendered["context"]
     assert rendered["template"] == "player.html"
@@ -167,8 +167,8 @@ async def test_player_card(module, monkeypatch, rendered):
             },
         }
     }
-    monkeypatch.setattr(module, "_get", lambda *a, **k: _value(PLAYER_BANNED))
-    reply = await module.player_reply("x", None, object())
+    monkeypatch.setattr(module.api, "get", lambda *a, **k: _value(PLAYER_BANNED))
+    reply = await module.info.player_reply("x", None, object())
     assert isinstance(reply, str) and "排位禁赛：中途退出排位，还剩 2 分钟" in reply
     assert rendered["context"]["state"] == "-"
 
@@ -192,16 +192,16 @@ async def test_rotation_and_predator_cards(module, monkeypatch, rendered):
         "ranked": {"current": {"map": "E-District"}},
         "ltm": {},
     }
-    monkeypatch.setattr(module, "_get", lambda *a, **k: _value(rotation))
-    await module.rotation_reply(object())
+    monkeypatch.setattr(module.api, "get", lambda *a, **k: _value(rotation))
+    await module.info.rotation_reply(object())
     modes = rendered["context"]["modes"]
     assert [m["label"] for m in modes] == ["匹配", "排位"]
     assert (modes[0]["map"], modes[0]["elapsed"], modes[0]["next"]) == ("诸王峡谷", 75, "奥林匹斯")
     assert (modes[1]["remaining"], modes[1]["elapsed"]) == ("", 0)
 
     predator = {"RP": {"PC": {"val": 15000, "totalMastersAndPreds": 9000}, "X1": None}}
-    monkeypatch.setattr(module, "_get", lambda *a, **k: _value(predator))
-    await module.predator_reply(object())
+    monkeypatch.setattr(module.api, "get", lambda *a, **k: _value(predator))
+    await module.info.predator_reply(object())
     # 猎杀线低于大师门槛（大师不满 750 人）时不显示“高出”
     assert rendered["context"]["platforms"] == [
         {
@@ -237,11 +237,11 @@ async def test_news_card(module, monkeypatch, rendered):
             return SimpleNamespace(
                 status_code=200, text='<meta content="黑暗降臨&amp;峽谷" name="description"/>'
             )
-        raise module.ApexError("down")
+        raise module.api.ApexError("down")
 
-    monkeypatch.setattr(module, "_request", fake_request)
+    monkeypatch.setattr(module.api, "request", fake_request)
     rendered["result"] = b"jpeg"
-    reply = await module.news_reply(object())
+    reply = await module.info.news_reply(object())
     url = "https://www.ea.com/zh-hant/games/apex-legends/apex-legends/news/ranked-roadmap"
     assert reply[1] == Text(url)
     first, second = rendered["context"]["items"]
@@ -321,8 +321,8 @@ FULL = {
 
 
 async def test_player_totals_and_legends(module, monkeypatch, rendered):
-    monkeypatch.setattr(module, "_get", lambda *a, **k: _value(FULL))
-    reply = await module.player_reply("abc", "xbox", object())
+    monkeypatch.setattr(module.api, "get", lambda *a, **k: _value(FULL))
+    reply = await module.info.player_reply("abc", "xbox", object())
     ctx = rendered["context"]
     assert ctx["platform"] == "Xbox"
     assert ctx["rank_position"] == "全球前 88.88%"
@@ -362,8 +362,8 @@ async def test_servers(module, monkeypatch, rendered):
         "EA_novafusion": {"Asia": {"Status": "SLOW", "ResponseTime": 131}},
         "otherPlatforms": {"Playstation-Network": {"Status": "DOWN", "ResponseTime": None}},
     }
-    monkeypatch.setattr(module, "_get", lambda *a, **k: _value(data))
-    reply = await module.servers_reply(object())
+    monkeypatch.setattr(module.api, "get", lambda *a, **k: _value(data))
+    reply = await module.info.servers_reply(object())
     ctx = rendered["context"]
     assert ctx["sections"][0]["cells"][0] == {"status": "正常", "css": "up", "ms": "52 ms"}
     assert ctx["sections"][1]["cells"][0]["status"] == "缓慢"
@@ -395,34 +395,34 @@ def test_rank_progress(module):
 
 async def test_rank_delta_survives_repeat_queries(module, monkeypatch, rendered):
     data = {"global": {"name": "abc", "uid": "1", "rank": {"rankScore": 1000}}}
-    monkeypatch.setattr(module, "_get", lambda *a, **k: _value(data))
+    monkeypatch.setattr(module.api, "get", lambda *a, **k: _value(data))
     clock = iter([0.0, 3600.0, 7200.0, 7300.0])
-    monkeypatch.setattr(module.time, "time", lambda: next(clock))
+    monkeypatch.setattr(module.info.time, "time", lambda: next(clock))
 
-    await module.player_reply("abc", None, object())
+    await module.info.player_reply("abc", None, object())
     assert rendered["context"]["rank_delta"] is None  # 第一次查没有可比的
 
     data["global"]["rank"]["rankScore"] = 1086
-    reply = await module.player_reply("abc", None, object())
+    reply = await module.info.player_reply("abc", None, object())
     assert rendered["context"]["rank_delta"] == {"text": "+86", "css": "up", "ago": "1 小时前"}
 
     # 分数没变时不覆盖记录，仍和 1 小时前那次比
-    await module.player_reply("abc", None, object())
+    await module.info.player_reply("abc", None, object())
     assert rendered["context"]["rank_delta"]["text"] == "持平"
     data["global"]["rank"]["rankScore"] = 1000
-    await module.player_reply("abc", None, object())
+    await module.info.player_reply("abc", None, object())
     assert rendered["context"]["rank_delta"] == {"text": "-86", "css": "down", "ago": "1 小时前"}
     assert isinstance(reply, str) and "比 1 小时前：+86" in reply
 
 
 async def test_predator_delta(module, monkeypatch, rendered):
     data = {"RP": {"PC": {"val": 20000, "totalMastersAndPreds": 9000}, "X1": None}}
-    monkeypatch.setattr(module, "_get", lambda *a, **k: _value(data))
-    await module.predator_reply(object())
+    monkeypatch.setattr(module.api, "get", lambda *a, **k: _value(data))
+    await module.info.predator_reply(object())
     first = rendered["context"]["platforms"][0]
     assert (first["above"], first["delta"], first["masters_pct"]) == ("4,000", None, 100)
     data["RP"]["PC"]["val"] = 20500
-    await module.predator_reply(object())
+    await module.info.predator_reply(object())
     assert rendered["context"]["platforms"][0]["delta"]["text"] == "+500"
 
 
