@@ -1,11 +1,12 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.14"
 
 [manifest]
 members = [
     "tenko-plugin-apex",
     "tenko-plugin-bf1",
+    "tenko-plugin-bf6",
     "tenko-plugin-persona-chat",
     "tenko-plugin-random-wife",
     "tenko-plugin-repeater",
@@ -1305,6 +1306,25 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "tenko-api", specifier = ">=0.4,<0.5" },
     { name = "zhconv", specifier = ">=1.4" },
+]
+
+[[package]]
+name = "tenko-plugin-bf6"
+version = "0.1.0"
+source = { editable = "plugins/bf6" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "sqlalchemy" },
+    { name = "tenko-api" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "tenko-api", specifier = ">=0.4,<0.5" },
 ]
 
 [[package]]

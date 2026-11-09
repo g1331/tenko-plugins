@@ -19,7 +19,9 @@ def host(tmp_path_factory):
     EntariConfig(root / "entari.yml")
     Entari(ignore_self_message=True)
     (root / "state.json").write_text(
-        json.dumps({"enabled": ["repeater", "persona_chat", "bf1", "apex", "random_wife", "tarot"]})
+        json.dumps(
+            {"enabled": ["repeater", "persona_chat", "bf1", "bf6", "apex", "random_wife", "tarot"]}
+        )
     )
     yield SimpleNamespace(root=root)
     os.chdir(previous)
@@ -43,5 +45,5 @@ async def runtime(host):
         }
     )
     yield runtime
-    for plugin_id in ("repeater", "persona_chat", "bf1", "apex", "random_wife", "tarot"):
+    for plugin_id in ("repeater", "persona_chat", "bf1", "bf6", "apex", "random_wife", "tarot"):
         runtime.unload(plugin_id)

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+{#- 视觉沿用 bf-manager 网页的 BF6 作战档案：冷灰面板、信号橙、左上橙色右下灰色的角标、Oswald 数字。
+    图要在手机上看：最小字号 17px。 -#}
+<style>
+  @font-face { font-family: "Oswald"; src: url({{ asset("Oswald.ttf") }}) format("truetype"); font-weight: 200 700; }
+  {% if sc_font %}@font-face { font-family: "SC"; src: url({{ sc_font }}) format("woff2"); font-weight: 100 900; }{% endif %}
+  :root {
+    --orange: #ff5a1f; --orange-soft: #ff7a3c;
+    --bg: #0a0b0c; --panel: #131517; --line: #24282b; --line-strong: #2f3438;
+    --fg: #ece9e4; --fg2: #b9bcbf; --mute: #8a8f94;
+    --win: #35c98a; --loss: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body {
+    width: {{ width|default(1000) }}px;
+    color: var(--fg);
+    font-family: "SC", "WenQuanYi Zen Hei", sans-serif;
+    font-size: 20px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .d { font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-variant-numeric: tabular-nums; }
+  .page { position: relative; padding: 24px 24px 18px; overflow: hidden; }
+  .page > * { position: relative; z-index: 1; }
+
+  .panel { position: relative; background: var(--panel); border: 1px solid var(--line); padding: 22px 24px; }
+  .panel::before, .panel::after { content: ""; position: absolute; width: 12px; height: 12px; }
+  .panel::before { left: -1px; top: -1px; border-left: 2px solid var(--orange); border-top: 2px solid var(--orange); }
+  .panel::after { right: -1px; bottom: -1px; border-right: 2px solid rgba(185,188,191,.5); border-bottom: 2px solid rgba(185,188,191,.5); }
+  section.panel { margin-top: 18px; }
+
+  .sh { display: flex; align-items: center; gap: 12px; margin: 0 0 18px; font-size: 24px; font-weight: 700; letter-spacing: .04em; }
+  .sh::before { content: ""; width: 4px; height: 22px; background: var(--orange); flex: none; }
+  .sh .aside { margin-left: auto; font-size: 17px; font-weight: 400; letter-spacing: 0; color: var(--mute); }
+  .label { font-size: 17px; color: var(--mute); }
+  .eyebrow { font-family: "Oswald", "SC", sans-serif; font-size: 18px; letter-spacing: .2em; color: var(--orange); }
+
+  .avatar { flex: none; object-fit: cover; background: var(--line-strong);
+    clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%); }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+    border: 1px solid var(--line-strong); background: rgba(19,21,23,.75); color: var(--fg2); font-size: 17px; }
+  .chip b { color: var(--fg); font-weight: 700; }
+  .chip.accent { border-color: rgba(255,90,31,.55); color: var(--orange-soft); }
+
+  .bar { height: 8px; background: rgba(255,90,31,.16); }
+  .bar i { display: block; height: 100%; background: var(--orange); }
+  .empty { padding: 30px 0; text-align: center; font-size: 19px; color: var(--mute); }
+
+  footer { margin-top: 16px; text-align: center; font-size: 16px; color: var(--mute); letter-spacing: .05em; }
+  {% block style %}{% endblock %}
+</style>
+</head>
+<body>
+<div class="page">
+  {% block body %}{% endblock %}
+  <footer><span class="d">BF-MANAGER</span> · {{ source }} · <span class="d">{{ now }}</span></footer>
+</div>
+</body>
+</html>

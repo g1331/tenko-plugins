@@ -1,0 +1,47 @@
+{% extends "_base.html" %}
+{% from "_macros.html" import who, who_style %}
+{#- 卡片网格，和战地一插件的武器卡片同一套排法；当前排序那一格标橙。 -#}
+{% block style %}
+  {{ who_style() }}
+  .cards { display: grid; grid-template-columns: repeat({{ cols }}, minmax(0, 1fr)); gap: 18px; margin-top: 18px; }
+  .card { position: relative; background: var(--panel); border: 1px solid var(--line); }
+  .pic { position: relative; height: 124px; display: flex; align-items: center; justify-content: center;
+    background: #22262a; border-bottom: 3px solid var(--line-strong); }
+  .card.top .pic { border-bottom-color: var(--orange); }
+  .pic img { max-width: 300px; max-height: 104px; object-fit: contain; }
+  .rank { position: absolute; left: 14px; top: 10px; font-family: "Oswald", sans-serif; font-size: 26px; font-weight: 700;
+    padding: 0 8px; background: rgba(0,0,0,.7); }
+  .card.top .rank { color: var(--orange); }
+  .body { padding: 14px 18px 16px; }
+  .name { font-size: 24px; font-weight: 700; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { margin-top: 2px; font-size: 17px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .stat .v { font-family: "Oswald", sans-serif; font-size: 28px; font-weight: 500; line-height: 1.2; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .stat.hl .v { color: var(--orange); font-weight: 700; }
+  .stat.hl .label { color: var(--orange-soft); }
+  .card.muted { opacity: .5; }
+  .card.muted .rank { color: var(--mute); }
+{% endblock %}
+{% block body %}
+{{ who(name, avatar_url, platform, title, note) }}
+<div class="cards">
+  {% for i in items %}
+  <div class="card{{ ' top' if loop.index <= 3 and not i.muted }}{{ ' muted' if i.muted }}">
+    <div class="pic">
+      <span class="rank">{{ '#' ~ loop.index if not i.muted else '—' }}</span>
+      {% if i.image %}<img src="{{ i.image }}">{% endif %}
+    </div>
+    <div class="body">
+      <div class="name">{{ i.name }}</div>
+      <div class="sub">{{ i.category }}</div>
+      <div class="stats">
+        {% for label in columns %}
+        <div class="stat{{ ' hl' if loop.index0 == highlight }}"><div class="label">{{ label }}</div><div class="v">{{ i.stats[loop.index0] }}</div></div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% if not items %}<section class="panel empty">没有符合的记录</section>{% endif %}
+{% endblock %}

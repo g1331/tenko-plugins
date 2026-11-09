@@ -1,0 +1,58 @@
+{% extends "_base.html" %}
+{% from "_macros.html" import who, who_style %}
+{#- 对照 bf-manager 网页的 Bf6Matches：按天分组，一条一行，左边是地图图，胜负用左边线和徽章的颜色。 -#}
+{% block style %}
+  {{ who_style() }}
+  .day { margin-top: 22px; }
+  .day h2 { display: flex; align-items: baseline; gap: 14px; margin: 0 0 10px; font-size: 22px; font-weight: 700; letter-spacing: .04em; }
+  .day h2 span { font-size: 18px; font-weight: 400; letter-spacing: 0; color: var(--mute); }
+  .rounds { display: grid; gap: 10px; }
+  .round { position: relative; display: flex; align-items: center; gap: 20px; min-height: 108px; overflow: hidden;
+    background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--line-strong); padding: 14px 22px 14px 20px; }
+  .round.win { border-left-color: var(--win); }
+  .round.loss { border-left-color: var(--loss); }
+  .round .art { position: absolute; left: 0; top: 0; bottom: 0; width: 340px; background-size: cover; background-position: center; opacity: .45; }
+  .round .art::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(19,21,23,.1), var(--panel)); }
+  .round > :not(.art) { position: relative; }
+  .main { flex: 1; min-width: 0; }
+  .head { display: flex; align-items: center; gap: 12px; }
+  .title { font-size: 24px; font-weight: 800; letter-spacing: .03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { flex: none; padding: 0 8px; border: 1px solid var(--line-strong); font-size: 17px; line-height: 28px; color: var(--fg2); }
+  .win .tag { border-color: var(--win); color: var(--win); }
+  .loss .tag { border-color: var(--loss); color: var(--loss); }
+  .partial .tag { color: var(--mute); }
+  .subline { margin-top: 4px; font-size: 17px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gear { margin-top: 4px; font-size: 17px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gear b { color: var(--fg2); font-weight: 400; }
+  .cells { display: grid; grid-template-columns: repeat(5, 76px); gap: 0 10px; flex: none; text-align: right; }
+  .cells .v { font-family: "Oswald", sans-serif; font-size: 26px; font-weight: 500; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .cells .hl .v { color: var(--orange); }
+{% endblock %}
+{% block body %}
+{{ who(name, avatar_url, platform, title, ["从 " ~ since ~ " 开始记录"] if since and days else []) }}
+{% for day in days %}
+<div class="day">
+  <h2>{{ day.label }}<span><span class="d">{{ day.matches }}</span> 场 · <span class="d">{{ day.wins }}</span> 胜</span></h2>
+  <div class="rounds">
+    {% for r in day.rounds %}
+    <div class="round {{ r.outcome }}">
+      {% if r.backdrop %}<div class="art" style="background-image: url({{ r.backdrop }})"></div>{% endif %}
+      <div class="main">
+        <div class="head"><span class="title">{{ r.title }}</span><span class="tag">{{ r.label }}</span></div>
+        <div class="subline">{{ r.subtitle }}{% if r.kit %} · {{ r.kit }}{% endif %}</div>
+        {% if r.gear %}<div class="gear"><b>{{ r.gear }}</b></div>{% endif %}
+      </div>
+      <div class="cells">
+        <div><div class="label">击杀</div><div class="v">{{ r.kills }}</div></div>
+        <div><div class="label">死亡</div><div class="v">{{ r.deaths }}</div></div>
+        <div class="hl"><div class="label">K/D</div><div class="v">{{ r.kd }}</div></div>
+        <div><div class="label">得分</div><div class="v">{{ r.score }}</div></div>
+        <div><div class="label">分钟</div><div class="v">{{ r.minutes }}</div></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+{% if not days %}<section class="panel empty">{{ empty }}</section>{% endif %}
+{% endblock %}

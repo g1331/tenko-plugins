@@ -1,0 +1,26 @@
+{% macro avatar(url, size) -%}
+{% if url %}<img class="avatar" src="{{ url }}" style="width: {{ size }}px; height: {{ size }}px">
+{%- else %}<div class="avatar" style="width: {{ size }}px; height: {{ size }}px"></div>{% endif %}
+{%- endmacro %}
+
+{#- 排行和对局卡片顶上的玩家条：头像、名字、平台，右边写筛选和排序。 -#}
+{% macro who(name, avatar_url, platform, title, note=[]) -%}
+<div class="panel who">
+  {{ avatar(avatar_url, 84) }}
+  <div class="who-main">
+    <div class="eyebrow">BATTLEFIELD 6 · {{ title }}</div>
+    <h1>{{ name }}{% if platform %}<span class="platform">{{ platform }}</span>{% endif %}</h1>
+  </div>
+  {% if note %}<div class="who-note">{% for line in note %}<div>{{ line }}</div>{% endfor %}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro who_style() -%}
+  .who { display: flex; align-items: center; gap: 20px; padding: 18px 22px; }
+  .who-main { min-width: 0; }
+  .who h1 { display: flex; align-items: baseline; gap: 14px; margin: 4px 0 0;
+    font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 44px; line-height: 1.15; font-weight: 600; word-break: break-all; }
+  .who .platform { font-family: "SC", sans-serif; font-size: 17px; font-weight: 400; color: var(--fg2);
+    padding: 2px 10px; border: 1px solid var(--line-strong); }
+  .who-note { margin-left: auto; align-self: flex-end; text-align: right; font-size: 18px; line-height: 1.6; color: var(--fg2); }
+{%- endmacro %}

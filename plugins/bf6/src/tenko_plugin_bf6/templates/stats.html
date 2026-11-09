@@ -1,0 +1,220 @@
+{% extends "_base.html" %}
+{% from "_macros.html" import avatar %}
+{#- 内容对照 bf-manager 网页的 Bf6Hero 与 Bf6Overview，排版改成整宽纵向，方便手机看。 -#}
+{% block style %}
+  .hero { position: relative; overflow: hidden; border: 1px solid var(--line); background: var(--panel); }
+  .hero .art { position: absolute; top: 0; bottom: 0; right: 0; width: 70%; background-size: cover; background-position: 60% 20%;
+    -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 45%); opacity: .8; }
+  .hero::after { content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, var(--panel) 0%, rgba(19,21,23,.9) 38%, rgba(19,21,23,.35) 70%, rgba(19,21,23,.15) 100%),
+      linear-gradient(0deg, var(--panel) 0%, transparent 40%); }
+  .hero-body { position: relative; z-index: 1; padding: 26px 28px 28px; }
+  .who { display: flex; align-items: center; gap: 22px; margin-top: 16px; }
+  .who .main { min-width: 0; }
+  h1 { margin: 0 0 12px; font-family: "Oswald", "SC", "WenQuanYi Zen Hei", sans-serif; font-size: 60px; line-height: 1; font-weight: 600; word-break: break-all; }
+  .core { display: flex; align-items: flex-end; gap: 40px; margin-top: 28px; }
+  .core .t { font-family: "Oswald", sans-serif; font-size: 18px; letter-spacing: .25em; color: var(--fg2); }
+  .core .kd { font-family: "Oswald", sans-serif; font-size: 128px; line-height: .86; font-weight: 700; color: var(--orange);
+    margin-top: 8px; text-shadow: 0 0 40px rgba(255,90,31,.3); }
+  .core .sub { margin-top: 12px; font-size: 17px; color: var(--mute); white-space: nowrap; }
+  .core .sub b { color: var(--fg2); font-weight: 500; }
+  .cells { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 18px; padding-top: 14px; border-top: 1px solid var(--line-strong); }
+  .cells .v { font-family: "Oswald", sans-serif; font-size: 36px; font-weight: 500; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .cells .v small, .tiles .v small { font-family: "SC", sans-serif; font-size: 17px; font-weight: 400; color: var(--fg2); margin-left: 4px; }
+  .cells .n { font-size: 17px; color: var(--mute); white-space: nowrap; }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px 22px; }
+  .tiles .v { font-family: "Oswald", sans-serif; font-size: 32px; font-weight: 500; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .tiles .v em { font-family: "SC", sans-serif; font-style: normal; font-size: 17px; color: var(--mute); margin-left: 8px; }
+  .tiles.bests .v { color: var(--orange-soft); font-weight: 600; }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 18px; }
+  .cols > .panel { margin: 0; }
+  .rows { display: grid; gap: 14px; }
+  .row .top { display: flex; align-items: baseline; gap: 10px; font-size: 20px; }
+  .row .top .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .top .k { font-family: "Oswald", sans-serif; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .row .top .k small { font-family: "SC", sans-serif; font-size: 17px; color: var(--mute); margin-left: 4px; }
+  .row .bar { margin-top: 6px; }
+  .row .meta { margin-top: 4px; font-size: 17px; color: var(--mute); }
+  .row.best .nm { color: var(--orange-soft); font-weight: 700; }
+  .badge { margin-left: 8px; padding: 0 6px; background: var(--orange); color: #111; font-size: 15px; font-weight: 700; line-height: 22px; vertical-align: 2px; }
+
+  .gear { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .g { display: flex; gap: 16px; align-items: center; min-width: 0; padding: 12px; background: rgba(255,255,255,.03); }
+  .g .img { width: 170px; height: 84px; flex: none; display: flex; align-items: center; justify-content: center; background: #22262a; }
+  .g .img img { max-width: 100%; max-height: 100%; object-fit: contain; padding: 6px; }
+  .g .body { min-width: 0; flex: 1; }
+  .g .nm { font-size: 21px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .g .cat { font-size: 17px; color: var(--mute); }
+  .g .k { margin-top: 4px; font-family: "Oswald", sans-serif; font-size: 28px; font-weight: 700; color: var(--orange); line-height: 1.1; }
+  .g .k small { font-family: "SC", sans-serif; font-size: 17px; font-weight: 400; color: var(--fg2); margin-left: 6px; }
+  .g .rate { font-size: 17px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .modes { width: 100%; border-collapse: collapse; font-size: 19px; }
+  .modes th { padding: 0 0 8px; font-size: 17px; font-weight: 400; color: var(--mute); text-align: right; white-space: nowrap; }
+  .modes th:first-child, .modes td:first-child { text-align: left; }
+  .modes td { padding: 8px 0; border-top: 1px solid var(--line); text-align: right; color: var(--fg2); white-space: nowrap; }
+  .modes td:first-child { color: var(--fg); max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+  .modes td + td, .modes th + th { padding-left: 14px; }
+  .maps { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .map { position: relative; aspect-ratio: 16 / 9; overflow: hidden; background: #22262a; }
+  .map img { width: 100%; height: 100%; object-fit: cover; }
+  .map::after { content: ""; position: absolute; inset: 0; background: linear-gradient(0deg, rgba(0,0,0,.92), rgba(0,0,0,.2) 60%, transparent); }
+  .map .cap { position: absolute; left: 10px; right: 10px; bottom: 6px; z-index: 1; }
+  .map .nm { font-size: 19px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .map .t { font-size: 17px; color: var(--fg2); white-space: nowrap; }
+{% endblock %}
+{% block body %}
+<section class="hero">
+  {% if kit_image %}<div class="art" style="background-image: url({{ kit_image }})"></div>{% endif %}
+  <div class="hero-body">
+    <div class="eyebrow">BATTLEFIELD 6 · 作战档案</div>
+    <div class="who">
+      {{ avatar(avatar_url, 108) }}
+      <div class="main">
+        <h1>{{ name }}</h1>
+        <div class="chips">
+          {% if platform %}<span class="chip">{{ platform }}</span>{% endif %}
+          {% if kit %}<span class="chip">主玩 <b>{{ kit }}</b></span>{% endif %}
+          {% if top_mode %}<span class="chip">最常玩 <b>{{ top_mode }}</b></span>{% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="core">
+      <div>
+        <div class="t">K / D</div>
+        <div class="kd">{{ kd }}</div>
+        <div class="sub">真人击杀 <b class="d">{{ human_kills }}</b> / 死亡 <b class="d">{{ deaths }}</b></div>
+      </div>
+      <div class="cells">
+        {% for c in cells %}
+        <div>
+          <div class="label">{{ c.label }}</div>
+          <div class="v">{{ c.value }}{% if c.unit %}<small>{{ c.unit }}</small>{% endif %}</div>
+          {% if c.note %}<div class="n">{{ c.note }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="sh">战斗表现</div>
+  <div class="tiles">
+    {% for c in combat %}
+    <div>
+      <div class="label">{{ c.label }}</div>
+      <div class="v">{{ c.value }}{% if c.unit %}<small>{{ c.unit }}</small>{% endif %}{% if c.note %}<em>{{ c.note }}</em>{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+{% if signature %}
+<section class="panel">
+  <div class="sh">王牌装备<span class="aside">占生涯总击杀</span></div>
+  <div class="gear">
+    {% for g in signature %}
+    <div class="g">
+      <div class="img">{% if g.image %}<img src="{{ g.image }}">{% endif %}</div>
+      <div class="body">
+        <div class="nm">{{ g.name }}</div>
+        <div class="cat">{{ g.category }}</div>
+        <div class="k">{{ g.kills }}<small>击杀 · {{ g.share }}</small></div>
+        <div class="rate">{{ g.rate }}</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<div class="cols">
+  <section class="panel">
+    <div class="sh">兵种<span class="aside">按战斗时长</span></div>
+    <div class="rows">
+      {% for k in kits %}
+      <div class="row{{ ' best' if k.best }}">
+        <div class="top">
+          <span class="nm">{{ k.name }}{% if k.best %}<span class="badge">主玩</span>{% endif %}</span>
+          <span class="k">{{ k.hours }}<small>小时</small></span>
+        </div>
+        <div class="bar"><i style="width: {{ (k.share * 100)|round(1) }}%"></i></div>
+        <div class="meta">击杀 <span class="d">{{ k.kills }}</span> · KD <span class="d">{{ k.kd }}</span></div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  <section class="panel">
+    <div class="sh">武器偏好<span class="aside">按大类击杀</span></div>
+    <div class="rows">
+      {% for m in mix %}
+      <div class="row">
+        <div class="top">
+          <span class="nm">{{ m.name }}</span>
+          <span class="k">{{ m.kills }}<small>{{ (m.share * 100)|round(0)|int }}%</small></span>
+        </div>
+        <div class="bar"><i style="width: {{ (m.share * 100)|round(1) }}%"></i></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% if not mix %}<div class="empty">还没有武器击杀</div>{% endif %}
+  </section>
+</div>
+
+<section class="panel">
+  <div class="sh">生涯之最</div>
+  <div class="tiles bests">
+    {% for c in bests %}
+    <div>
+      <div class="label">{{ c.label }}</div>
+      <div class="v">{{ c.value }}{% if c.unit %}<small>{{ c.unit }}</small>{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+{% if modes or maps %}
+<div class="cols">
+  <section class="panel">
+    <div class="sh">常玩模式</div>
+    <table class="modes">
+      <tr><th>模式</th><th>场次</th><th>胜率</th><th>击杀</th><th>小时</th></tr>
+      {% for m in modes %}
+      <tr><td>{{ m.name }}</td><td class="d">{{ m.matches }}</td><td class="d">{{ m.win_rate }}</td><td class="d">{{ m.kills }}</td><td class="d">{{ m.hours }}</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+  <section class="panel">
+    <div class="sh">常玩地图<span class="aside">按时长</span></div>
+    <div class="maps">
+      {% for m in maps %}
+      <div class="map">
+        {% if m.image %}<img src="{{ m.image }}">{% endif %}
+        <div class="cap">
+          <div class="nm">{{ m.name }}</div>
+          <div class="t"><span class="d">{{ m.matches }}</span> 场 · 胜率 <span class="d">{{ m.win_rate }}</span></div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+{% endif %}
+
+{% if redsec %}
+<section class="panel">
+  <div class="sh">禁区冲突<span class="aside">大逃杀 · 单人、双人、四人合计</span></div>
+  <div class="tiles">
+    {% for c in redsec %}
+    <div>
+      <div class="label">{{ c.label }}</div>
+      <div class="v">{{ c.value }}{% if c.unit %}<small>{{ c.unit }}</small>{% endif %}{% if c.note %}<em>{{ c.note }}</em>{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

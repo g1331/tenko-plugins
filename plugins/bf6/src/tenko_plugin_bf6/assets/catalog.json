@@ -1,0 +1,860 @@
+{
+ "source": "g1331/bf-manager@042a642 apps/web/lib/bf6/catalog-data.ts、catalog.ts",
+ "weapons": {
+  "ar_ak4d": {
+   "name": "AK4D",
+   "image": "/bf6/weapons/ar_ak4d.webp"
+  },
+  "ar_b36a4": {
+   "name": "B36A4",
+   "image": "/bf6/weapons/ar_b36a4.webp"
+  },
+  "ar_ef88": {
+   "name": "EF88",
+   "image": "/bf6/weapons/ar_ef88.webp"
+  },
+  "ar_kord6p67": {
+   "name": "KORD 6P67",
+   "image": "/bf6/weapons/ar_kord6p67.webp"
+  },
+  "ar_l85a3": {
+   "name": "L85A3",
+   "image": "/bf6/weapons/ar_l85a3.webp"
+  },
+  "ar_m16a3": {
+   "name": "M16A4",
+   "image": "/bf6/weapons/ar_m16a3.webp"
+  },
+  "ar_m433": {
+   "name": "M433",
+   "image": "/bf6/weapons/ar_m433.webp"
+  },
+  "ar_mrgga": {
+   "name": "Mk 24",
+   "image": "/bf6/weapons/ar_mrgga.webp"
+  },
+  "ar_nvo228e": {
+   "name": "NVO-228E",
+   "image": "/bf6/weapons/ar_nvo228e.webp"
+  },
+  "ar_sor556mk2": {
+   "name": "SOR-556 Mk2",
+   "image": "/bf6/weapons/ar_sor556mk2.webp"
+  },
+  "ar_tr7": {
+   "name": "TR-7",
+   "image": "/bf6/weapons/ar_tr7.webp"
+  },
+  "ar_vhsk2": {
+   "name": "VCR-2",
+   "image": "/bf6/weapons/ar_vhsk2.webp"
+  },
+  "crb_ak205": {
+   "name": "AK-205",
+   "image": "/bf6/weapons/crb_ak205.webp"
+  },
+  "crb_bren3": {
+   "name": "BROD 3",
+   "image": "/bf6/weapons/crb_bren3.webp"
+  },
+  "crb_grtbc": {
+   "name": "GRT-BC",
+   "image": "/bf6/weapons/crb_grtbc.webp"
+  },
+  "crb_m417a2": {
+   "name": "M417 A2",
+   "image": "/bf6/weapons/crb_m417a2.webp"
+  },
+  "crb_m4a1": {
+   "name": "M4A1",
+   "image": "/bf6/weapons/crb_m4a1.webp"
+  },
+  "crb_qbz192": {
+   "name": "QBZ-192",
+   "image": "/bf6/weapons/crb_qbz192.webp"
+  },
+  "crb_sg553r": {
+   "name": "SG 553R",
+   "image": "/bf6/weapons/crb_sg553r.webp"
+  },
+  "crb_sor300sc": {
+   "name": "SOR-300SC",
+   "image": "/bf6/weapons/crb_sor300sc.webp"
+  },
+  "crb_x277": {
+   "name": "M277",
+   "image": "/bf6/weapons/crb_x277.webp"
+  },
+  "dmr_lmr27": {
+   "name": "LMR27",
+   "image": "/bf6/weapons/dmr_lmr27.webp"
+  },
+  "dmr_m39emr": {
+   "name": "M39 EMR",
+   "image": "/bf6/weapons/dmr_m39emr.webp"
+  },
+  "dmr_msbsgrotc": {
+   "name": "GRT-CPS",
+   "image": "/bf6/weapons/dmr_msbsgrotc.webp"
+  },
+  "dmr_svdm": {
+   "name": "SVDM",
+   "image": "/bf6/weapons/dmr_svdm.webp"
+  },
+  "dmr_svk86": {
+   "name": "SVK-8.6",
+   "image": "/bf6/weapons/dmr_svk86.webp"
+  },
+  "dmr_vssm": {
+   "name": "VSSM",
+   "image": "/bf6/weapons/dmr_vssm.webp"
+  },
+  "mg_drsiar": {
+   "name": "DRS-IAR",
+   "image": "/bf6/weapons/mg_drsiar.webp"
+  },
+  "mg_kts100mk8": {
+   "name": "KTS100 MK8",
+   "image": "/bf6/weapons/mg_kts100mk8.webp"
+  },
+  "mg_l110": {
+   "name": "L110",
+   "image": "/bf6/weapons/mg_l110.webp"
+  },
+  "mg_m123k": {
+   "name": "M123K",
+   "image": "/bf6/weapons/mg_m123k.webp"
+  },
+  "mg_m240l": {
+   "name": "M240L",
+   "image": "/bf6/weapons/mg_m240l.webp"
+  },
+  "mg_m60": {
+   "name": "M/60",
+   "image": "/bf6/weapons/mg_m60.webp"
+  },
+  "mg_mg525btk": {
+   "name": "M121 A2",
+   "image": "/bf6/weapons/mg_mg525btk.webp"
+  },
+  "mg_pkm": {
+   "name": "Z84M",
+   "image": "/bf6/weapons/mg_pkm.webp"
+  },
+  "mg_rpk74m": {
+   "name": "RPK-74M",
+   "image": "/bf6/weapons/mg_rpk74m.webp"
+  },
+  "mg_rpkm": {
+   "name": "RPKM",
+   "image": "/bf6/weapons/mg_rpkm.webp"
+  },
+  "mg_xm250": {
+   "name": "M250",
+   "image": "/bf6/weapons/mg_xm250.webp"
+  },
+  "pst_es57": {
+   "name": "ES 5.7",
+   "image": "/bf6/weapons/pst_es57.webp"
+  },
+  "pst_ggh22": {
+   "name": "GGH-22",
+   "image": "/bf6/weapons/pst_ggh22.webp"
+  },
+  "pst_m357trait": {
+   "name": "M357 Trait",
+   "image": "/bf6/weapons/pst_m357trait.webp"
+  },
+  "pst_m44": {
+   "name": "M44",
+   "image": "/bf6/weapons/pst_m44.webp"
+  },
+  "pst_m45a1": {
+   "name": "M45A1",
+   "image": "/bf6/weapons/pst_m45a1.webp"
+  },
+  "pst_p18": {
+   "name": "P18",
+   "image": "/bf6/weapons/pst_p18.webp"
+  },
+  "pst_vz61": {
+   "name": "vz. 61",
+   "image": "/bf6/weapons/pst_vz61.webp"
+  },
+  "sg_185ksk": {
+   "name": "18.5KS-K",
+   "image": "/bf6/weapons/sg_185ksk.webp"
+  },
+  "sg_db12": {
+   "name": "DB-12",
+   "image": "/bf6/weapons/sg_db12.webp"
+  },
+  "sg_m1014": {
+   "name": "M1014",
+   "image": "/bf6/weapons/sg_m1014.webp"
+  },
+  "sg_m87a1": {
+   "name": "M87A1",
+   "image": "/bf6/weapons/sg_m87a1.webp"
+  },
+  "smg_cz3a1": {
+   "name": "CZ3A1",
+   "image": "/bf6/weapons/smg_cz3a1.webp"
+  },
+  "smg_kv9": {
+   "name": "KV9",
+   "image": "/bf6/weapons/smg_kv9.webp"
+  },
+  "smg_pp19": {
+   "name": "PP-19",
+   "image": "/bf6/weapons/smg_pp19.webp"
+  },
+  "smg_pw5a3": {
+   "name": "PW5A3",
+   "image": "/bf6/weapons/smg_pw5a3.webp"
+  },
+  "smg_pw7a2": {
+   "name": "PW7A2",
+   "image": "/bf6/weapons/smg_pw7a2.webp"
+  },
+  "smg_scw10": {
+   "name": "SCW-10",
+   "image": "/bf6/weapons/smg_scw10.webp"
+  },
+  "smg_sgx": {
+   "name": "SGX",
+   "image": "/bf6/weapons/smg_sgx.webp"
+  },
+  "smg_sl9": {
+   "name": "SL9",
+   "image": "/bf6/weapons/smg_sl9.webp"
+  },
+  "smg_umg40": {
+   "name": "UMG-40",
+   "image": "/bf6/weapons/smg_umg40.webp"
+  },
+  "smg_usg90": {
+   "name": "USG-90",
+   "image": "/bf6/weapons/smg_usg90.webp"
+  },
+  "snp_cdx40": {
+   "name": "ELR-40",
+   "image": "/bf6/weapons/snp_cdx40.webp"
+  },
+  "snp_hti": {
+   "name": "Interdictor",
+   "image": "/bf6/weapons/snp_hti.webp"
+  },
+  "snp_l115": {
+   "name": "L115",
+   "image": "/bf6/weapons/snp_l115.webp"
+  },
+  "snp_m2010": {
+   "name": "M2010 ESR",
+   "image": "/bf6/weapons/snp_m2010.webp"
+  },
+  "snp_miniscout": {
+   "name": "Mini Scout",
+   "image": "/bf6/weapons/snp_miniscout.webp"
+  },
+  "snp_psr": {
+   "name": "PSR",
+   "image": "/bf6/weapons/snp_psr.webp"
+  },
+  "snp_sv98": {
+   "name": "SV-98",
+   "image": "/bf6/weapons/snp_sv98.webp"
+  }
+ },
+ "vehicles": {
+  "air_ah6litbird": {
+   "name": "AH-6 Little Bird",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_ah6litbird.webp"
+  },
+  "air_f14tomcat": {
+   "name": "F-74A 海猫",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_f14tomcat.webp"
+  },
+  "air_f39e": {
+   "name": "F-39E",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_f39e.webp"
+  },
+  "air_f61v": {
+   "name": "F-61V",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_f61v.webp"
+  },
+  "air_f97kes": {
+   "name": "F-97 Kestrel",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_f97kes.webp"
+  },
+  "air_fa18f": {
+   "name": "F/A-81F 超级幽灵",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_fa18f.webp"
+  },
+  "air_m77efalchion": {
+   "name": "M77E Falchion",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_m77efalchion.webp"
+  },
+  "air_mh47": {
+   "name": "MH-47",
+   "type": "空中运输",
+   "image": null
+  },
+  "air_panthera": {
+   "name": "Panthera KHT",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_panthera.webp"
+  },
+  "air_su57": {
+   "name": "Su-57",
+   "type": "空中作战",
+   "image": "/bf6/vehicles/air_su57.webp"
+  },
+  "air_uh06": {
+   "name": "UH-06",
+   "type": "空中运输",
+   "image": null
+  },
+  "sur_CB90": {
+   "name": "RCB-90",
+   "type": "海上作战",
+   "image": "/bf6/vehicles/sur_CB90.webp"
+  },
+  "sur_bradley": {
+   "name": "M3A3 布拉德利",
+   "type": "地面作战",
+   "image": "/bf6/vehicles/sur_bradley.webp"
+  },
+  "sur_cheetah1a2": {
+   "name": "Cheetah 1A2",
+   "type": "地面作战",
+   "image": "/bf6/vehicles/sur_cheetah1a2.webp"
+  },
+  "sur_glider96": {
+   "name": "Glider 96",
+   "type": "地面作战",
+   "image": "/bf6/vehicles/sur_glider96.webp"
+  },
+  "sur_leoa4": {
+   "name": "Leo A4",
+   "type": "地面作战",
+   "image": "/bf6/vehicles/sur_leoa4.webp"
+  },
+  "sur_ltv": {
+   "name": "LTV",
+   "type": "地面运输",
+   "image": null
+  },
+  "sur_m1a2sepv3": {
+   "name": "M1A2 SEPv3",
+   "type": "地面作战",
+   "image": "/bf6/vehicles/sur_m1a2sepv3.webp"
+  },
+  "sur_moto_db01": {
+   "name": "TM/O 450",
+   "type": "地面运输",
+   "image": "/bf6/vehicles/sur_moto_db01.webp"
+  },
+  "sur_moto_db02": {
+   "name": "M1030-M1",
+   "type": "地面运输",
+   "image": "/bf6/vehicles/sur_moto_db02.webp"
+  },
+  "sur_ptv": {
+   "name": "高尔夫球车",
+   "type": "地面运输",
+   "image": null
+  },
+  "sur_quadbike": {
+   "name": "Rugged MV740",
+   "type": "地面运输",
+   "image": "/bf6/vehicles/sur_quadbike.webp"
+  },
+  "sur_rhib": {
+   "name": "7.7m NSW 硬壳充气艇",
+   "type": "海上作战",
+   "image": "/bf6/vehicles/sur_rhib.webp"
+  },
+  "sur_strf09a4": {
+   "name": "Strf 09 A4",
+   "type": "地面作战",
+   "image": "/bf6/vehicles/sur_strf09a4.webp"
+  },
+  "sur_travmark2": {
+   "name": "Traverser Mark 2",
+   "type": "地面运输",
+   "image": "/bf6/vehicles/sur_travmark2.webp"
+  },
+  "sur_vector": {
+   "name": "VECTOR",
+   "type": "地面运输",
+   "image": "/bf6/vehicles/sur_vector.webp"
+  }
+ },
+ "gadgets": {
+  "adren": {
+   "name": "肾上腺素注射器",
+   "image": "/bf6/gadgets/adren.webp"
+  },
+  "c4": {
+   "name": "C-4 炸药",
+   "image": "/bf6/gadgets/c4.webp"
+  },
+  "callin_airstrike": {
+   "name": "空袭",
+   "image": "/bf6/gadgets/callin_airstrike.webp"
+  },
+  "callin_antiveh": {
+   "name": "反载具投放",
+   "image": "/bf6/gadgets/callin_antiveh.webp"
+  },
+  "callin_armor": {
+   "name": "护甲空投",
+   "image": "/bf6/gadgets/callin_armor.webp"
+  },
+  "callin_artstrike": {
+   "name": "火炮攻击",
+   "image": "/bf6/gadgets/callin_artstrike.webp"
+  },
+  "callin_jagm": {
+   "name": "导弹打击",
+   "image": "/bf6/gadgets/callin_jagm.webp"
+  },
+  "callin_mobresp": {
+   "name": "移动重生",
+   "image": "/bf6/gadgets/callin_mobresp.webp"
+  },
+  "callin_resupply": {
+   "name": "补给空投",
+   "image": "/bf6/gadgets/callin_resupply.webp"
+  },
+  "callin_smoke": {
+   "name": "烟幕",
+   "image": "/bf6/gadgets/callin_smoke.webp"
+  },
+  "callin_uav": {
+   "name": "无人机监查",
+   "image": "/bf6/gadgets/callin_uav.webp"
+  },
+  "callin_wpdrop": {
+   "name": "武器投放",
+   "image": "/bf6/gadgets/callin_wpdrop.webp"
+  },
+  "decoy": {
+   "name": "狙击手诱饵",
+   "image": "/bf6/gadgets/decoy.webp"
+  },
+  "defib": {
+   "name": "除颤器",
+   "image": "/bf6/gadgets/defib.webp"
+  },
+  "deplocover": {
+   "name": "机动掩体",
+   "image": "/bf6/gadgets/deplocover.webp"
+  },
+  "deploybeacon": {
+   "name": "QLink 6",
+   "image": "/bf6/gadgets/deploybeacon.webp"
+  },
+  "deploymortar": {
+   "name": "LWCMS",
+   "image": "/bf6/gadgets/deploymortar.webp"
+  },
+  "eodbot": {
+   "name": "CSB IV",
+   "image": "/bf6/gadgets/eodbot.webp"
+  },
+  "eodbot_demine": {
+   "name": "CSB IV 排雷",
+   "image": "/bf6/gadgets/eodbot_demine.webp"
+  },
+  "gasmask": {
+   "name": "防毒面具",
+   "image": "/bf6/gadgets/gasmask.webp"
+  },
+  "gl_breach": {
+   "name": "X95 BRE",
+   "image": "/bf6/gadgets/gl_breach.webp"
+  },
+  "gl_he": {
+   "name": "M320A1 HE",
+   "image": "/bf6/gadgets/gl_he.webp"
+  },
+  "gl_smoke": {
+   "name": "M320A1 SMK",
+   "image": "/bf6/gadgets/gl_smoke.webp"
+  },
+  "gl_tb": {
+   "name": "M320A1 THRM",
+   "image": "/bf6/gadgets/gl_tb.webp"
+  },
+  "gpdis": {
+   "name": "GPDIS",
+   "image": "/bf6/gadgets/gpdis.webp"
+  },
+  "gren_av": {
+   "name": "SCG-24",
+   "image": "/bf6/gadgets/gren_av.webp"
+  },
+  "gren_flash": {
+   "name": "闪光弹",
+   "image": "/bf6/gadgets/gren_flash.webp"
+  },
+  "gren_frag": {
+   "name": "破片手雷",
+   "image": "/bf6/gadgets/gren_frag.webp"
+  },
+  "gren_inc": {
+   "name": "燃烧手雷",
+   "image": "/bf6/gadgets/gren_inc.webp"
+  },
+  "gren_mfrag": {
+   "name": "迷你手雷",
+   "image": "/bf6/gadgets/gren_mfrag.webp"
+  },
+  "gren_smoke": {
+   "name": "烟雾弹",
+   "image": "/bf6/gadgets/gren_smoke.webp"
+  },
+  "gren_stun": {
+   "name": "眩晕弹",
+   "image": "/bf6/gadgets/gren_stun.webp"
+  },
+  "il_airburst": {
+   "name": "Sich G1 WP",
+   "image": "/bf6/gadgets/il_airburst.webp"
+  },
+  "ladder": {
+   "name": "Tarantula ALX",
+   "image": "/bf6/gadgets/ladder.webp"
+  },
+  "lancet": {
+   "name": "DGMK4 军备压制系统",
+   "image": "/bf6/gadgets/lancet.webp"
+  },
+  "laserdes": {
+   "name": "激光指示器",
+   "image": "/bf6/gadgets/laserdes.webp"
+  },
+  "mine_ap": {
+   "name": "M18A1",
+   "image": "/bf6/gadgets/mine_ap.webp"
+  },
+  "mine_mosen": {
+   "name": "PTKM-1R",
+   "image": "/bf6/gadgets/mine_mosen.webp"
+  },
+  "mine_press": {
+   "name": "M15",
+   "image": "/bf6/gadgets/mine_press.webp"
+  },
+  "mine_tws": {
+   "name": "M4A1 SLAM",
+   "image": "/bf6/gadgets/mine_tws.webp"
+  },
+  "mobilejammer": {
+   "name": "移动式干扰器",
+   "image": "/bf6/gadgets/mobilejammer.webp"
+  },
+  "mpaps": {
+   "name": "MP-APS",
+   "image": "/bf6/gadgets/mpaps.webp"
+  },
+  "msensor": {
+   "name": "动态传感器",
+   "image": "/bf6/gadgets/msensor.webp"
+  },
+  "recondrone": {
+   "name": "侦察无人机",
+   "image": "/bf6/gadgets/recondrone.webp"
+  },
+  "repair": {
+   "name": "修理工具",
+   "image": "/bf6/gadgets/repair.webp"
+  },
+  "rl_autogui": {
+   "name": "自动制导发射器",
+   "image": "/bf6/gadgets/rl_autogui.webp"
+  },
+  "rl_autoguide": {
+   "name": "自动制导发射器",
+   "image": "/bf6/gadgets/rl_autoguide.webp"
+  },
+  "rl_aimgui": {
+   "name": "M136 AT",
+   "image": "/bf6/gadgets/rl_aimgui.webp"
+  },
+  "rl_igla": {
+   "name": "9K38 IGLA",
+   "image": "/bf6/gadgets/rl_igla.webp"
+  },
+  "rl_longra": {
+   "name": "MAS 148 Glaive",
+   "image": "/bf6/gadgets/rl_longra.webp"
+  },
+  "rl_surtoair": {
+   "name": "SLM-93A",
+   "image": "/bf6/gadgets/rl_surtoair.webp"
+  },
+  "rl_ungui": {
+   "name": "RPG-7V2",
+   "image": "/bf6/gadgets/rl_ungui.webp"
+  },
+  "sup_bag": {
+   "name": "补给袋",
+   "image": "/bf6/gadgets/sup_bag.webp"
+  },
+  "sup_pouch": {
+   "name": "Goliath 紧凑型",
+   "image": "/bf6/gadgets/sup_pouch.webp"
+  },
+  "tknife": {
+   "name": "飞刀",
+   "image": "/bf6/gadgets/tknife.webp"
+  },
+  "tugs": {
+   "name": "战术无线地面传感器",
+   "image": "/bf6/gadgets/tugs.webp"
+  },
+  "ubsg_incen": {
+   "name": "SS26",
+   "image": "/bf6/gadgets/ubsg_incen.webp"
+  }
+ },
+ "maps": {
+  "ftpgranite": {
+   "name": "林登堡",
+   "image": "/bf6/maps/ftpgranite.webp"
+  },
+  "mpabbasid": {
+   "name": "开罗围城",
+   "image": "/bf6/maps/mpabbasid.webp"
+  },
+  "mpaftermath": {
+   "name": "帝国之州",
+   "image": "/bf6/maps/mpaftermath.webp"
+  },
+  "mpatoll": {
+   "name": "威克岛",
+   "image": "/bf6/maps/mpatoll.webp"
+  },
+  "mpbadlands": {
+   "name": "布莱克韦尔农场",
+   "image": "/bf6/maps/mpbadlands.webp"
+  },
+  "mpbattery": {
+   "name": "伊比利亚攻势",
+   "image": "/bf6/maps/mpbattery.webp"
+  },
+  "mpcapstone": {
+   "name": "解放峰",
+   "image": "/bf6/maps/mpcapstone.webp"
+  },
+  "mpcontaminated": {
+   "name": "污染",
+   "image": "/bf6/maps/mpcontaminated.webp"
+  },
+  "mpdrylake": {
+   "name": "51 区",
+   "image": "/bf6/maps/mpdrylake.webp"
+  },
+  "mpdumbo": {
+   "name": "曼哈顿大桥",
+   "image": "/bf6/maps/mpdumbo.webp"
+  },
+  "mpeastwood": {
+   "name": "东方木林",
+   "image": "/bf6/maps/mpeastwood.webp"
+  },
+  "mpfirestorm": {
+   "name": "火焰风暴行动",
+   "image": "/bf6/maps/mpfirestorm.webp"
+  },
+  "mpgolmund": {
+   "name": "格尔木铁路",
+   "image": "/bf6/maps/mpgolmund.webp"
+  },
+  "mpisolated": {
+   "name": "津留礁",
+   "image": "/bf6/maps/mpisolated.webp"
+  },
+  "mplimestone": {
+   "name": "圣徒区",
+   "image": "/bf6/maps/mplimestone.webp"
+  },
+  "mpoutskirts": {
+   "name": "新索贝克城",
+   "image": "/bf6/maps/mpoutskirts.webp"
+  },
+  "mpparadise": {
+   "name": "拉斯维加斯大道",
+   "image": "/bf6/maps/mpparadise.webp"
+  },
+  "mpplaza": {
+   "name": "开罗市集",
+   "image": "/bf6/maps/mpplaza.webp"
+  },
+  "mpsubsurface": {
+   "name": "哈根塔尔基地",
+   "image": "/bf6/maps/mpsubsurface.webp"
+  },
+  "mptungsten": {
+   "name": "米拉克山谷",
+   "image": "/bf6/maps/mptungsten.webp"
+  }
+ },
+ "modes": {
+  "brsquad": {
+   "name": "大逃杀 · 四人",
+   "image": "/bf6/mode-art/brsquad.webp"
+  },
+  "bt": {
+   "name": "突破",
+   "image": "/bf6/mode-art/bt.webp"
+  },
+  "carrier": {
+   "name": "航母突击",
+   "image": null
+  },
+  "cq": {
+   "name": "征服",
+   "image": "/bf6/mode-art/cq.webp"
+  },
+  "dom": {
+   "name": "抢攻",
+   "image": "/bf6/mode-art/dom.webp"
+  },
+  "esc": {
+   "name": "升级",
+   "image": "/bf6/mode-art/esc.webp"
+  },
+  "gntgauntlet": {
+   "name": "试炼场",
+   "image": "/bf6/mode-art/granite.webp"
+  },
+  "graniteDuo": {
+   "name": "大逃杀 · 双人",
+   "image": "/bf6/mode-art/granite.webp"
+  },
+  "graniteSolo": {
+   "name": "大逃杀 · 单人",
+   "image": "/bf6/mode-art/granite.webp"
+  },
+  "koth": {
+   "name": "山丘之王",
+   "image": "/bf6/mode-art/koth.webp"
+  },
+  "modbuilder0": {
+   "name": "门户",
+   "image": "/bf6/mode-art/modbuilder0.webp"
+  },
+  "oblit": {
+   "name": "歼灭",
+   "image": "/bf6/mode-art/oblit.webp"
+  },
+  "op": {
+   "name": "Operations",
+   "image": null
+  },
+  "rr_solo": {
+   "name": "快速大逃杀 · 单人",
+   "image": "/bf6/mode-art/granite.webp"
+  },
+  "rush": {
+   "name": "突袭",
+   "image": "/bf6/mode-art/rush.webp"
+  },
+  "sabotage": {
+   "name": "破坏",
+   "image": null
+  },
+  "sdm": {
+   "name": "小队死斗",
+   "image": "/bf6/mode-art/sdm.webp"
+  },
+  "spookyrush": {
+   "name": "Spooky Rush",
+   "image": null
+  },
+  "sqdoblit": {
+   "name": "战术歼灭",
+   "image": null
+  },
+  "strike": {
+   "name": "打击点",
+   "image": null
+  },
+  "tdm": {
+   "name": "团队死斗",
+   "image": "/bf6/mode-art/tdm.webp"
+  }
+ },
+ "kits": {
+  "assault": {
+   "name": "突击兵",
+   "image": "/bf6/classes/assault-wide.webp"
+  },
+  "engineer": {
+   "name": "工程兵",
+   "image": "/bf6/classes/engineer-wide.webp"
+  },
+  "support": {
+   "name": "支援兵",
+   "image": "/bf6/classes/support-wide.webp"
+  },
+  "recon": {
+   "name": "侦察兵",
+   "image": "/bf6/classes/recon-wide.webp"
+  }
+ },
+ "weapon_categories": {
+  "ar": {
+   "name": "突击步枪"
+  },
+  "crb": {
+   "name": "卡宾枪"
+  },
+  "smg": {
+   "name": "冲锋枪"
+  },
+  "mg": {
+   "name": "机枪"
+  },
+  "snp": {
+   "name": "狙击步枪"
+  },
+  "dmr": {
+   "name": "精准射手步枪"
+  },
+  "sg": {
+   "name": "霰弹枪"
+  },
+  "pst": {
+   "name": "手枪"
+  }
+ },
+ "vehicle_categories": {
+  "air": {
+   "name": "空中载具"
+  },
+  "air_helis": {
+   "name": "直升机"
+  },
+  "air_jets": {
+   "name": "喷气机"
+  },
+  "sur": {
+   "name": "地面载具"
+  },
+  "nav": {
+   "name": "海上载具"
+  }
+ }
+}
