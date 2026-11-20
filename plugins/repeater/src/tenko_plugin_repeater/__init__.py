@@ -6,17 +6,20 @@
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 
 import aiohttp
 from arclet.entari import BasicConfModel, MessageCreatedEvent, Session, plugin
 from arclet.entari.config import EntariConfig, model_field
 from loguru import logger
-from satori import Emoji, Image, Text
+from satori import Emoji, EventType, Image, Text
+from satori.client import Account, get_app
 from satori.element import Custom, Message
+from satori.model import Event
 from tenko_api.accounts import online_accounts
 from tenko_api.features import declare, feature_required
 
-from .chain import Repeater, Said, Settings
+from .chain import Group, MessageOrder, Repeater, Said, Settings
 
 
 class RepeaterConfig(BasicConfModel):
@@ -41,7 +44,7 @@ class RepeaterConfig(BasicConfModel):
 plugin.metadata(
     "复读机",
     author=["13"],
-    version="0.3.0",
+    version="0.3.1",
     description="群友复读时偶尔跟一句，偶尔打断一下。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/repeater",
@@ -134,20 +137,54 @@ def parse(elements: list, user: str, max_length: int) -> Said | None:
     return Said(user, joined, send, text=content)
 
 
+message_order: defaultdict[Group, MessageOrder] = defaultdict(MessageOrder)
+
+
+def _message_key(event: Event, message_id: str) -> int | str:
+    # NapCat 的 message_id 随接收账号变化，real_seq 是 QQ 的群消息序号。
+    sequence = str((event._data or {}).get("real_seq", ""))
+    return int(sequence) if sequence.isdecimal() else message_id
+
+
+async def observe_message(_account: Account, event: Event) -> None:
+    if event.type != EventType.MESSAGE_CREATED or event.guild is None:
+        return
+    if event.channel is not None and event.message is not None:
+        group = (event.login.platform, event.channel.id)
+        message_order[group].record(_message_key(event, event.message.id))
+
+
+# 只记消息的顺序。Tenko 过滤的消息和 Entari 还在取引用的消息也会占一个位置。
+app = get_app()
+app.event_callbacks.insert(0, observe_message)
+plugin.collect_disposes(lambda: app.event_callbacks.remove(observe_message))
+
+
 @plugin.listen(MessageCreatedEvent)
 @feature_required()
 async def on_message(session: Session[MessageCreatedEvent]):
-    if session.event.guild is None:  # 只在群聊复读
+    event = session.event
+    if event.guild is None:
         return
-    user_id, group_id = session.user.id, session.event.channel.id
-    # 同一个群里的其他 Tenko 账号发的消息不算群友复读。
-    if user_id in {str(account.self_id) for account in online_accounts()}:
-        return
-    said = parse(list(session.event.message.message), user_id, config.max_length)
-    if said is None:
-        repeater.forget(group_id)
-        return
-    reply = await repeater.feed(group_id, said)
+    group = (event.login.platform, event.channel.id)
+    order = message_order[group]
+    async with order.lock:  # 查图片内容时，同群后续消息也按顺序更新复读状态
+        consecutive = order.advance(_message_key(event._origin, event.message.id))
+        if consecutive is None:
+            return
+
+        user_id = session.user.id
+        # 其他 Tenko 账号的消息可以打断复读。
+        own_account = user_id in {str(account.self_id) for account in online_accounts()}
+        said = (
+            None if own_account else parse(list(event.message.message), user_id, config.max_length)
+        )
+        if not consecutive or said is None:
+            repeater.forget(group)
+        if said is None:
+            return
+        reply = await repeater.feed(group, said)
+
     if reply:
         # 复读不引用原消息：宿主只给“对触发消息的回复”补引用，包在独立的 <message> 里就会跳过。
         await session.send([Message(content=reply)])

@@ -7,12 +7,57 @@ from __future__ import annotations
 
 import random
 import time
+from asyncio import Lock
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 # 拉取图片并返回内容摘要；拉不到时返回 None，这条消息就不会被当成复读。
 Digest = Callable[[str], Awaitable[str | None]]
+
+
+Group = tuple[str, str]
+
+
+@dataclass(slots=True)
+class MessageOrder:
+    """用原始群消息的顺序判断两个已放行的事件是否相邻。"""
+
+    lock: Lock = field(default_factory=Lock)
+    _received: dict[int | str, int] = field(default_factory=dict)
+    _latest: int = 0
+    _processed: int = 0
+    _processed_sequence: int | None = None
+
+    def record(self, message: int | str) -> None:
+        # 同一条群消息可能通过多个登录账号收到。
+        if message in self._received:
+            return
+        self._latest += 1
+        self._received[message] = self._latest
+        if len(self._received) > 64:
+            self._received.pop(next(iter(self._received)))
+
+    def advance(self, message: int | str) -> bool | None:
+        position = self._received.get(message)
+        if position is None:
+            return None
+
+        sequence = message if isinstance(message, int) else None
+        previous = self._processed_sequence
+        if sequence is not None and previous is not None:
+            # OneBot 补查群和成员信息时可能乱序，QQ 的群消息序号优先。
+            if sequence <= previous:
+                return None
+            consecutive = sequence == previous + 1
+        else:
+            if position <= self._processed:
+                return None
+            consecutive = sequence == previous and position == self._processed + 1
+
+        self._processed = max(self._processed, position)
+        self._processed_sequence = sequence
+        return consecutive
 
 
 @dataclass(slots=True)
@@ -59,16 +104,16 @@ class Repeater:
         self.digest = digest
         self.rng = rng or random.Random()
         self.clock = clock
-        self.runs: dict[str, Run] = {}
-        self.cooldown_until: dict[str, float] = {}
+        self.runs: dict[Group, Run] = {}
+        self.cooldown_until: dict[Group, float] = {}
         self._digests: dict[str, str | None] = {}
 
-    def forget(self, group: str) -> None:
-        """不能参与复读的消息（命令、长文、转发等）把这一串断开。"""
+    def forget(self, group: Group) -> None:
+        """中间有其他消息时断开这一串。"""
 
         self.runs.pop(group, None)
 
-    async def feed(self, group: str, said: Said) -> list[Any] | None:
+    async def feed(self, group: Group, said: Said) -> list[Any] | None:
         """记下一条消息；需要出声时返回要发送的元素。"""
 
         run = self.runs.get(group)

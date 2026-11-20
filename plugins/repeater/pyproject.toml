@@ -1,6 +1,6 @@
 [project]
 name = "tenko-plugin-repeater"
-version = "0.3.0"
+version = "0.3.1"
 description = "Tenko 复读机：群友复读时偶尔跟一句，偶尔打断一下"
 readme = "README.md"
 license = "GPL-3.0-only"
