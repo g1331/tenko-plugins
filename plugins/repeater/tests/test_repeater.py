@@ -1,6 +1,8 @@
 import asyncio
 import random
+import sys
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -55,6 +57,15 @@ def make(chain, rng, *, digest=None, now=None):
 
 def said(chain, user, text="草"):
     return chain.Said(user, text, [text], text=text)
+
+
+def test_plugin_passes_host_import_check_without_satori_app(tmp_path):
+    import tenko
+    from tenko.host.updater import DefaultHealthChecker
+
+    checker = DefaultHealthChecker(python_executable=sys.executable, stable_root=tmp_path)
+    result = checker._import_check_sync(Path(tenko.__file__).resolve().parent.parent, ["repeater"])
+    assert result.ok, result.reason
 
 
 async def test_plugin_loads_and_is_on_by_default_in_new_groups(runtime, module):

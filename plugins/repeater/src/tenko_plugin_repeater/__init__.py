@@ -44,7 +44,7 @@ class RepeaterConfig(BasicConfModel):
 plugin.metadata(
     "复读机",
     author=["13"],
-    version="0.3.1",
+    version="0.3.2",
     description="群友复读时偶尔跟一句，偶尔打断一下。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/repeater",
@@ -154,10 +154,18 @@ async def observe_message(_account: Account, event: Event) -> None:
         message_order[group].record(_message_key(event, event.message.id))
 
 
-# 只记消息的顺序。Tenko 过滤的消息和 Entari 还在取引用的消息也会占一个位置。
-app = get_app()
-app.event_callbacks.insert(0, observe_message)
-plugin.collect_disposes(lambda: app.event_callbacks.remove(observe_message))
+def _register_message_observer() -> None:
+    try:
+        app = get_app()
+    except RuntimeError:
+        return  # 宿主的子进程只检查导入，未创建 Satori 应用。
+
+    # Tenko 过滤的消息和 Entari 还在取引用的消息也会占一个位置。
+    app.event_callbacks.insert(0, observe_message)
+    plugin.collect_disposes(lambda: app.event_callbacks.remove(observe_message))
+
+
+_register_message_observer()
 
 
 @plugin.listen(MessageCreatedEvent)
