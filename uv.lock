@@ -1369,7 +1369,7 @@ requires-dist = [
 
 [[package]]
 name = "tenko-plugin-repeater"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "plugins/repeater" }
 dependencies = [
     { name = "aiohttp" },
