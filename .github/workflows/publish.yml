@@ -86,7 +86,7 @@ jobs:
           for _ in $(seq 60); do
             if curl -fsS "https://pypi.org/pypi/${PACKAGE}/json" \
                 | python3 -c "import json, sys; sys.exit(sys.argv[1] not in json.load(sys.stdin)['releases'])" "$VERSION" \
-              && pip download --no-deps --no-cache-dir -q -d /tmp/probe "${PACKAGE}==${VERSION}"; then
+              && pip download --no-deps --no-cache-dir --ignore-requires-python -q -d /tmp/probe "${PACKAGE}==${VERSION}"; then
               exit 0
             fi
             sleep 10
