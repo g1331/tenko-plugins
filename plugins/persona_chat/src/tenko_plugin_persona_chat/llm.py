@@ -250,18 +250,23 @@ def is_gemini(client: httpx.AsyncClient, model: str = "") -> bool:
     return host.endswith("googleapis.com") or name.startswith("gemini-")
 
 
+# 支持 reasoning_effort="minimal" 的早期 Gemini 3.x Flash（3.8 Flash 起最低 low）。
+_GEMINI_MINIMAL = ("gemini-3-flash", "gemini-3.1-flash", "gemini-3.5-flash", "gemini-3.6-flash")
+_GEMINI_EFFORTS = ("none", "minimal", "low", "medium", "high")
+
+
 def _gemini_no_think(model: str) -> tuple[str, int]:
     """Gemini 关/最小化思考时的 (reasoning_effort, 额外 max_tokens 余量)。
 
-    Gemini 2.5 Flash / Flash-Lite 支持 ``none`` 彻底关闭思考；Gemini 3.x Flash 系列最低
-    ``minimal``，Pro 和 4.x 最低 ``low``。思考 token 会占用 ``max_tokens``，不能彻底关闭时
-    给输出留出余量，免得 JSON 或短回复被思考挤空。
+    Gemini 2.5 Flash / Flash-Lite 支持 ``none`` 彻底关闭思考；早期 Gemini 3.x Flash 支持
+    ``minimal``；Gemini 3.8 Flash、Pro 及更新型号最低 ``low``。思考 token 会占用 ``max_tokens``，
+    不能彻底关闭时给输出留出余量，免得 JSON 或短回复被思考挤空。
     """
 
     name = model.lower().removeprefix("google/")
     if name.startswith("gemini-2.5-flash"):
         return "none", 0
-    if name.startswith("gemini-3") and "flash" in name:
+    if name.startswith(_GEMINI_MINIMAL):
         return "minimal", 512
     return "low", 1024
 
@@ -272,16 +277,10 @@ def _gemini_effort(model: str, effort: str) -> str:
     level = effort.strip().lower()
     if level == "max":
         level = "high"
-    if level not in ("none", "minimal", "low", "medium", "high"):
+    if level not in _GEMINI_EFFORTS:
         level = "low"
-    name = model.lower().removeprefix("google/")
-    if level == "none" and not name.startswith("gemini-2.5-flash"):
-        level = "minimal" if (name.startswith("gemini-3") and "flash" in name) else "low"
-    if level == "minimal" and not (
-        name.startswith("gemini-2.5-flash") or (name.startswith("gemini-3") and "flash" in name)
-    ):
-        level = "low"
-    return level
+    floor, _ = _gemini_no_think(model)
+    return floor if _GEMINI_EFFORTS.index(level) < _GEMINI_EFFORTS.index(floor) else level
 
 
 def _disable_thinking(client: httpx.AsyncClient, model: str, max_tokens: int) -> dict[str, Any]:
@@ -385,6 +384,15 @@ def _usage(data: dict[str, Any]) -> dict[str, Any]:
 SIDE_TOOLS = ("save_sticker", "edit_sticker", "delete_sticker", "remind", "cancel_reminder")
 # 思考的 token 也算在 max_tokens 里；给它另留一份，不然想完了没字数说话。
 _THINK_TOKENS = 2048
+# 思考模式下（tool_choice=auto），DeepSeek 偶尔把格式写歪的工具调用直接吐进正文（11-16 的
+# <parameter name="scene">…</parameter>、11-24 的 <stay_silent scene="…"/>），
+# 服务端解析不出 tool_calls 就原样落进 content：认出来后不当成要发到群里的话。
+_TOOL_NAMES = "|".join(re.escape(t["function"]["name"]) for t in TOOLS)
+_LEAKED_TOOL = re.compile(
+    rf"<\s*/?\s*(?:{_TOOL_NAMES}|parameter|invoke|tool_call|function_calls?|｜DSML｜)\b"
+    rf"|\b(?:{_TOOL_NAMES})\s*\(",
+    re.I,
+)
 
 
 async def _chat(
@@ -456,6 +464,9 @@ async def _chat(
     usage = _usage(data)
     if not (effort and said and not any("tool" not in c for c in calls)):
         return calls, usage, False
+    if _LEAKED_TOOL.search(said):
+        logger.info("AI群友把工具调用写进了正文，不当成要说的话：{}", " ".join(said.split())[:150])
+        return calls, usage, True
     # DeepSeek 官方把思考放在 reasoning_content，OpenRouter 放在 reasoning：11-05 换到 OpenRouter
     # 后只认前者，每次都当成没想，次次重问。Gemini 兼容端点默认不返回思考原文，不算思考为空。
     thought = message.get("reasoning_content") or message.get("reasoning") or ""

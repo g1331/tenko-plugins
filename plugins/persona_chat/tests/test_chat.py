@@ -720,6 +720,22 @@ async def test_gemini_openai_endpoint_strips_deepseek_thinking_and_uses_reasonin
             text="早",
         )
         await module.llm.summarize(c, model="gemini-2.5-flash", messages=messages, max_tokens=1000)
+        await module.llm.pick_sticker(
+            c,
+            model="gemini-3.8-flash",
+            prompt="挑图",
+            catalog="猫猫：震惊",
+            recent="甲：早",
+            text="早",
+        )
+        await module.llm.chat(
+            c,
+            model="gemini-3.8-flash",
+            messages=messages,
+            force=False,
+            max_tokens=300,
+            effort="minimal",
+        )
 
     assert calls == [{"text": "在呢"}]
     assert usage["prompt_cache_hit_tokens"] == 1800 and usage["prompt_cache_miss_tokens"] == 200
@@ -739,6 +755,49 @@ async def test_gemini_openai_endpoint_strips_deepseek_thinking_and_uses_reasonin
     # Gemini 2.5 Flash 辅助请求：支持 none 彻底关闭思考
     _, p2 = payloads[2]
     assert "thinking" not in p2 and p2["reasoning_effort"] == "none" and p2["max_tokens"] == 1000
+
+    # Gemini 3.8 Flash 不支持 minimal（会 400）：辅助请求和 minimal 配置都收口到 low
+    _, p3 = payloads[3]
+    assert "thinking" not in p3 and p3["reasoning_effort"] == "low" and p3["max_tokens"] > 150
+    _, p4 = payloads[4]
+    assert p4["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize(
+    "leaked",
+    [
+        '<stay_silent scene="hyazinthensamen和msc4798在刷*s查服，没人跟我说话"/>',
+        '<parameter name="scene">lin·在回答bf6武器推荐，没人叫我</parameter>',
+        'stay_silent(scene="没人叫我")',
+    ],
+)
+async def test_leaked_tool_markup_in_content_is_never_sent(module, leaked):
+    import httpx
+
+    payloads = []
+
+    def reply(request):
+        payloads.append(request)
+        if len(payloads) == 1:
+            message = {"content": leaked, "reasoning_content": "可以静默"}
+        else:
+            call = {"function": {"name": "send_message", "arguments": '{"text": "在"}'}}
+            message = {"tool_calls": [call]}
+        return httpx.Response(200, json={"choices": [{"message": message}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        # 非强制场景：直接丢弃并沉默，不再花钱重问
+        calls, _ = await module.llm.chat(
+            c, model="m", messages=[], force=False, max_tokens=9, effort="high"
+        )
+        assert calls == [] and len(payloads) == 1
+
+        # 强制回复场景：丢弃歪掉的工具标签，降级强制说话再问一次
+        payloads.clear()
+        calls, _ = await module.llm.chat(
+            c, model="m", messages=[], force=True, max_tokens=9, effort="high"
+        )
+        assert calls == [{"text": "在"}] and len(payloads) == 2
 
 
 def test_slang_counts_short_lines_several_people_send(chat):

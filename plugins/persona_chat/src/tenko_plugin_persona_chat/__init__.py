@@ -177,7 +177,7 @@ class PersonaChatConfig(BasicConfModel):
 plugin.metadata(
     "AI群友",
     author=["13"],
-    version="0.1.53",
+    version="0.1.54",
     description="接入 DeepSeek，用人设口吻陪群友聊天，预置“大肥鱼”“小埋”。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/persona_chat",
@@ -2054,6 +2054,13 @@ async def _add_sticker(
             avoid=[n for n in sticker_book.index() if not _can_send(conversation, n, window)],
             **({"changes": changes} if changes else {}),
         )
+    except httpx.HTTPStatusError as error:
+        logger.warning(
+            "AI群友挑表情包失败：HTTP {} {}",
+            error.response.status_code,
+            error.response.text[:200],
+        )
+        return
     except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
         logger.debug("AI群友挑表情包失败：{!r}", error)  # 挑不出来就只说话
         return
