@@ -242,6 +242,57 @@ CANCEL_REMINDER = {
 FORCE_SEND = {"type": "function", "function": {"name": "send_message"}}
 
 
+def is_gemini(client: httpx.AsyncClient, model: str = "") -> bool:
+    """走 Google AI Studio 的 OpenAI 兼容端点，或直接指名 Gemini 模型。"""
+
+    host = (client.base_url.host or "").lower()
+    name = model.lower().removeprefix("google/")
+    return host.endswith("googleapis.com") or name.startswith("gemini-")
+
+
+def _gemini_no_think(model: str) -> tuple[str, int]:
+    """Gemini 关/最小化思考时的 (reasoning_effort, 额外 max_tokens 余量)。
+
+    Gemini 2.5 Flash / Flash-Lite 支持 ``none`` 彻底关闭思考；Gemini 3.x Flash 系列最低
+    ``minimal``，Pro 和 4.x 最低 ``low``。思考 token 会占用 ``max_tokens``，不能彻底关闭时
+    给输出留出余量，免得 JSON 或短回复被思考挤空。
+    """
+
+    name = model.lower().removeprefix("google/")
+    if name.startswith("gemini-2.5-flash"):
+        return "none", 0
+    if name.startswith("gemini-3") and "flash" in name:
+        return "minimal", 512
+    return "low", 1024
+
+
+def _gemini_effort(model: str, effort: str) -> str:
+    """把配置里的思考强度换算成 Gemini OpenAI 兼容端点接受的值。"""
+
+    level = effort.strip().lower()
+    if level == "max":
+        level = "high"
+    if level not in ("none", "minimal", "low", "medium", "high"):
+        level = "low"
+    name = model.lower().removeprefix("google/")
+    if level == "none" and not name.startswith("gemini-2.5-flash"):
+        level = "minimal" if (name.startswith("gemini-3") and "flash" in name) else "low"
+    if level == "minimal" and not (
+        name.startswith("gemini-2.5-flash") or (name.startswith("gemini-3") and "flash" in name)
+    ):
+        level = "low"
+    return level
+
+
+def _disable_thinking(client: httpx.AsyncClient, model: str, max_tokens: int) -> dict[str, Any]:
+    """辅助请求（摘要、整理档案、挑表情包）关闭或最小化思考时的接口参数。"""
+
+    if is_gemini(client, model):
+        level, pad = _gemini_no_think(model)
+        return {"reasoning_effort": level, "max_tokens": max_tokens + pad}
+    return {"thinking": {"type": "disabled"}, "max_tokens": max_tokens}
+
+
 def content_risk(error: httpx.HTTPStatusError) -> bool:
     """DeepSeek 的内容审核拒绝了这次请求：触发的内容留在记录里，以后每次请求都会被拒。"""
 
@@ -258,8 +309,7 @@ async def summarize(
         json={
             "model": model,
             "messages": messages,
-            "thinking": {"type": "disabled"},
-            "max_tokens": max_tokens,
+            **_disable_thinking(client, model, max_tokens),
         },
     )
     response.raise_for_status()
@@ -294,12 +344,13 @@ async def chat(
 
     ``effort`` 是思考强度（low/high/max），空的不思考。思考时接口只认 ``tool_choice=auto``，
     模型常把要说的话直接写进 content：没调 send_message 时 content 就当要说的话，
-    否则 content 丢弃。``force`` 时思考完还是没开口，就不思考、强制只能说话再问一次；
-    content 是她把思考写错了地方时（见 :func:`_chat`），不思考、只能用工具再问一次。
+    否则 content 丢弃。``force`` 时思考完还是没开口（含思考为空时正文被当成盘算丢弃），
+    就不思考、强制只能说话再问一次；非 ``force`` 时思考为空直接不说话，避免切换非思考模式
+    重问打断带图历史的 KV 缓存（生产实测非强制空思考重问近七成最终沉默，每次白 miss 15k–25k）。
     """
 
     calls, usage, aloud = await _chat(client, model, messages, force, max_tokens, effort)
-    if effort and (force or aloud) and not any("tool" not in c for c in calls):
+    if effort and force and not any("tool" not in c for c in calls):
         kept = [c for c in calls if c["tool"] in SIDE_TOOLS]
         again, more, _ = await _chat(client, model, messages, force, max_tokens, "")
         calls = kept + again
@@ -307,6 +358,8 @@ async def chat(
             **more,
             **{k: usage.get(k, 0) + more.get(k, 0) for k in _BILLED if k in usage or k in more},
         }
+    elif effort and aloud:
+        calls = [c for c in calls if c.get("tool") in SIDE_TOOLS]
     return calls, usage
 
 
@@ -344,13 +397,24 @@ async def _chat(
 ) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
     """第三项为真：思考时她没调 send_message、思考是空的，content 当成她的思考，没当成要说的话。"""
 
+    gemini = is_gemini(client, model)
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "tools": TOOLS,
         "max_tokens": max_tokens,
     }
-    if effort:
+    if gemini:
+        # Gemini OpenAI 兼容端点不认 DeepSeek 的 thinking 字段，且开启思考时也支持强制工具调用。
+        payload["tool_choice"] = FORCE_SEND if force else "required"
+        if effort:
+            payload |= {
+                "reasoning_effort": _gemini_effort(model, effort),
+                "max_tokens": max_tokens + _THINK_TOKENS,
+            }
+        else:
+            payload |= _disable_thinking(client, model, max_tokens)
+    elif effort:
         payload |= {
             "messages": _with_reasoning(messages),
             "thinking": {"type": "enabled"},
@@ -393,17 +457,18 @@ async def _chat(
     if not (effort and said and not any("tool" not in c for c in calls)):
         return calls, usage, False
     # DeepSeek 官方把思考放在 reasoning_content，OpenRouter 放在 reasoning：11-05 换到 OpenRouter
-    # 后只认前者，每次都当成没想，次次重问。
+    # 后只认前者，每次都当成没想，次次重问。Gemini 兼容端点默认不返回思考原文，不算思考为空。
     thought = message.get("reasoning_content") or message.get("reasoning") or ""
     thought = " ".join(thought.split())[:150]
-    if not thought:
+    if not thought and not gemini:
         # 思考是空的，content 多半就是她的思考：11-05 她把“这个话题我插不上什么，可以短回一句
         # ……stay_silent也行”整段写进 content，拆成两条发到了群里。思考为空时她本来也没想，
         # 交给不思考、只能用工具的那次重问，不丢什么（这类回复约占两成，多是单发一张表情包）。
         logger.info("AI群友思考是空的，正文不当成要说的话：{}", " ".join(said.split())[:150])
         return calls, usage, True
     # 思考模式下她常直接写字、不调 send_message，也就没填 scene：拿思考的开头当她看到的场面。
-    calls.extend(_quoted({"text": said, "scene": f"（想）{thought}"}))
+    scene = f"（想）{thought}" if thought else ""
+    calls.extend(_quoted({"text": said, **({"scene": scene} if scene else {})}))
     return calls, usage, False
 
 
@@ -459,9 +524,8 @@ async def digest(
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": text},
             ],
-            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
-            "max_tokens": 1500,
+            **_disable_thinking(client, model, 1500),
         },
     )
     response.raise_for_status()
@@ -482,13 +546,16 @@ async def pick_sticker(
     recent: str,
     text: str,
     avoid: list[str] | None = None,
+    changes: str = "",
 ) -> tuple[list[tuple[str, int]], dict[str, Any]]:
     """给要发的话挑几张候选的收藏表情包：返回 ([(名字, 贴切程度 1-5)], usage)。
 
-    ``avoid`` 是最近刚发过的，写进每次都变的那条里，不打断目录的前缀缓存。
+    ``avoid`` 和当天快照后的增删 ``changes`` 写进每次都变的那条里，不打断目录的前缀缓存。
     """
 
     ask = f"最近几条：\n{recent}\n\n你要发的话：\n{text}"
+    if changes:
+        ask += f"\n\n{changes}"
     if avoid:
         ask += f"\n\n这几张你刚发过，这次别挑：{'、'.join(avoid)}"
 
@@ -502,9 +569,8 @@ async def pick_sticker(
                 {"role": "system", "content": catalog},
                 {"role": "user", "content": ask},
             ],
-            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
-            "max_tokens": 150,
+            **_disable_thinking(client, model, 150),
         },
     )
     response.raise_for_status()

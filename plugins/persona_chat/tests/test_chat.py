@@ -130,6 +130,68 @@ def test_cost_reported_upstream_is_used_as_is(chat):
     assert chat.estimate_cost(usage, datetime(2026, 10, 23, 2, tzinfo=UTC)) == 0.0123
 
 
+def test_openrouter_price_book_parses_and_estimates_without_hardcoding(chat):
+    payload = {
+        "data": [
+            {
+                "id": "google/gemini-4-hydrogen:batch",
+                "pricing": {
+                    "prompt": "0.00000075",
+                    "input_cache_read": "0.0000000375",
+                    "completion": "0.00000375",
+                },
+            },
+            {
+                "id": "google/gemini-4-hydrogen",
+                "pricing": {
+                    "prompt": "0.0000015",
+                    "input_cache_read": "0.000000075",
+                    "completion": "0.0000075",
+                },
+            },
+            {
+                "id": "google/gemini-3-flash-preview",
+                "pricing": {
+                    "prompt": "0.0000005",
+                    "input_cache_read": "0.00000005",
+                    "completion": "0.000003",
+                },
+            },
+            {"id": "broken/model", "pricing": {"prompt": "-1", "completion": "0"}},
+        ]
+    }
+    models = chat.parse_openrouter_prices(payload)
+    book = chat.PriceBook(MemoryStore())
+    assert book.stale(now=1000)
+    book.update(models, now=1000)
+    assert not book.stale(now=1000 + 3600) and book.stale(now=1000 + 86400)
+    # 裸名命中标准价，不被先出现的 :batch 覆盖
+    assert book.lookup("gemini-4-hydrogen") == (1.5, 0.075, 7.5)
+    assert book.lookup("google/gemini-3-flash-preview") == (0.5, 0.05, 3.0)
+    assert book.lookup("broken/model") is None
+
+    usage = {
+        "prompt_cache_miss_tokens": 1_000_000,
+        "prompt_cache_hit_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+    }
+    friday_peak = datetime(2026, 10, 23, 2, tzinfo=UTC)
+    assert chat.estimate_cost(
+        usage, friday_peak, book.lookup("gemini-4-hydrogen")
+    ) == pytest.approx(1.5 + 0.075 + 7.5)
+    assert chat.estimate_cost(usage, friday_peak, ()) == 0.0
+
+
+def test_build_messages_can_put_trailing_hint_as_user_for_gemini(chat):
+    conversation = chat.Conversation()
+    conversation.add("m1", "甲(1)", "早")
+    messages = chat.build_messages("人设", conversation, "末尾提示", hint_role="user")
+    assert messages[-1] == {"role": "user", "content": "[系统提示]\n末尾提示"}
+    # context_parts 不把末尾提示重复算进原文
+    parts = chat.context_parts("人设", "[]", conversation, "", "末尾提示")
+    assert parts["原文"] > 0 and parts["末尾提示"] > 0
+
+
 def test_usage_book_counts_per_key_and_globally_and_keeps_a_week(chat):
     book = chat.UsageBook(MemoryStore())
     usage = {"prompt_cache_miss_tokens": 10, "prompt_cache_hit_tokens": 5, "completion_tokens": 3}
@@ -582,13 +644,101 @@ async def test_thinking_written_into_content_is_not_said(module):
         calls, _ = await module.llm.chat(
             c, model="m", messages=[], force=False, max_tokens=9, effort="high"
         )
-    # 不思考、只能用工具再问一次；没被叫到，照样可以选不说话
+    # 非强制场景下思考为空：不把正文当成要说的话发出去，也不切非思考重问（避免打断整段历史缓存）
+    assert len(payloads) == 1
+    assert calls == [{"name": "难绷", "tool": "save_sticker"}]
+
+    payloads.clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url="http://x") as c:
+        calls, _ = await module.llm.chat(
+            c, model="m", messages=[], force=True, max_tokens=9, effort="high"
+        )
+    # 强制回复时仍切到不思考、强制说话再问一次
+    assert len(payloads) == 2
     assert payloads[1]["thinking"] == {"type": "disabled"}
-    assert payloads[1]["tool_choice"] == "required"
+    assert payloads[1]["tool_choice"]["function"]["name"] == "send_message"
     assert calls == [
         {"name": "难绷", "tool": "save_sticker"},
         {"scene": "在聊车皮", "to": 3, "text": "雪地图白车皮藏得住"},
     ]
+
+
+def test_skipped_old_pictures_are_not_backfilled_on_later_turns(chat):
+    conversation = chat.Conversation(10)
+    old = conversation.add("m1", "甲(1)", "[图片]", ("u1",))
+    mid = conversation.add("m2", "乙(2)", "[图片]", ("u2",))
+    # 第一轮预算 1 张：只看了 #2，#1 以纯文字发过（asked=2）
+    assert conversation.with_images(1) == [mid]
+    mid.shown = True
+    conversation.asked = 2
+    # 第二轮来了纯文字 #3：预算虽有富余，也不能把 #1 补插进历史，否则从 #1 起断缓存
+    conversation.add("m3", "丙(3)", "哈哈")
+    assert conversation.with_images(5) == [mid]
+    assert old not in conversation.with_images(5)
+
+
+async def test_gemini_openai_endpoint_strips_deepseek_thinking_and_uses_reasoning_effort(module):
+    import json
+
+    import httpx
+
+    payloads = []
+
+    def reply(request):
+        payloads.append((str(request.url), json.loads(request.content)))
+        call = {"function": {"name": "send_message", "arguments": '{"text": "在呢"}'}}
+        usage = {
+            "prompt_tokens": 2000,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 1800},
+        }
+        return httpx.Response(
+            200, json={"choices": [{"message": {"tool_calls": [call]}}], "usage": usage}
+        )
+
+    base = "https://generativelanguage.googleapis.com/v1beta/openai"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply), base_url=base) as c:
+        messages = [
+            {"role": "system", "content": "人设"},
+            {"role": "user", "content": "#1 [甲] 在吗"},
+            {"role": "assistant", "content": "在"},
+        ]
+        calls, usage = await module.llm.chat(
+            c,
+            model="gemini-3.1-flash-lite",
+            messages=messages,
+            force=False,
+            max_tokens=300,
+            effort="max",
+        )
+        await module.llm.pick_sticker(
+            c,
+            model="gemini-3.1-flash-lite",
+            prompt="挑图",
+            catalog="猫猫：震惊",
+            recent="甲：早",
+            text="早",
+        )
+        await module.llm.summarize(c, model="gemini-2.5-flash", messages=messages, max_tokens=1000)
+
+    assert calls == [{"text": "在呢"}]
+    assert usage["prompt_cache_hit_tokens"] == 1800 and usage["prompt_cache_miss_tokens"] == 200
+
+    # 主对话：不带 DeepSeek 的 thinking / reasoning_content，强制工具照常生效，max 映射成 high
+    url0, p0 = payloads[0]
+    assert url0 == f"{base}/chat/completions"
+    assert "thinking" not in p0
+    assert "reasoning_content" not in p0["messages"][-1]
+    assert p0["reasoning_effort"] == "high"
+    assert p0["tool_choice"] == "required"
+
+    # Gemini 3.1 Flash-Lite 辅助请求：不能传 none，用 minimal 并给 max_tokens 留余量
+    _, p1 = payloads[1]
+    assert "thinking" not in p1 and p1["reasoning_effort"] == "minimal" and p1["max_tokens"] > 150
+
+    # Gemini 2.5 Flash 辅助请求：支持 none 彻底关闭思考
+    _, p2 = payloads[2]
+    assert "thinking" not in p2 and p2["reasoning_effort"] == "none" and p2["max_tokens"] == 1000
 
 
 def test_slang_counts_short_lines_several_people_send(chat):

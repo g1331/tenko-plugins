@@ -26,16 +26,18 @@ def fake_llm(module, monkeypatch):
         return fake.replies.pop(0) if fake.replies else [], {"completion_tokens": 7}
 
     monkeypatch.setattr(module.llm, "chat", chat)
-    # 单独挑表情包：每次要返回的候选 [(名字, 分数)]、问过的话、叫它别挑的
-    fake.picks, fake.picked, fake.avoided = [], [], []
+    # 单独挑表情包：每次要返回的候选 [(名字, 分数)]、问过的话、叫它别挑的、目录增量
+    fake.picks, fake.picked, fake.avoided, fake.sticker_changes = [], [], [], []
 
-    async def pick_sticker(client, *, model, prompt, catalog, recent, text, avoid=None):
+    async def pick_sticker(client, *, model, prompt, catalog, recent, text, avoid=None, changes=""):
         fake.picked.append(text)
         fake.avoided.append(avoid or [])
+        fake.sticker_changes.append(changes)
         return (fake.picks.pop(0) if fake.picks else []), {}
 
     monkeypatch.setattr(module.llm, "pick_sticker", pick_sticker)
     module.conversations.clear()
+    module._sticker_day = None
     module._cooldowns.clear()
     module._streaks.clear()
     module._talks.clear()
@@ -58,6 +60,8 @@ def fake_llm(module, monkeypatch):
     module._calls.clear()
     module._considered.clear()
     module.usage_book.store.save({})
+    module.price_book.store.save({})
+    module._price_retry_at = float("inf")
     module.sticker_book.store.save({})
     module.sticker_book.bans.save([])
     module.chat_store.save({})
@@ -255,10 +259,14 @@ async def test_typed_at_of_a_window_speaker_becomes_a_real_at(module, fake_llm):
 
 async def test_lookalike_names_are_pointed_out(module, fake_llm):
     await feed(module, session([Text("在")], user="9", message_id="m1"))
-    assert "不是你" not in module.conversations["group:100"].place
-    module.conversations["group:100"].lines[-1].speaker = "大肥鱼bot(9)"
-    await feed(module, session([Text("嗯")], user="7", message_id="m2"))
-    assert "群里的 大肥鱼bot(9) 名字和你像，但不是你" in module.conversations["group:100"].place
+    conversation = module.conversations["group:100"]
+    place_before = conversation.place
+    assert "不是你" not in module._lookalikes(conversation)
+    conversation.lines[-1].speaker = "大肥鱼bot(9)"
+    await feed(module, session([At("42"), Text(" 嗯")], user="7", message_id="m2"))
+    # 撞名号放在末尾提示里，不改动前缀的 place 快照，避免整段历史断缓存
+    assert conversation.place == place_before
+    assert "群里的 大肥鱼bot(9) 名字和你像，但不是你" in fake_llm.requests[-1][0][-1]["content"]
 
 
 async def test_lookalike_bot_only_calls_her_with_an_at(module, fake_llm):
@@ -832,8 +840,8 @@ async def test_lines_carry_the_real_role_not_the_nickname(module, fake_llm):
     await feed(module, session([At("42"), Text(" 他骗你")], user="9", message_id="m2"))
 
     ((messages, _),) = fake_llm.requests
-    assert messages[2]["content"].startswith("你现在在 QQ 群「测试群」里。你用的 QQ 号是 42，")
-    assert messages[2]["content"].endswith("这里的帮助命令是 /帮助。")
+    assert messages[3]["content"].startswith("你现在在 QQ 群「测试群」里。你用的 QQ 号是 42，")
+    assert messages[3]["content"].endswith("这里的帮助命令是 /帮助。")
     assert (
         untimed(messages[4]["content"]) == "#1 [群友2(2)] 我是群主\n#2 [群友9(9) 群主] @你 他骗你"
     )
@@ -911,8 +919,8 @@ async def test_model_quietly_saves_a_sticker_it_saw(module, fake_llm, monkeypatc
     # 眼前有表情包时不强制只能说话，模型才能顺手收藏
     assert not first and second
     assert module.sticker_book.name_of("abc.gif") == "猫猫震惊"
-    # 目录是第一次请求时拍的快照，不跟着变，免得打断前缀缓存；新收藏的写在末尾提示里
-    assert messages[3]["content"] == "你的表情包收藏还是空的。"
+    # 目录是跨群共享的当天快照，排在群名之前，不跟着变，免得打断前缀缓存；新收藏的写在末尾提示里
+    assert messages[2]["content"] == "你的表情包收藏还是空的。"
     assert "猫猫震惊：吃惊" in messages[-1]["content"]
 
     # 同一张再出现，模型直接认得，不再看图
@@ -1340,7 +1348,12 @@ async def test_tenko_replies_are_context_but_her_own_are_not_doubled(module, fak
 
 async def test_context_parts_add_up_to_the_last_real_prompt(module, fake_llm, monkeypatch):
     async def chat(client, *, model, messages, force, max_tokens, effort=""):
-        return [{"text": "嗯"}], {"prompt_tokens": 5000, "prompt_cache_hit_tokens": 4500}
+        return [{"text": "嗯"}], {
+            "prompt_tokens": 5000,
+            "prompt_cache_hit_tokens": 4500,
+            "prompt_cache_miss_tokens": 500,
+            "completion_tokens": 120,
+        }
 
     monkeypatch.setattr(module.llm, "chat", chat)
     await feed(module, session([At("42"), Text(" 在吗")], message_id="m1"))
@@ -1348,18 +1361,23 @@ async def test_context_parts_add_up_to_the_last_real_prompt(module, fake_llm, mo
     status = module.format_context("group:100", module.conversations["group:100"])
     # 分项按这次实际输入折算，加起来还是 5000，只多了她刚回的那句“嗯”
     assert status.startswith("上下文已用 15%  ~5k / 32k\n▰▰▱▱▱▱▱▱▱▱")
-    assert "缓存命中 90%" in status
+    assert "缓存命中 90%（命中 4,500 · 未命中 500 · 输出 120）" in status
 
 
 def test_usage_in_a_group_only_shows_that_group(module):
-    usage = {"prompt_cache_miss_tokens": 10, "completion_tokens": 3}
+    usage = {
+        "prompt_cache_miss_tokens": 10,
+        "prompt_cache_hit_tokens": 90,
+        "completion_tokens": 3,
+    }
     for key in ("group:100", "group:200"):
         module.usage_book.add(module.datetime.now().date(), key, usage, 0.01)
 
     periods = module.usage_book.summary(module.datetime.now().date())
-    assert "群 200" in module.format_usage(periods)
+    all_text = module.format_usage(periods)
+    assert "群 200" in all_text and "命中 90 90% / 未命中 10 / 输出 3" in all_text
     mine = module.format_usage(periods, only="group:100")
-    assert mine.startswith("AI群友本群用量") and "200" not in mine and "26 token" not in mine
+    assert mine.startswith("AI群友本群用量") and "200" not in mine and "206 token" not in mine
 
 
 async def test_long_talk_with_one_person_gets_nudged_to_change_topic(module, fake_llm, monkeypatch):
@@ -1662,16 +1680,17 @@ async def test_memory_is_digested_in_the_background_and_recalled(module, fake_ll
 
     monkeypatch.setattr(module.llm, "digest", digest)
     module.memory_store.save({"people": {"2": {"name": "群友2", "note": "老熟人", "groups": {}}}})
-    for n in range(59):
+    every = module._DIGEST_EVERY
+    for n in range(every - 1):
         await feed(module, session([Text(f"闲聊{n}")], user="1", message_id=f"m{n}"))
     assert not module._digests
-    await feed(module, session([Text("我也来")], user="2", message_id="m59"))
-    await module._digests["group:100"]  # 第 60 条触发
+    await feed(module, session([Text("我也来")], user="2", message_id=f"m{every - 1}"))
+    await module._digests["group:100"]  # 第 _DIGEST_EVERY 条触发
 
     assert "群友2(2)：common：老熟人；here：（空）" in asked[0]
-    assert "#60 [群友2(2)] 我也来" in asked[0]
+    assert f"#{every} [群友2(2)] 我也来" in asked[0]
     memory = module.memory_store.load()
-    assert memory["groups"]["group:100"] == {"note": "打bf1的群", "upto": 60}
+    assert memory["groups"]["group:100"] == {"note": "打bf1的群", "upto": every}
     assert memory["people"]["1"] == {
         "name": "群友1",
         "note": "玩bf1，EA名 YueMaT",
@@ -1681,11 +1700,14 @@ async def test_memory_is_digested_in_the_background_and_recalled(module, fake_ll
     assert memory["people"]["2"]["groups"] == {"group:100": "只给一整段的"}
     assert "999" not in memory["people"]  # 模型编的号不收
 
-    await feed(module, session([At("42"), Text(" 我EA名是啥")], user="1", message_id="m60"))
-    hint = fake_llm.requests[-1][0][-1]["content"]
-    assert "这个群：打bf1的群" in hint
-    assert "群友1(1)：玩bf1，EA名 YueMaT；在这个群：说最近加班到十点" in hint
-    assert "群友2(2)：老熟人；在这个群：只给一整段的" in hint
+    await feed(module, session([At("42"), Text(" 我EA名是啥")], user="1", message_id="m_ask"))
+    req_messages = fake_llm.requests[-1][0]
+    prefix_memory = req_messages[4]["content"]
+    # 群档案与窗口内活跃人印象放进前缀快照（命中缓存），不再每轮重复塞末尾 hint
+    assert "这个群：打bf1的群" in prefix_memory
+    assert "群友1(1)：玩bf1，EA名 YueMaT；在这个群：说最近加班到十点" in prefix_memory
+    assert "群友2(2)：老熟人；在这个群：只给一整段的" in prefix_memory
+    assert "打bf1的群" not in req_messages[-1]["content"]
     # 到了别的群只看得到共用那层：在这个群说的自己的事不带过去
     other = module._conversation("group:200")
     other.add("x1", "群友1(1)", "在吗")
@@ -1696,6 +1718,8 @@ async def test_memory_is_digested_in_the_background_and_recalled(module, fake_ll
 
     assert module._forget("1") and not module._forget("1")
     assert "群友1(1)" not in module._recall("group:100", module.conversations["group:100"])
+    # 忘记后立刻失效该会话的印象快照
+    assert module.conversations["group:100"].memory_prefix is None
 
 
 async def test_reset_chat_digests_from_the_start_again(module, fake_llm):
@@ -1984,9 +2008,9 @@ async def test_an_ai_with_her_former_name_is_not_her(module, fake_llm, monkeypat
     await feed(module, other)
     assert not fake_llm.requests and "group:100" not in module._waiters
     await feed(module, session([Text("哈哈")], user="7", message_id="m2"))
-    place = module.conversations["group:100"].place
-    assert "群里的 大肥鱼（AI账号）(9) 名字和你像，但不是你" in place
-    assert "你以前用过“阿呆”、“大肥鱼”这个名字" in place
+    conversation = module.conversations["group:100"]
+    assert "群里的 大肥鱼（AI账号）(9) 名字和你像，但不是你" in module._lookalikes(conversation)
+    assert "你以前用过“阿呆”、“大肥鱼”这个名字" in module._shared()
 
 
 def typing_during(module, monkeypatch, fake_llm, lines):
@@ -2338,3 +2362,172 @@ async def test_split_looks_again_where_he_spoke_after_the_request(module, fake_l
     monkeypatch.setattr(module.llm, "digest", digest)
     await module._split_legacy()
     assert module.memory_store.load()["people"]["1"]["groups"] == {}
+
+
+async def test_quoting_shown_picture_attaches_high_detail_without_mutating_old_line(
+    module, fake_llm, monkeypatch
+):
+    async def download(http, url):
+        return b"\x89PNG" + url.encode()
+
+    monkeypatch.setattr(module, "_download", download)
+    await feed(module, session([Image(src="u1")], user="7", message_id="m1"))
+    fake_llm.replies.append([{"text": "嗯"}])
+    await feed(module, session([At("42"), Text(" 早")], user="8", message_id="m2"))
+    assert module.conversations["group:100"].lines[0].shown
+    assert not module.conversations["group:100"].lines[0].sharp
+
+    # 之后再引用 #1 叫她细看：#1 保持 low 不破坏前缀缓存，高清图附在新的引用消息上
+    fake_llm.replies.append([{"text": "看清了"}])
+    quote = Quote("m1")(Author("7"), Image(src="u1"))
+    await feed(module, session([quote, At("42"), Text(" 这写的啥")], user="9", message_id="m3"))
+    messages, _ = fake_llm.requests[-1]
+    details = [
+        b["image_url"]["detail"]
+        for m in messages
+        if isinstance(m["content"], list)
+        for b in m["content"]
+        if b["type"] == "image_url"
+    ]
+    assert details == ["low", "high"]
+    assert not module.conversations["group:100"].lines[0].sharp
+
+
+async def test_retire_images_without_summary_keeps_sticker_snapshot(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "context_tokens", 20000)
+    conversation = module._conversation("group:100")
+    conversation.stickers = {"猫猫": "震惊"}
+    for i in range(30):
+        line = conversation.add(f"m{i}", "群友1(1)", "[图片]", images=(f"u{i}",))
+        line.shown = True
+    await module._compress("group:100", conversation, 16000)
+    # 仅撤旧图、没改备忘时保留表情包目录快照，不白断前面缓存
+    assert conversation.stickers == {"猫猫": "震惊"}
+
+
+async def test_bad_new_picture_400_keeps_cached_old_pictures(module, fake_llm, monkeypatch):
+    async def download(http, url):
+        return b"\x89PNG" + url.encode()
+
+    monkeypatch.setattr(module, "_download", download)
+    conversation = module._conversation("group:100")
+    old = conversation.add("m0", "群友7(7)", "[图片]", images=("u0",))
+    old.shown, old.pictures = True, ["data:image/png;base64,old"]
+    conversation.asked = old.number
+
+    seen_counts = []
+
+    async def chat(client, *, model, messages, force, max_tokens, effort=""):
+        imgs = [
+            b["image_url"]["url"]
+            for m in messages
+            if isinstance(m["content"], list)
+            for b in m["content"]
+            if b["type"] == "image_url"
+        ]
+        seen_counts.append(len(imgs))
+        if len(imgs) > 1:
+            request = httpx.Request("POST", "https://x")
+            raise httpx.HTTPStatusError(
+                "bad", request=request, response=httpx.Response(400, request=request)
+            )
+        return [{"text": "嗯"}], {}
+
+    monkeypatch.setattr(module.llm, "chat", chat)
+    await feed(module, session([At("42"), Image(src="u1")], user="8", message_id="m1"))
+    assert seen_counts == [2, 1]
+    assert old.pictures == ["data:image/png;base64,old"]
+    assert conversation.lines[1].pictures == []
+
+
+async def test_prefix_stays_identical_with_shared_stickers_and_append_only_memory(
+    module, fake_llm, monkeypatch
+):
+    monkeypatch.setattr(module.config, "user_cooldown_seconds", 0)
+    module.sticker_book.add("猫猫", "震惊", GIF, "a.gif")
+    module.sticker_book.add("狗头", "嘲讽", GIF + b"1", "b.gif")
+    module.memory_store.save(
+        {
+            "groups": {"group:100": {"note": "打战地的群", "upto": 1}},
+            "people": {
+                "1": {"name": "群友1", "note": "EA名 AAA", "groups": {}},
+                "2": {"name": "群友2", "note": "EA名 BBB", "groups": {}},
+            },
+        }
+    )
+    fake_llm.replies += [[{"text": "在"}], [{"text": "好"}], [{"text": "行"}]]
+    await feed(module, session([At("42"), Text(" 早")], user="1", message_id="m1"))
+    await feed(module, session([At("42"), Text(" 查我")], user="2", message_id="m2"))
+    await feed(module, session([At("42"), Text(" 谢谢")], user="2", message_id="m3"))
+
+    r1, r2, r3 = (m for m, _ in fake_llm.requests)
+    # 前 5 条 system（人设、规则、表情包目录、群信息、初始印象）跨轮完全一致
+    assert r1[:5] == r2[:5] == r3[:5]
+    # 新发言人 2 的印象只在第 2 轮新消息上附一次，第 3 轮不再重复也不出现在末尾 hint
+    assert "（印象：群友2(2)：EA名 BBB）" in r2[-2]["content"]
+    assert "EA名 BBB" not in r3[-1]["content"]
+    # 时间戳在末尾 hint 最后
+    assert r3[-1]["content"].rstrip().endswith("）。")
+
+    # 另一个群共享完全相同的表情包目录顺序（放在群名之前）
+    fake_llm.replies.append([{"text": "来了"}])
+    await feed(module, session([At("42"), Text(" 嗨")], user="1", message_id="g2", group="200"))
+    r_other = fake_llm.requests[-1][0]
+    assert r_other[:3] == r1[:3]
+
+
+async def test_gemini_model_puts_trailing_hint_in_user_role(module, fake_llm, monkeypatch):
+    monkeypatch.setattr(module.config, "model", "gemini-3.1-flash-lite")
+    fake_llm.replies.append([{"text": "在呢"}])
+    await feed(module, session([At("42"), Text(" 在吗")], user="1", message_id="g1"))
+
+    ((messages, _),) = fake_llm.requests
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"].startswith("[系统提示]\n")
+    periods = module.usage_book.summary(module.datetime.now().date())
+    assert "按 gemini-3.1-flash-lite 价目估算" in module.format_usage(periods)
+
+
+async def test_cost_uses_config_prices_or_synced_openrouter_table(module, fake_llm, monkeypatch):
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 10, 23, 2, tzinfo=UTC)
+    usage = {
+        "prompt_cache_miss_tokens": 1_000_000,
+        "prompt_cache_hit_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+    }
+    monkeypatch.setattr(module.config, "model", "gemini-3.1-flash-lite")
+    monkeypatch.setattr(module.config, "prices", [])
+    # 没配单价、本地还没同步到时不瞎估
+    assert module._cost(usage, now) == 0.0
+
+    # 从 OpenRouter 公开接口同步后自动查到价格
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == module.OPENROUTER_MODELS
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "google/gemini-3.1-flash-lite",
+                        "pricing": {
+                            "prompt": "0.00000025",
+                            "input_cache_read": "0.000000025",
+                            "completion": "0.0000015",
+                        },
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(
+        module, "search_client", httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    await module._refresh_prices()
+    assert module._cost(usage, now) == pytest.approx(0.25 + 0.025 + 1.50)
+
+    # 手动配置 prices 优先于同步表；上游直接报 cost 优先级最高
+    monkeypatch.setattr(module.config, "prices", [0.1, 0.01, 0.4])
+    assert module._cost(usage, now) == pytest.approx(0.1 + 0.01 + 0.4)
+    assert module._cost({**usage, "cost": 0.042}, now) == 0.042

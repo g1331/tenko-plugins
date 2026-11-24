@@ -12,6 +12,7 @@ import ast
 import asyncio
 import base64
 import dataclasses
+import hashlib
 import json
 import random
 import re
@@ -50,8 +51,10 @@ from tenko_api.storage import Store
 from . import llm, reminders, shaping, trigger, websearch
 from .chat import (
     GLOBAL,
+    OPENROUTER_MODELS,
     Conversation,
     Line,
+    PriceBook,
     UsageBook,
     banned,
     build_messages,
@@ -60,6 +63,7 @@ from .chat import (
     estimate_cost,
     estimate_tokens,
     only_pictures,
+    parse_openrouter_prices,
     picture_url,
     slang,
     split,
@@ -157,6 +161,11 @@ class PersonaChatConfig(BasicConfModel):
     """每个群每天的 token 上限（未命中缓存的输入+输出）；0 不限。"""
     global_daily_tokens: int = 0
     """所有群和私聊合计每天的 token 上限，口径同上；0 不限。"""
+    prices: list[float] = model_field(
+        default_factory=list,
+        description="可选，手动指定模型单价 [未命中输入, 命中缓存, 输出]（每 1M token 美元）；"
+        "留空时优先用上游返回的费用，其次查每天自动同步的 OpenRouter 公开价目表。",
+    )
     banned_words: list[str] = model_field(
         default_factory=list,
         description="违禁词：群友的消息含这些词时她看不到也不接话，她要说的话含这些词时整次回复不发。"
@@ -168,7 +177,7 @@ class PersonaChatConfig(BasicConfModel):
 plugin.metadata(
     "AI群友",
     author=["13"],
-    version="0.1.52",
+    version="0.1.53",
     description="接入 DeepSeek，用人设口吻陪群友聊天，预置“大肥鱼”“小埋”。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/persona_chat",
@@ -181,6 +190,10 @@ declare(scope="group", controlled=True)
 
 config = plugin.get_config(PersonaChatConfig)
 usage_book = UsageBook(Store("usage", version=1))
+price_book = PriceBook(Store("prices", version=1))
+_price_task: asyncio.Task[None] | None = None
+_price_retry_at = 0.0
+_PRICE_RETRY_SECONDS = 3600
 # 别叫 stickers：热重载时导入子模块会把同名的包属性覆盖成 .stickers 模块。
 sticker_book = Stickers(
     Store("stickers", version=1), config.sticker_limit, Store("sticker_bans", version=1)
@@ -246,8 +259,11 @@ reminder_book = reminders.Reminders(Store("reminders", version=1))
 _reminding: set[int] = set()  # 正在到点开口的提醒，别被下一轮检查再拿一次
 _LATE_NOTE = 5  # 晚这么多分钟以上才在提示里说晚了
 _digests: dict[str, asyncio.Task[None]] = {}
-_DIGEST_EVERY = 60
+_DIGEST_EVERY = 180
 _DIGEST_LINES = 300  # 第一次整理时最多读最近这么多条，旧的靠备忘
+# 全局每日共享的表情包目录快照：(YYYY-MM-DD, {名字: 备注})；所有群与 pick_sticker 共用同一份顺序，
+# 当天内收藏增删写进末尾变化，不打断跨群共享的前缀缓存。
+_sticker_day: tuple[str, dict[str, str]] | None = None
 _PERSON_CHARS = 200  # 本群那层要求 80 字，超出太多就截断
 _COMMON_CHARS = 200  # 共用那层要求 40 字，模型常写长；截断只兜底，别把一句话截一半
 _SPLIT_BATCH = 10  # 旧档案每分钟拆这么多个
@@ -307,11 +323,59 @@ if not config.api_key:
 async def _dispose() -> None:
     calls = [c.task for c in _calls.values() if c.task is not None]
     splitting = [_splitting] if _splitting is not None else []
-    for task in [*_waiters.values(), *_digests.values(), *calls, *_firing, *splitting]:
+    pricing = [_price_task] if _price_task is not None else []
+    for task in [*_waiters.values(), *_digests.values(), *calls, *_firing, *splitting, *pricing]:
         task.cancel()
     _save()
     await client.aclose()
     await search_client.aclose()
+
+
+async def _refresh_prices() -> None:
+    """从 OpenRouter 公开接口拉一份模型单价表并存盘；失败静默退避一小时，不影响聊天。"""
+
+    global _price_retry_at
+    try:
+        response = await search_client.get(OPENROUTER_MODELS)
+        response.raise_for_status()
+        models = parse_openrouter_prices(response.json())
+        if models:
+            price_book.update(models)
+            logger.info("AI群友更新了 {} 个模型的公开价目表", len(models))
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+        _price_retry_at = time.monotonic() + _PRICE_RETRY_SECONDS
+        logger.debug("AI群友拉取公开价目表失败：{!r}", error)
+
+
+def _maybe_refresh_prices() -> None:
+    """价目表过期且不在沙盒时，在后台悄悄更新一次，不阻塞当前回复。"""
+
+    global _price_task
+    if in_sandbox() or time.monotonic() < _price_retry_at:
+        return
+    if _price_task is not None and not _price_task.done():
+        return
+    if not price_book.stale():
+        return
+    try:
+        _price_task = asyncio.create_task(_refresh_prices())
+    except RuntimeError:
+        pass
+
+
+def _cost(usage: dict, now: datetime) -> float:
+    """计费优先级：上游 cost → 配置 prices → deepseek-flash 默认价 → OpenRouter 价目表。"""
+
+    if isinstance(cost := usage.get("cost"), int | float) and not isinstance(cost, bool):
+        return float(cost)
+    if len(config.prices) == 3 and all(p >= 0 for p in config.prices):
+        return estimate_cost(usage, now, config.prices, peak_hours=False)
+    model = (config.model or "").strip().lower()
+    if not model or model == "deepseek-flash":
+        return estimate_cost(usage, now)
+    _maybe_refresh_prices()
+    found = price_book.lookup(model)
+    return estimate_cost(usage, now, found or (), peak_hours=False)
 
 
 collect_disposes(_dispose)
@@ -652,7 +716,8 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
     if _over_budget(key):
         return
     conversation = _conversation(key)
-    conversation.place = _place(session, conversation)
+    if not conversation.place:
+        conversation.place = _place(session, conversation)
     if in_sandbox():
         conversation = conversation.copy()
     elements = list(session.event.message.message)
@@ -697,7 +762,14 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
         if (quoted := re.match(r"回复#(\d+)", text)) and (
             old := conversation.by_number(int(quoted[1]))
         ):
-            old.sharp = True
+            if old.shown or old.number <= conversation.asked:
+                # 旧消息已经发给模型过：原地改清晰度或补图会从那条起打断前缀缓存，
+                # 改成把被引用那条的图以高清附在当前新消息里。
+                extra = tuple(old.pictures) if old.pictures else old.images
+                if extra:
+                    line.images = (*line.images, *extra)
+            else:
+                old.sharp = True
     _changed(key)
     if not private and not in_sandbox() and key not in _digests:
         upto = _upto(key, conversation)
@@ -792,12 +864,25 @@ async def on_message(session: Session[MessageCreatedEvent], is_reply_me: bool = 
             )
 
 
-def _place(session: Session, conversation: Conversation) -> str:
-    """在哪儿聊、用的是哪些号：放在规则后面，群名、账号或撞名的人变了才变，不影响前缀缓存。
+def _shared() -> str:
+    """所有群共用的说明（可用命令清单和曾用名）：放在群名和表情包之前，跨群共享前缀缓存。"""
 
-    号的昵称随时可能改，所以每次现取，不写进人设；她的名字始终是人设里的大肥鱼。
-    记录里有别人的昵称含唤醒词（比如另一个叫“大肥鱼bot”的号）时点名说明那不是她，
-    否则模型会把它的话和状态当成自己的。
+    parts = []
+    if commands := _commands():
+        listed = "\n".join(commands[name] for name in sorted(commands))
+        parts.append(f"你能用 run_command 自己用的功能：\n{listed}")
+    if former := "、".join(f"“{n}”" for n in _former_names()):
+        parts.append(
+            f"你以前用过{former}这个名字，档案和表情包备注里可能还这么叫你；"
+            "你现在是人设里的那个角色。"
+        )
+    return "\n".join(parts)
+
+
+def _place(session: Session, conversation: Conversation) -> str:
+    """在哪儿聊、用的是哪些号：按会话拍快照（压缩时刷新），账号按 QQ 号排序，避免抖动断缓存。
+
+    号的昵称随时可能改，所以每次建快照时现取，不写进人设；她的名字始终是人设里的角色。
     """
 
     guild = session.event.guild
@@ -807,30 +892,29 @@ def _place(session: Session, conversation: Conversation) -> str:
     else:
         platform = getattr(getattr(session.event, "login", None), "platform", None) or "qq-client"
         accounts = list(accounts_for_group(guild.id, platform=platform)) or [session.account]
+        accounts.sort(key=lambda a: str(a.self_id))
         place = f"你现在在 QQ 群「{guild.name or guild.id}」里。"
     names = "、".join(_account_label(a) for a in accounts)
     help_command = f"{_command_prefixes()[0]}帮助"
-    place = (
+    return (
         f"{place}你用的 QQ 号是 {names}，群友叫这些名字或 @ 它们都是在叫你；"
         "这些只是号的昵称，可能会改，你自己始终是人设里的那个角色。"
         f"这里的帮助命令是 {help_command}。"
     )
-    if commands := _commands():
-        place += "你能用 run_command 自己用的功能：\n" + "\n".join(commands.values()) + "\n"
-    lookalikes = dict.fromkeys(
+
+
+def _lookalikes(conversation: Conversation) -> str:
+    """记录里有别人的昵称含唤醒词（比如另一个叫“大肥鱼bot”的号）时在末尾点名说明，
+    不放进前缀，免得群里突然冒出撞名号或改昵称时把整段历史缓存打断。"""
+
+    speakers = dict.fromkeys(
         line.speaker for line in conversation.lines if _lookalike(line.speaker)
     )
-    for speaker in lookalikes:
-        place += (
-            f"群里的 {speaker} 名字和你像，但不是你，是别人的号：群友叫它的名字说的是它，"
-            "它说的话、它的梗和状态都和你无关，别当成你自己的。"
-        )
-    if former := "、".join(f"“{n}”" for n in _former_names()):
-        place += (
-            f"你以前用过{former}这个名字，档案和表情包备注里可能还这么叫你；"
-            "你现在是人设里的那个角色。"
-        )
-    return place
+    return "".join(
+        f"群里的 {speaker} 名字和你像，但不是你，是别人的号：群友叫它的名字说的是它，"
+        "它说的话、它的梗和状态都和你无关，别当成你自己的。"
+        for speaker in speakers
+    )
 
 
 def _commands() -> dict[str, str]:
@@ -1122,6 +1206,8 @@ async def _download(http: httpx.AsyncClient, url: str) -> bytes | None:
 
 
 async def _picture(http: httpx.AsyncClient, url: str) -> str | None:
+    if url.startswith(("data:", "frames:")):
+        return url
     data = await _download(http, url)
     # 解动图费 CPU，放到线程里，别卡住别的消息。
     return data and await asyncio.to_thread(picture_url, data)
@@ -1138,19 +1224,24 @@ async def _fetch_pictures(lines: list[Line]) -> None:
             line.pictures = [picture for picture in got if picture]
 
 
-async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: bool = False):
+async def _ask(
+    key: str, conversation: Conversation, hint: str, *, force: bool, retry: bool = False
+):
     budget = max(config.vision_images, 0)
     shown = conversation.with_images(budget)
+    fresh = [line for line in shown if not line.shown]
     await _fetch_pictures(shown)
     for line in shown:
         line.shown = True
     _, persona, _, life = _persona()
     house = rules(life)
+    shared = _shared()
+    memory = _prepare_memory(key, conversation)
 
     catalog = ""
     if config.sticker_limit:
         if conversation.stickers is None:
-            conversation.stickers = _shuffled(sticker_book.moods())
+            conversation.stickers = _daily_stickers(datetime.now().date().isoformat())
         catalog = sticker_book.catalog(conversation.stickers)
         # 目录在前缀里，收藏一变就从那里断缓存：变化先写在末尾提示里，压缩时才并进目录。
         hint = "\n".join(filter(None, [hint, sticker_book.changes(conversation.stickers)]))
@@ -1158,7 +1249,18 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
     force = force and (retry or not any(line.sticker and line.pictures for line in shown))
 
     async def ask(images: int):
-        messages = build_messages(persona, conversation, hint, images, catalog, house)
+        hint_role = "user" if llm.is_gemini(client, config.model) else "system"
+        messages = build_messages(
+            persona,
+            conversation,
+            hint,
+            images,
+            catalog,
+            house,
+            shared=shared,
+            memory=memory,
+            hint_role=hint_role,
+        )
         upto = conversation.asked = conversation.lines[-1].number if conversation.lines else 0
         calls, usage = await llm.chat(
             client,
@@ -1171,7 +1273,11 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
         conversation.passed = max(conversation.passed, upto)
         # 给“上下文”命令校准：粗估的各部分按这次实际输入等比例折算。
         pictures = sum(line.image_tokens for line in shown if line.pictures) if images else 0
-        rough = sum(context_parts(persona, _TOOLS, conversation, catalog, hint, house).values())
+        rough = sum(
+            context_parts(
+                persona, _TOOLS, conversation, catalog, hint, house, shared=shared, memory=memory
+            ).values()
+        )
         text = usage.get("prompt_tokens", 0) - pictures
         if text > 0 and rough > 0:
             conversation.scale = text / rough
@@ -1196,6 +1302,17 @@ async def _ask(conversation: Conversation, hint: str, *, force: bool, retry: boo
             return await ask(0)
         if error.response.status_code != 400 or not any(line.pictures for line in shown):
             raise error
+        # 先只丢本轮新加的图重试，保住前面已经审过、命中缓存的旧图；仍被拒再全丢。
+        if any(line.pictures for line in fresh) and len(fresh) < len(shown):
+            logger.warning("AI群友带图请求被拒，去掉本轮新图重试：{}", error.response.text[:200])
+            for line in fresh:
+                line.pictures = []
+            try:
+                return await ask(budget)
+            except httpx.HTTPStatusError as again:
+                if again.response.status_code != 400:
+                    raise again
+                error = again
         # 某张图格式或尺寸不被接受时整个请求都会被拒：丢掉这批图，只用文字再问一次。
         logger.warning("AI群友带图请求被拒，去掉图片重试：{}", error.response.text[:200])
         for line in shown:
@@ -1267,6 +1384,8 @@ async def respond(
             return
         if call is not None:
             session, target, mood, force = call.session, call.line, call.mood, call.force
+        if not conversation.place:
+            conversation.place = _place(session, conversation)
         person = target or answer
         if person is not None and person.number <= _considered.get((key, person.speaker), 0):
             return  # 上一轮重想时合进去回过了（私聊对方在她想的时候又发的几条）
@@ -1276,10 +1395,11 @@ async def respond(
         conversation.unseen = 0
         before = usage_book.row(datetime.now().date(), key)
         # 平时在回复成功后按实际输入量压缩；请求一直失败（比如图太多被 413 拒）就永远等不到，
-        # 上下文越攒越大。所以开口前也按估算看一眼，超了先压再问。
+        # 上下文越攒越大。条数快顶满 deque 时也主动压缩，避免左滑挤掉第 1 条导致整段缓存持续失效。
         estimate = int(sum(_context_estimate(conversation).values()))
-        if not in_sandbox() and estimate > config.context_tokens:
-            await _compress(key, conversation, estimate)
+        near_full = len(conversation.lines) >= conversation.size * 9 // 10
+        if not in_sandbox() and (estimate > config.context_tokens or near_full):
+            await _compress(key, conversation, max(estimate, config.context_tokens + 1))
         started = time.monotonic()
         while True:
             seen = conversation.lines[-1].number if conversation.lines else 0
@@ -1316,7 +1436,8 @@ async def respond(
         if target is None and sent and not follow:
             conversation.last_unprompted_at = time.monotonic()
         prompt_tokens = conversation.usage.get("prompt_tokens", 0)
-        if not in_sandbox() and prompt_tokens > config.context_tokens:
+        near_full = len(conversation.lines) >= conversation.size * 9 // 10
+        if not in_sandbox() and (prompt_tokens > config.context_tokens or near_full):
             await _compress(key, conversation, prompt_tokens)
         _log_spent(turn, mood, before, sent)
         _changed(key)
@@ -1475,10 +1596,10 @@ def _compose(turn: _Turn, conversation: Conversation, mood: str) -> bool:
     now = datetime.now()
     weekday = "一二三四五六日"[now.weekday()]
     turn.hint = (
-        f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
-        f"{_recall(key, conversation)}{'' if turn.reminder else _pending(key)}{hint}"
+        f"{'' if turn.reminder else _pending(key)}{_lookalikes(conversation)}{hint}"
         f"{repeat_hint(said, [*phrases, *RULE_LINES])}"
         f"{habit_hint(said, others)}{slang_hint(slang(conversation.lines))}{SHORT_HINT}"
+        f"现在是 {now:%Y-%m-%d %H:%M}（周{weekday}）。"
     )
     return True
 
@@ -1496,12 +1617,12 @@ async def _think(
     usages: list[dict] = []
 
     async def ask(hint: str, force: bool, retry: bool = False) -> list[dict]:
-        calls, usage = await _ask(conversation, hint, force=force, retry=retry)
+        calls, usage = await _ask(key, conversation, hint, force=force, retry=retry)
         usages.append(usage)
         turn.asks += 1
         if not in_sandbox():
             now = datetime.now()
-            usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+            usage_book.add(now.date(), key, usage, _cost(usage, now))
         return calls
 
     searching = (target is not None or turn.talking) and _search_left(key)
@@ -1919,22 +2040,25 @@ async def _add_sticker(
         for x in lines
     )
     now = datetime.now()
+    snapshot = _daily_stickers(now.date().isoformat())
+    changes = sticker_book.changes(snapshot)
     try:
         picks, usage = await llm.pick_sticker(
             client,
             model=config.model,
             prompt=PICK_STICKER_PROMPT,
-            # 模型偏爱靠前的：每天换个顺序，当天的前缀缓存照样命中。
-            catalog=sticker_book.catalog(_shuffled(sticker_book.moods(), now.date().isoformat())),
+            # 当天共用固定目录快照，增删放进 user 增量里，收藏变化不打断跨群前缀缓存。
+            catalog=sticker_book.catalog(snapshot),
             recent=recent,
             text=said,
             avoid=[n for n in sticker_book.index() if not _can_send(conversation, n, window)],
+            **({"changes": changes} if changes else {}),
         )
     except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
         logger.debug("AI群友挑表情包失败：{!r}", error)  # 挑不出来就只说话
         return
     if not in_sandbox():
-        usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+        usage_book.add(now.date(), key, usage, _cost(usage, now))
     fit = {
         name: score
         for name, score in picks
@@ -1950,11 +2074,26 @@ async def _add_sticker(
     calls[-1]["text"] += f"\n[表情:{random.choices(top, weights)[0]}]"
 
 
+def _daily_stickers(day: str) -> dict[str, str]:
+    """当天全站共享的表情包目录快照：跨群共享前缀缓存，不随当天增删反复重洗牌。"""
+
+    global _sticker_day
+    if _sticker_day is None or _sticker_day[0] != day:
+        _sticker_day = (day, _shuffled(sticker_book.moods(), day))
+    return dict(_sticker_day[1])
+
+
 def _shuffled(moods: dict[str, str], seed: str | None = None) -> dict[str, str]:
-    """打乱目录顺序：模型挑表情包偏爱列表前头的，按收藏先后排，后收的就总轮不上。"""
+    """打乱目录顺序：模型挑表情包偏爱列表前头的，按收藏先后排，后收的就总轮不上。
+
+    给了 ``seed`` 时按 ``hash(seed:名字)`` 排，顺序由名字本身决定，增删单张不会把前面全打乱。
+    """
 
     items = list(moods.items())
-    random.Random(seed).shuffle(items)
+    if seed is not None:
+        items.sort(key=lambda item: hashlib.sha256(f"{seed}:{item[0]}".encode()).digest())
+    else:
+        random.Random().shuffle(items)
     return dict(items)
 
 
@@ -2136,7 +2275,7 @@ async def _agreed(name: str, said: str, key: str) -> bool:
         return False
     if not in_sandbox():
         now = datetime.now()
-        usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+        usage_book.add(now.date(), key, usage, _cost(usage, now))
     return answer.startswith("是")
 
 
@@ -2231,12 +2370,11 @@ async def _compress(key: str, conversation: Conversation, prompt_tokens: int) ->
     """
 
     # 超阈值多半是看过的图撑的（实测 30k 里图占近 2 万，聊天原文才 3k）：先撤旧图，
-    # 撤完降到四分之三以下就不动聊天和备忘。撤图从那条起断缓存，和压缩一样是一次性的，
-    # 顺手换新表情包目录。
+    # 撤完降到四分之三以下就不动聊天、表情包目录和备忘，保住撤图点之前的前缀缓存。
     retired = conversation.retire_images(_KEEP_IMAGE_TOKENS)
-    conversation.stickers = None
     prompt_tokens -= retired
-    if prompt_tokens <= config.context_tokens * 3 // 4:
+    near_full = len(conversation.lines) >= conversation.size * 9 // 10
+    if not near_full and prompt_tokens <= config.context_tokens * 3 // 4:
         logger.info(
             "AI群友撤掉了 {} 约 {:,} token 的旧图，输入降到约 {:,} token，不用压缩聊天",
             key,
@@ -2249,7 +2387,8 @@ async def _compress(key: str, conversation: Conversation, prompt_tokens: int) ->
     # 闲聊丢点旧细节无妨，一次压到一半，留足余量，备忘就很久才改写一次。
     drop = prompt_tokens - config.context_tokens // 2
     total = sum(estimate_tokens(line.text) for line in conversation.lines)
-    old = conversation.older_than(total - drop)
+    keep = total - drop if drop > 0 else total / 2
+    old = conversation.older_than(keep)
     if not old:
         return
     try:
@@ -2263,11 +2402,16 @@ async def _compress(key: str, conversation: Conversation, prompt_tokens: int) ->
         logger.warning("AI群友压缩聊天记录失败：{!r}", error)
         return
     now = datetime.now()
-    usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+    usage_book.add(now.date(), key, usage, _cost(usage, now))
     if summary:
         before = conversation.summary
         images = sum(line.image_tokens for line in old if line.shown)
         conversation.forget(old[-1].number, summary)
+        # 备忘已经改写，整段前缀本来就要重算，顺手刷新表情包目录、群信息和印象快照。
+        conversation.stickers = None
+        conversation.place = ""
+        conversation.memory_prefix = None
+        conversation.remembered.clear()
         conversation.compressed_at = time.time()
         # 压完的输入只能估：下次请求的 usage 才是准数，“上下文”命令里看得到。
         after = (
@@ -2329,7 +2473,11 @@ async def _digest(key: str, conversation: Conversation, upto: int) -> None:
             *([f"不是你的号（名字像你或像你以前的名字，是别人的 AI）：{others}"] if others else []),
             f"群档案：{group or '（还没有）'}",
             "这些人现在的档案：\n" + ("\n".join(known) or "（都还没有）"),
-            *([f"更早的聊天备忘：\n{conversation.summary}"] if conversation.summary else []),
+            *(
+                [f"更早的聊天备忘：\n{conversation.summary}"]
+                if conversation.summary and upto == 0
+                else []
+            ),
             f"新的聊天记录：\n{record}",
         ]
         try:
@@ -2340,7 +2488,7 @@ async def _digest(key: str, conversation: Conversation, upto: int) -> None:
             logger.warning("AI群友整理 {} 的档案失败：{!r}", key, error)
             return
         now = datetime.now()
-        usage_book.add(now.date(), key, usage, estimate_cost(usage, now))
+        usage_book.add(now.date(), key, usage, _cost(usage, now))
         # 整理期间别的群可能也写了，重新读一次再改。
         memory = memory_store.load(default={})
         groups = memory.setdefault("groups", {})
@@ -2374,10 +2522,7 @@ async def _digest(key: str, conversation: Conversation, upto: int) -> None:
 
 
 def _recall(key: str, conversation: Conversation) -> str:
-    """末尾提示里的档案：本群的，和最近说过话的人的。
-
-    放在末尾而不是规则后面：说话的人一换就变，放前面整段聊天记录的缓存都会失效。
-    """
+    """本群的档案和最近说过话的人的档案；给 ``/AI群友 记忆`` 命令查看，也供初始快照使用。"""
 
     memory = memory_store.load(default={})
     people = memory.get("people", {})
@@ -2390,6 +2535,40 @@ def _recall(key: str, conversation: Conversation) -> str:
             present[qq] = f"{line.speaker}：{note}"
     group = memory.get("groups", {}).get(key, {}).get("note", "")
     return memory_hint(group, list(present.values()))
+
+
+def _prepare_memory(key: str, conversation: Conversation) -> str:
+    """给模型看的印象：首次请求（或压缩后）把本群档案和当前活跃发言人拍进前缀快照；
+    之后只在新发言人首次出现或档案更新时，把印象附在他刚进来还没发过模型的消息上
+    （只追加、只 miss 一次），避免每轮在末尾重复带 ~1.5k–2k token 造成高额未命中。"""
+
+    memory = memory_store.load(default={})
+    people = memory.get("people", {})
+    if conversation.memory_prefix is None:
+        present: dict[str, str] = {}
+        remembered: dict[str, str] = {}
+        for line in islice(reversed(conversation.lines), _MEMORY_LINES):
+            if line.speaker in (None, _TENKO):
+                continue
+            qq = _qq(line.speaker)[1]
+            if qq in people and qq not in present and (note := _impression(people[qq], key)):
+                present[qq] = f"{line.speaker}：{note}"
+                remembered[qq] = note
+        group = memory.get("groups", {}).get(key, {}).get("note", "")
+        conversation.remembered = remembered
+        conversation.memory_prefix = memory_hint(group, [present[qq] for qq in sorted(present)])
+        return conversation.memory_prefix
+    for line in conversation.lines:
+        if line.number <= conversation.asked or line.speaker in (None, _TENKO):
+            continue
+        qq = _qq(line.speaker)[1]
+        if qq not in people:
+            continue
+        note = _impression(people[qq], key)
+        if note and conversation.remembered.get(qq) != note and not line.memo:
+            line.memo = f"{line.speaker}：{note}"
+            conversation.remembered[qq] = note
+    return conversation.memory_prefix
 
 
 def _impression(person: dict, key: str) -> str:
@@ -2458,7 +2637,10 @@ async def _split_legacy(batch: int = _SPLIT_BATCH) -> None:
                 return
             now = datetime.now()
             usage_book.add(
-                now.date(), groups[0] if groups else GLOBAL, usage, estimate_cost(usage, now)
+                now.date(),
+                groups[0] if groups else GLOBAL,
+                usage,
+                _cost(usage, now),
             )
         common, here = result.get("common"), result.get("here")
         if legacy.strip() and not (isinstance(common, str) or isinstance(here, str)):
@@ -2654,6 +2836,13 @@ def _forget(qq: str) -> bool:
     if memory.get("people", {}).pop(qq, None) is None:
         return False
     memory_store.save(memory)
+    for conversation in conversations.values():
+        if qq in conversation.remembered:
+            conversation.remembered.pop(qq, None)
+            conversation.memory_prefix = None
+            for line in conversation.lines:
+                if line.memo and line.speaker and _qq(line.speaker)[1] == qq:
+                    line.memo = ""
     return True
 
 
@@ -2731,7 +2920,14 @@ def _context_estimate(conversation: Conversation) -> dict[str, float]:
     parts = {
         name: rough * conversation.scale
         for name, rough in context_parts(
-            persona, _TOOLS, conversation, catalog, conversation.hint, rules(life)
+            persona,
+            _TOOLS,
+            conversation,
+            catalog,
+            conversation.hint,
+            rules(life),
+            shared=_shared(),
+            memory=conversation.memory_prefix or "",
         ).items()
     }
     parts["看过的图"] = sum(line.image_tokens for line in conversation.lines if line.shown)
@@ -2757,6 +2953,7 @@ def format_context(key: str, conversation: Conversation) -> str:
     changed = config.sticker_limit and sticker_book.changes(stickers)
     notes = {
         "表情包目录": f"{len(stickers)} 张" + ("，有变化，下次压缩时并进来" if changed else ""),
+        "印象": f"{len(conversation.remembered)} 人" if conversation.remembered else None,
         "备忘": f"{len(conversation.summary)} 字{when}",
         "原文": f"{len(lines)} 条" + (f"，#{lines[0].number}–#{lines[-1].number}" if lines else ""),
         "看过的图": f"{images} 张" + (f"，其中 {sharp} 张高清" if sharp else ""),
@@ -2774,8 +2971,15 @@ def format_context(key: str, conversation: Conversation) -> str:
     usage = conversation.usage
     tail = []
     if usage:
-        prompt, hit = usage.get("prompt_tokens", 0), usage.get("prompt_cache_hit_tokens", 0)
-        tail.append(f"缓存命中 {hit * 100 // max(prompt, 1)}%")
+        prompt = usage.get("prompt_tokens", 0)
+        hit = usage.get("prompt_cache_hit_tokens", 0)
+        miss = usage.get("prompt_cache_miss_tokens", max(prompt - hit, 0))
+        completion = usage.get("completion_tokens", 0)
+        total_in = hit + miss or prompt
+        tail.append(
+            f"缓存命中 {hit * 100 // max(total_in, 1)}%"
+            f"（命中 {hit:,} · 未命中 {miss:,} · 输出 {completion:,}）"
+        )
     else:
         tail.append("重启后还没请求过，分项是粗估")
     if key.startswith("group:") and config.group_daily_tokens:
@@ -2806,10 +3010,9 @@ def _k(tokens: float) -> str:
 
 
 def format_usage(periods: list[tuple[str, dict[str, list[float]]]], only: str | None = None) -> str:
+    label = config.model or "deepseek-flash"
     lines = [
-        "AI群友本群用量（按 deepseek-flash 价目估算）"
-        if only
-        else "AI群友用量（按 deepseek-flash 价目估算）"
+        f"AI群友本群用量（按 {label} 价目估算）" if only else f"AI群友用量（按 {label} 价目估算）"
     ]
     for title, rows in periods:
         total = rows.get(only or GLOBAL)
@@ -2830,4 +3033,10 @@ def format_usage(periods: list[tuple[str, dict[str, list[float]]]], only: str | 
 
 def _amount(row: list[float]) -> str:
     miss, hit, out, cost = row
-    return f"{int(miss + hit + out):,} token（命中缓存 {int(hit):,}），约 ${cost:.4f}"
+    total_in = miss + hit
+    rate = int(hit * 100 // max(total_in, 1)) if total_in else 0
+    return (
+        f"{int(total_in + out):,} token"
+        f"（命中 {int(hit):,} {rate}% / 未命中 {int(miss):,} / 输出 {int(out):,}），"
+        f"约 ${cost:.4f}"
+    )

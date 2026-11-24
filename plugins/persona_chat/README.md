@@ -61,7 +61,7 @@
 | `/AI群友 重置 全部` | BOT 管理员 | 一次清空所有群和私聊的聊天记录（印象保留），换人设后常用 |
 | `/AI群友 用量` | BOT 管理员 | 今日和近 7 天的 token 用量与估算费用；群里只显示本群，各群明细只在私聊里列 |
 | `/AI群友 重置用量` | BOT 管理员 | 本群或本私聊今天的额度从现在重新算，用量统计不变 |
-| `/AI群友 上下文` | 群里需群管理员 | 下次请求占上下文的比例，人设规则、群信息、表情包目录、备忘、原文、末尾提示、看过的图各占多少 token（按上次实际输入折算的约数），缓存命中率、今日额度和精力；额度用完时会写明 |
+| `/AI群友 上下文` | 群里需群管理员 | 下次请求占上下文的比例，人设规则、表情包目录、群信息、印象、备忘、原文、末尾提示、看过的图各占多少 token（按上次实际输入折算的约数），上次请求的缓存命中率及命中/未命中/输出 token、今日额度和精力；额度用完时会写明 |
 | `/AI群友 记忆` | 群里需群管理员 | 她对本群和最近说过话的人的印象 |
 | `/AI群友 记忆 删 QQ号` | BOT 管理员 | 删掉她对某人的印象（所有群共用） |
 | `/AI群友 忘记我` | 所有人 | 删掉她对自己的印象 |
@@ -86,6 +86,17 @@
 ```toml
 [plugin_config.persona_chat]
 api_key = "sk-..."
+```
+
+如果使用 **Google AI Studio（Gemini API）**，直接走官方 OpenAI 兼容端点即可（插件会自动按 Gemini 格式发思考参数、把末尾提示放到 `user` 角色以保住隐式缓存，并按对应 Gemini 价目估算费用）：
+
+```toml
+[plugin_config.persona_chat]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key = "AIza..."
+model = "gemini-3.1-flash-lite" # 或 gemini-2.5-flash / gemini-3-flash-preview
+reasoning_effort = "low"        # 建议 minimal 或 low，控制思考输出消耗
+context_tokens = 64000
 ```
 
 在 WebUI 里保存时，除 `base_url`、`api_key`、`sticker_limit` 以外的项就地生效，不重载插件；改这三项会重载插件。直接改配置文件要重启才生效。
@@ -117,6 +128,7 @@ api_key = "sk-..."
 | `group_daily_tokens` | `200000` | 每个群每天的 token 上限（未命中缓存的输入加输出），用完后当天不再理这个群的消息、也不记录，`0` 不限 |
 | `banned_words` | `[]` | 违禁词，含这些词的群友消息她看不到，含这些词的回复不发；不分简繁、全半角和大小写，忽略空格和标点，拼音 8 个字母以上的还按读音比 |
 | `global_daily_tokens` | `0` | 全部会话合计每天的 token 上限，`0` 不限 |
+| `prices` | `[]` | 可选，手动指定模型单价 `[未命中输入, 命中缓存, 输出]`（美元 / 1M token）；留空时优先用上游返回的 `cost`，其次查每天从 OpenRouter 公开接口自动同步的价目表 |
 
 搜索服务：
 

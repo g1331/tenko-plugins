@@ -41,6 +41,7 @@ class Line:
     shown: bool = False  # 图已经给模型看过：之后一直带着，不存盘
     sharp: bool = False  # 叫她来看的图用高清：低清读不出密密麻麻的小字，会照样编个数出来
     talking: bool = False  # 发言人刚才正在跟她聊、这条没 @ 也没引用别人：多半在接着跟她说
+    memo: str = ""  # 发言人本窗口首次出现或印象更新时附一次，只追加不改动，避免每轮在末尾重复未命中
 
     @property
     def image_tokens(self) -> int:
@@ -63,9 +64,11 @@ class Conversation:
     较早的部分由 ``compress`` 压成 ``summary``。``size`` 只是防止一直没有请求时无限增长的保险。
     """
 
-    size: int = 1000
+    size: int = 4000
     summary: str = ""
-    place: str = ""  # 在哪儿聊，例如“你现在在 QQ 群「车万」里。”
+    place: str = ""  # 在哪儿聊，例如“你现在在 QQ 群「车万」里。”（会话快照，压缩时刷新）
+    memory_prefix: str | None = None  # 本群档案与窗口初始活跃发言人印象的快照，压缩时刷新
+    remembered: dict[str, str] = field(default_factory=dict)  # 已写进前缀或记录的 {QQ号: 印象}
     lines: deque[Line] = field(init=False)
     next_number: int = 1
     unseen: int = 0  # 上次请求之后新进来的群友消息数
@@ -169,9 +172,11 @@ class Conversation:
         return None
 
     def with_images(self, budget: int) -> list[Line]:
-        """要给模型看图的消息：看过的一直带着，再加上最近还没看过的，新图总数不超过 ``budget``。
+        """要给模型看图的消息：看过的一直带着，再加上本次还没发过模型的新图，
+        新图总数不超过 ``budget``。
 
         看过的图要是因为来了新图又变回“[图片]”，从那条起的前缀缓存就全断了；
+        反之，之前超预算跳过、已经以纯文字发过的旧消息也不能在后续轮次补插图片，否则同样从那条起断缓存。
         它们随旧记录压进备忘时才离开。``budget`` 为 0 时一张都不带。
         """
 
@@ -181,7 +186,7 @@ class Conversation:
         for line in reversed(self.lines):
             if line.shown:
                 chosen.append(line)
-            elif line.images and len(line.images) <= budget:
+            elif line.images and line.number > self.asked and len(line.images) <= budget:
                 chosen.append(line)
                 budget -= len(line.images)
         return chosen
@@ -306,7 +311,11 @@ class Conversation:
             next_number=self.next_number,
             summary=self.summary,
             place=self.place,
+            memory_prefix=self.memory_prefix,
+            remembered=dict(self.remembered),
             passed=self.passed,
+            asked=self.asked,
+            stickers=dict(self.stickers) if self.stickers is not None else None,
         )
         clone.lines.extend(self.lines)
         return clone
@@ -319,12 +328,15 @@ def build_messages(
     images: int = 0,
     stickers: str = "",
     rules: str = RULES,
+    shared: str = "",
+    memory: str = "",
+    hint_role: str = "system",
 ) -> list[dict[str, Any]]:
-    """固定的两段 system 在前（命中前缀缓存），连续的群友消息合成一条 user。
+    """按变动频率从低到高排列 system，最大化前缀缓存与跨群共享：
+    人设 → 规则 → 全局命令/曾用名 → 全局表情包目录快照 → 本群信息/印象快照 → 备忘 →
+    只追加对话 → 末尾提示。
 
-    ``stickers`` 是表情包收藏目录，只在收藏增删时变，放在群名后面。
-
-    看过的图和最近 ``images`` 张新图紧跟在所属消息后面，以低清晰度发给模型看。
+    看过的图和本次最近 ``images`` 张新图紧跟在所属消息后面，以低清晰度发给模型看。
     """
 
     shown = {line.number for line in conversation.with_images(images)}
@@ -333,10 +345,14 @@ def build_messages(
         {"role": "system", "content": persona},
         {"role": "system", "content": rules},
     ]
-    if conversation.place:
-        messages.append({"role": "system", "content": conversation.place})
+    if shared:
+        messages.append({"role": "system", "content": shared})
     if stickers:
         messages.append({"role": "system", "content": stickers})
+    if conversation.place:
+        messages.append({"role": "system", "content": conversation.place})
+    if memory:
+        messages.append({"role": "system", "content": memory})
     if conversation.summary:
         memo = f"更早的聊天备忘（这些消息已经没有编号，不能 reply_to）：\n{conversation.summary}"
         messages.append({"role": "system", "content": memo})
@@ -356,6 +372,8 @@ def build_messages(
         # 聊开了的人接着说时很少再 @，标一句是事实（他刚才在跟她聊），这句接没接她让她自己看。
         mark = "（刚才在跟你聊）" if line.talking else ""
         text = f"#{line.number} [{line.who}]{mark} {line.text}"
+        if line.memo:
+            text = f"（印象：{line.memo}）\n{text}"
         if gap >= _TIME_GAP:
             text = f"—— {datetime.fromtimestamp(line.at):%m-%d %H:%M} ——\n{text}"
         if blocks and blocks[-1]["type"] == "text":
@@ -379,7 +397,10 @@ def build_messages(
         content = message["content"]
         if isinstance(content, list) and len(content) == 1 and content[0]["type"] == "text":
             message["content"] = content[0]["text"]
-    messages.append({"role": "system", "content": hint})
+    # Gemini 会把所有 role=system 抽到 systemInstruction 顶部合并，末尾动态提示必须用 user，
+    # 否则整段历史缓存都会失效。
+    hint_content = f"[系统提示]\n{hint}" if hint_role == "user" else hint
+    messages.append({"role": hint_role, "content": hint_content})
     return messages
 
 
@@ -390,6 +411,8 @@ def context_parts(
     stickers: str,
     hint: str,
     rules: str = RULES,
+    shared: str = "",
+    memory: str = "",
 ) -> dict[str, float]:
     """一次请求各部分的粗估 token（不含图），“上下文”命令按实际输入折算成准数。"""
 
@@ -398,13 +421,18 @@ def context_parts(
 
     talk = sum(
         rough(m["content"])
-        for m in build_messages(persona, conversation, hint, 0, stickers)
+        for m in build_messages(persona, conversation, hint, 0, stickers, rules, shared, memory)[
+            :-1
+        ]
         if m["role"] != "system"
     )
     return {
-        "人设、规则和工具": rough(persona) + rough(rules) + rough(tools),
-        "群信息": rough(conversation.place),
+        "人设、规则和工具": (
+            rough(persona) + rough(rules) + rough(tools) + (rough(shared) if shared else 0.0)
+        ),
         "表情包目录": rough(stickers),
+        "群信息": rough(conversation.place),
+        "印象": rough(memory) if memory else 0.0,
         "备忘": rough(conversation.summary),
         "原文": talk,
         "末尾提示": rough(hint),
@@ -633,25 +661,102 @@ def _spell(text: str) -> str:
 
 # deepseek-flash 每 1M token 的闲时美元价：缓存未命中输入、命中输入、输出。
 _PRICES = (0.15, 0.003, 0.6)
+OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models"
+_PRICE_TTL = 86400  # 公开价目表每天最多拉取一次
 
 
-def estimate_cost(usage: dict[str, Any], now: datetime) -> float:
-    """上游报了实际扣费（OpenRouter 的 ``cost``）就用它；否则按 deepseek-flash 官方价目估算，
-    工作日 UTC 01-04、06-10 点为高峰，价格翻倍。
+def parse_openrouter_prices(payload: dict[str, Any]) -> dict[str, list[float]]:
+    """把 OpenRouter ``/api/v1/models`` 响应转成 ``{模型名: [未命中, 命中, 输出]}``（美元 / 1M）。
 
-    shortcut: 不认中国法定节假日（官方按闲时计价），节假日的估算会偏高。
+    同时索引去掉厂商前缀的裸名（如 ``gemini-3-flash-preview``），跳过 ``:batch`` / ``:free``
+    这类后缀变体，避免覆盖标准价。
+    """
+
+    prices: dict[str, list[float]] = {}
+    for item in payload.get("data") or ():
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip().lower()
+        pricing = item.get("pricing")
+        if not mid or not isinstance(pricing, dict):
+            continue
+        try:
+            prompt = float(pricing["prompt"])
+            completion = float(pricing["completion"])
+            cache = float(pricing.get("input_cache_read", prompt))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if prompt < 0 or completion < 0 or cache < 0:
+            continue
+        row = [round(prompt * 1e6, 6), round(cache * 1e6, 6), round(completion * 1e6, 6)]
+        prices[mid] = row
+        if "/" in mid and ":" not in mid:
+            prices.setdefault(mid.partition("/")[2], row)
+    return prices
+
+
+class PriceBook:
+    """本地缓存的公开模型价目表：``{"fetched": 时间戳, "models": {名: [未命中, 命中, 输出]}}``。"""
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    def lookup(self, model: str) -> tuple[float, float, float] | None:
+        key = model.strip().lower()
+        if not key:
+            return None
+        models = self.store.load(default={}).get("models") or {}
+        row = models.get(key)
+        if row is None and "/" in key:
+            row = models.get(key.partition("/")[2])
+        if isinstance(row, list) and len(row) == 3:
+            return (float(row[0]), float(row[1]), float(row[2]))
+        return None
+
+    def stale(self, now: float | None = None) -> bool:
+        data = self.store.load(default={})
+        fetched = data.get("fetched", 0.0)
+        models = data.get("models") or {}
+        now = time.time() if now is None else now
+        return not models or now - fetched >= _PRICE_TTL
+
+    def update(self, models: dict[str, list[float]], now: float | None = None) -> None:
+        if not models:
+            return
+        self.store.save({"fetched": time.time() if now is None else now, "models": models})
+
+
+def estimate_cost(
+    usage: dict[str, Any],
+    now: datetime,
+    prices: tuple[float, float, float] | list[float] | None = None,
+    *,
+    peak_hours: bool | None = None,
+) -> float:
+    """上游报了实际扣费（OpenRouter 的 ``cost``）就用它；否则按 ``prices``（每 1M token 美元：
+    未命中输入、命中输入、输出）估算。``prices`` 为 ``None`` 时按默认 ``deepseek-flash`` 官方价，
+    工作日 UTC 01-04、06-10 点为高峰、价格翻倍（shortcut: 不认中国法定节假日，估算会偏高）；
+    ``prices`` 为空序列时返回 0。
     """
 
     if isinstance(cost := usage.get("cost"), int | float) and not isinstance(cost, bool):
         return float(cost)
+    if prices is None:
+        rates: tuple[float, float, float] = _PRICES
+        has_peak = True if peak_hours is None else peak_hours
+    elif len(prices) == 3:
+        rates = (float(prices[0]), float(prices[1]), float(prices[2]))
+        has_peak = False if peak_hours is None else peak_hours
+    else:
+        return 0.0
     now = now.astimezone(UTC)
-    peak = now.weekday() < 5 and (1 <= now.hour < 4 or 6 <= now.hour < 10)
+    peak = has_peak and now.weekday() < 5 and (1 <= now.hour < 4 or 6 <= now.hour < 10)
     tokens = (
         usage.get("prompt_cache_miss_tokens", 0),
         usage.get("prompt_cache_hit_tokens", 0),
         usage.get("completion_tokens", 0),
     )
-    cost = sum(count * price for count, price in zip(tokens, _PRICES, strict=True)) / 1e6
+    cost = sum(count * price for count, price in zip(tokens, rates, strict=True)) / 1e6
     return cost * 2 if peak else cost
 
 
