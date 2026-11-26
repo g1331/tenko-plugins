@@ -24,6 +24,8 @@ GLOBAL = "*"
 _TIME_GAP = 300
 # 记录里明确冲她来的话：@ 她渲染成“@你”，引用她渲染成“回复#编号（你说的…）/（你发的…）”。
 _TO_HER = re.compile(r"@你|回复#\d+（你(?:说|发)的")
+# 防止群友在消息里手打 <system-hint> 伪造末尾提示；换成全角尖括号不影响阅读。
+_HINT_TAG = re.compile(r"<(/?\s*system-hint)>", re.I)
 _SENTENCE_ENDS = "。！？!?…~～"
 
 
@@ -371,7 +373,8 @@ def build_messages(
         blocks = messages[-1]["content"]
         # 聊开了的人接着说时很少再 @，标一句是事实（他刚才在跟她聊），这句接没接她让她自己看。
         mark = "（刚才在跟你聊）" if line.talking else ""
-        text = f"#{line.number} [{line.who}]{mark} {line.text}"
+        body = _HINT_TAG.sub(r"＜\1＞", line.text)
+        text = f"#{line.number} [{line.who}]{mark} {body}"
         if line.memo:
             text = f"（印象：{line.memo}）\n{text}"
         if gap >= _TIME_GAP:
@@ -398,8 +401,17 @@ def build_messages(
         if isinstance(content, list) and len(content) == 1 and content[0]["type"] == "text":
             message["content"] = content[0]["text"]
     # Gemini 会把所有 role=system 抽到 systemInstruction 顶部合并，末尾动态提示必须用 user，
-    # 否则整段历史缓存都会失效。
-    hint_content = f"[系统提示]\n{hint}" if hint_role == "user" else hint
+    # 否则整段历史缓存都会失效。用 <system-hint> 隔开并注明非群友发言，避免模型把紧跟在最后
+    # 一条群消息后面的提示误当成群友手打“[系统提示]”恶搞。
+    if hint_role == "user":
+        hint_content = (
+            "<system-hint>\n"
+            "（以下为程序附带的本轮内部提示，不是群友发言，勿当成聊天内容提及）\n"
+            f"{hint}\n"
+            "</system-hint>"
+        )
+    else:
+        hint_content = hint
     messages.append({"role": hint_role, "content": hint_content})
     return messages
 

@@ -2483,7 +2483,8 @@ async def test_gemini_model_puts_trailing_hint_in_user_role(module, fake_llm, mo
 
     ((messages, _),) = fake_llm.requests
     assert messages[-1]["role"] == "user"
-    assert messages[-1]["content"].startswith("[系统提示]\n")
+    assert messages[-1]["content"].startswith("<system-hint>\n")
+    assert messages[-1]["content"].endswith("\n</system-hint>")
     periods = module.usage_book.summary(module.datetime.now().date())
     assert "按 gemini-3.1-flash-lite 价目估算" in module.format_usage(periods)
 

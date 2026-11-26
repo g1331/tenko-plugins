@@ -177,7 +177,7 @@ class PersonaChatConfig(BasicConfModel):
 plugin.metadata(
     "AI群友",
     author=["13"],
-    version="0.1.54",
+    version="0.1.55",
     description="接入 DeepSeek，用人设口吻陪群友聊天，预置“大肥鱼”“小埋”。",
     urls={
         "homepage": "https://github.com/g1331/tenko-plugins/tree/main/plugins/persona_chat",
@@ -312,7 +312,7 @@ _TOOLS = json.dumps(llm.TOOLS, ensure_ascii=False)
 client = httpx.AsyncClient(
     base_url=config.base_url,
     headers={"Authorization": f"Bearer {config.api_key}"},
-    timeout=30,
+    timeout=httpx.Timeout(60.0, connect=10.0),
 )
 # 搜索的地址和密钥每次调用时才读，换搜索服务不用重载插件。
 search_client = httpx.AsyncClient(timeout=20, follow_redirects=True)
